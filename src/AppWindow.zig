@@ -5417,19 +5417,26 @@ fn onWin32Resize(width: i32, height: i32) void {
     if (width <= 0 or height <= 0) return;
     const allocator = g_allocator orelse return;
 
-    // Use same padding as computeSplitLayout to avoid size mismatch on new tab creation.
-    // Left/top/bottom = DEFAULT_PADDING, right = DEFAULT_PADDING + SCROLLBAR_WIDTH
+    // Match exactly what computeSplitLayout → setScreenSize computes for a
+    // root (full-window) surface, so term_cols/term_rows stay in sync and
+    // new tabs don't see a spurious resize on first render.
+    //
+    // Width: render-loop subtracts 2*render_padding, then edge extensions add
+    //        it back for the root surface, so only explicit L+R matter.
+    // Height: render-loop subtracts (render_padding+TB) top and render_padding
+    //         bottom, then setScreenSize subtracts explicit T+B on top of that.
     const padding_left: f32 = @floatFromInt(DEFAULT_PADDING);
     const padding_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
     const padding_top: f32 = @floatFromInt(DEFAULT_PADDING);
     const padding_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
+    const render_padding: f32 = 10;
     const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const content_w = @as(f32, @floatFromInt(width)) - padding_left - padding_right;
-    const content_h = @as(f32, @floatFromInt(height)) - padding_top - (padding_bottom + tb);
-    if (content_w <= 0 or content_h <= 0) return;
+    const avail_w = @as(f32, @floatFromInt(width)) - padding_left - padding_right;
+    const avail_h = @as(f32, @floatFromInt(height)) - (render_padding * 2 + tb) - padding_top - padding_bottom;
+    if (avail_w <= 0 or avail_h <= 0) return;
 
-    const new_cols: u16 = @intFromFloat(@max(1, content_w / cell_width));
-    const new_rows: u16 = @intFromFloat(@max(1, content_h / cell_height));
+    const new_cols: u16 = @intFromFloat(@max(1, avail_w / cell_width));
+    const new_rows: u16 = @intFromFloat(@max(1, avail_h / cell_height));
 
     // Resize terminal + PTY if grid dimensions changed
     if (new_cols != term_cols or new_rows != term_rows) {
@@ -5755,25 +5762,21 @@ const win32_input = struct {
 
         const width = win.width;
         const height = win.height;
-        // Calculate final grid size matching what setScreenSize will compute.
-        // The render loop subtracts padding once to get content area, then
-        // setScreenSize subtracts explicit_padding again. So we need to account
-        // for BOTH subtractions here.
+        // Match exactly what computeSplitLayout → setScreenSize computes for a
+        // root (full-window) surface.
         //
-        // Render loop: content = window - 2*padding - titlebar (symmetric padding)
-        // setScreenSize: avail = content - explicit_padding (L=10, R=22, T=10, B=10)
-        //
-        // Total subtracted from width: 2*padding + L + R = 20 + 10 + 22 = 52
-        // Total subtracted from height: 2*padding + titlebar + T + B = 20 + 34 + 10 + 10 = 74
-        const render_padding: f32 = 10; // symmetric padding used by render loop
+        // Width: render-loop subtracts 2*render_padding, but edge extensions
+        //        add it back for the root surface → only explicit L+R matter.
+        // Height: render-loop subtracts (render_padding+TB) top + render_padding
+        //         bottom, then setScreenSize subtracts explicit T+B.
+        const render_padding: f32 = 10;
         const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
         const explicit_left: f32 = @floatFromInt(DEFAULT_PADDING);
         const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
         const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
         const explicit_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
-        
-        // Total padding to subtract
-        const total_width_padding = render_padding * 2 + explicit_left + explicit_right;
+
+        const total_width_padding = explicit_left + explicit_right;
         const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
         
         const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
