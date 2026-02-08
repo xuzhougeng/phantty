@@ -984,7 +984,6 @@ fn switchTab(idx: usize) void {
         g_active_tab = idx;
         // Clear bell indicator when switching to this tab (like Ghostty)
         if (g_tabs[idx]) |tab| {
-            // Clear bell on all surfaces in the tab's split tree
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 entry.surface.bell_indicator = false;
@@ -1099,12 +1098,6 @@ fn splitFocused(direction: SplitTree.Split.Direction) void {
 
     // Clear resize state to ensure cursor shows and layout is fresh
     g_resize_active = false;
-
-    // Scroll new surface to bottom to ensure prompt is visible
-    new_surface.terminal.scrollViewport(.{ .bottom = {} }) catch {};
-
-    // Mark the new surface's render state as dirty to ensure we pick up initial content
-    new_surface.dirty.store(true, .release);
 
     // Trigger resize for all surfaces in the tree to recalculate dimensions
     g_force_rebuild = true;

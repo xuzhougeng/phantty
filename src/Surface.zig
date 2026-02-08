@@ -409,12 +409,16 @@ pub fn setScreenSize(
 
     // Resize terminal if dimensions changed
     if (self.terminal.cols != new_cols or self.terminal.rows != new_rows) {
+        // Resize PTY first (like Ghostty), then terminal state.
+        // This ensures the shell receives SIGWINCH before we reflow,
+        // which helps keep the viewport and cursor in sync.
+        self.pty.resize(new_cols, new_rows);
+        
         self.render_state.mutex.lock();
         defer self.render_state.mutex.unlock();
 
         self.terminal.resize(allocator, new_cols, new_rows) catch {};
         self.terminal.scrollViewport(.{ .bottom = {} }) catch {};
-        self.pty.resize(new_cols, new_rows);
         return true;
     }
 
