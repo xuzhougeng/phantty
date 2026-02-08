@@ -391,8 +391,16 @@ pub extern "user32" fn IsZoomed(hWnd: HWND) callconv(.winapi) BOOL;
 // Screen-to-client coordinate conversion
 pub extern "user32" fn ScreenToClient(hWnd: HWND, lpPoint: *POINT) callconv(.winapi) BOOL;
 
-// IDC_ARROW = MAKEINTRESOURCE(32512)
-const IDC_ARROW: usize = 32512;
+// Cursor management
+pub extern "user32" fn SetCursor(hCursor: ?HCURSOR) callconv(.winapi) ?HCURSOR;
+pub fn LoadCursor(hInstance: ?HINSTANCE, lpCursorName: usize) ?HCURSOR {
+    return LoadCursorW(hInstance, lpCursorName);
+}
+
+// IDC_* cursor resources (MAKEINTRESOURCE values)
+pub const IDC_ARROW: usize = 32512;
+pub const IDC_SIZEWE: usize = 32644; // Horizontal resize (left-right)
+pub const IDC_SIZENS: usize = 32645; // Vertical resize (up-down)
 
 // DWM attributes
 const DWMWA_USE_IMMERSIVE_DARK_MODE: DWORD = 20;

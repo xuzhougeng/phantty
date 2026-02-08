@@ -147,6 +147,11 @@ bell_indicator_time: i64 = 0,
 scrollbar_opacity: f32 = 0,
 scrollbar_show_time: i64 = 0,
 
+// Per-surface resize overlay state (for divider dragging)
+resize_overlay_active: bool = false, // Whether to show resize overlay on this surface
+resize_overlay_last_cols: u16 = 0, // Last known cols (to detect changes)
+resize_overlay_last_rows: u16 = 0, // Last known rows (to detect changes)
+
 // ============================================================================
 // Reference counting (for split tree mutations)
 // ============================================================================

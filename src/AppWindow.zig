@@ -56,9 +56,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     // Split config
     g_unfocused_split_opacity = app.unfocused_split_opacity;
     g_focus_follows_mouse = app.focus_follows_mouse;
-    if (app.split_divider_color) |color| {
-        g_split_divider_color = color;
-    }
+    g_split_divider_color = app.split_divider_color;
 
     // Apply window size from config
     term_cols = app.initial_cols;
@@ -309,6 +307,17 @@ threadlocal var g_scrollbar_dragging: bool = false; // Currently dragging the th
 threadlocal var g_scrollbar_drag_offset: f32 = 0; // Offset within thumb where drag started
 
 // ============================================================================
+// Split divider dragging — resize splits by dragging the divider
+// ============================================================================
+
+const SPLIT_DIVIDER_HIT_WIDTH: f32 = 8; // Larger hit area for easier grabbing
+
+threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
+threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
+threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
+threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
+
+// ============================================================================
 // Resize overlay — shows terminal size during resize (like Ghostty)
 // ============================================================================
 
@@ -330,6 +339,9 @@ threadlocal var g_resize_overlay_opacity: f32 = 0; // For fade out animation
 // Resize active state (for cursor hiding) - separate from overlay visibility
 const RESIZE_ACTIVE_TIMEOUT_MS: i64 = 50; // Consider resize "done" after this many ms of no changes
 threadlocal var g_resize_active: bool = false; // True while actively resizing
+
+// Suppress resize overlay briefly after tab switch/creation to avoid false triggers
+threadlocal var g_resize_overlay_suppress_until: i64 = 0;
 
 // ============================================================================
 // Tab rename — inline editing state
@@ -619,6 +631,75 @@ fn surfaceAtPoint(x: i32, y: i32) ?*Surface {
     return null;
 }
 
+/// Hit test result for split dividers
+const DividerHit = struct {
+    handle: SplitTree.Node.Handle,
+    layout: SplitTree.Split.Layout,
+};
+
+/// Check if a point is over a split divider.
+/// Returns the split node handle and layout if found, null otherwise.
+fn hitTestDivider(x: i32, y: i32) ?DividerHit {
+    const tab = activeTab() orelse return null;
+    if (tab.tree.isEmpty() or !tab.tree.isSplit()) return null;
+
+    const allocator = g_allocator orelse return null;
+    var spatial = tab.tree.spatial(allocator) catch return null;
+    defer spatial.deinit(allocator);
+
+    // Get content area dimensions
+    const win = g_window orelse return null;
+    const fb = win.getFramebufferSize();
+    const content_x: f32 = @floatFromInt(DEFAULT_PADDING);
+    const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * DEFAULT_PADDING)));
+    const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(DEFAULT_PADDING)));
+
+    const xf: f32 = @floatFromInt(x);
+    const yf: f32 = @floatFromInt(y);
+    const half_hit = SPLIT_DIVIDER_HIT_WIDTH / 2;
+
+    // Check each split node for divider hit
+    for (tab.tree.nodes, 0..) |node, i| {
+        switch (node) {
+            .split => |s| {
+                const handle: SplitTree.Node.Handle = @enumFromInt(i);
+                const slot = spatial.slots[i];
+
+                // Convert normalized coords to pixels
+                const slot_x = content_x + @as(f32, @floatCast(slot.x)) * content_w;
+                const slot_y = content_y + @as(f32, @floatCast(slot.y)) * content_h;
+                const slot_w = @as(f32, @floatCast(slot.width)) * content_w;
+                const slot_h = @as(f32, @floatCast(slot.height)) * content_h;
+
+                switch (s.layout) {
+                    .horizontal => {
+                        // Vertical divider line at ratio position
+                        const div_x = slot_x + slot_w * @as(f32, @floatCast(s.ratio));
+                        if (xf >= div_x - half_hit and xf <= div_x + half_hit and
+                            yf >= slot_y and yf <= slot_y + slot_h)
+                        {
+                            return .{ .handle = handle, .layout = .horizontal };
+                        }
+                    },
+                    .vertical => {
+                        // Horizontal divider line at ratio position
+                        const div_y = slot_y + slot_h * @as(f32, @floatCast(s.ratio));
+                        if (yf >= div_y - half_hit and yf <= div_y + half_hit and
+                            xf >= slot_x and xf <= slot_x + slot_w)
+                        {
+                            return .{ .handle = handle, .layout = .vertical };
+                        }
+                    },
+                }
+            },
+            .leaf => {},
+        }
+    }
+
+    return null;
+}
+
 /// Compute split layout for a tab, returning pixel rects for each surface.
 /// Each surface is resized to fit its allocated area with proper padding.
 /// Returns the number of surfaces (0 if tree is empty).
@@ -710,8 +791,22 @@ fn computeSplitLayout(
 
         if (resized) {
             g_force_rebuild = true;
-            // Show resize overlay with new dimensions
-            resizeOverlayShow(surface.size.grid.cols, surface.size.grid.rows);
+            // Show resize overlay with new dimensions (but not during divider drag,
+            // which has its own per-surface overlay logic)
+            if (!g_divider_dragging) {
+                resizeOverlayShow(surface.size.grid.cols, surface.size.grid.rows);
+            }
+        }
+
+        // Track per-surface size changes for divider drag overlay
+        if (g_divider_dragging) {
+            const cols = surface.size.grid.cols;
+            const rows = surface.size.grid.rows;
+            if (cols != surface.resize_overlay_last_cols or rows != surface.resize_overlay_last_rows) {
+                surface.resize_overlay_active = true;
+                surface.resize_overlay_last_cols = cols;
+                surface.resize_overlay_last_rows = rows;
+            }
         }
 
         g_split_rects[count] = .{
@@ -814,8 +909,16 @@ fn spawnTabWithCwd(allocator: std.mem.Allocator, cwd: ?[*:0]const u16) bool {
     g_active_tab = g_tab_count;
     g_tab_count += 1;
 
-    // Clear selection state when switching to new tab
+    // Clear selection and divider drag state when switching to new tab
     g_selecting = false;
+    g_divider_dragging = false;
+    g_divider_drag_handle = null;
+    g_divider_drag_layout = null;
+    // Reset resize overlay so it doesn't carry over to new tab
+    g_resize_overlay_visible = false;
+    g_resize_overlay_opacity = 0;
+    // Suppress resize overlay briefly to avoid false triggers from initial layout
+    g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
     g_force_rebuild = true;
     g_cells_valid = false;
 
@@ -887,8 +990,16 @@ fn switchTab(idx: usize) void {
                 entry.surface.bell_indicator = false;
             }
         }
-        // Clear selection state when switching tabs
+        // Clear selection and divider drag state when switching tabs
         g_selecting = false;
+        g_divider_dragging = false;
+        g_divider_drag_handle = null;
+        g_divider_drag_layout = null;
+        // Reset resize overlay so it doesn't carry over between tabs
+        g_resize_overlay_visible = false;
+        g_resize_overlay_opacity = 0;
+        // Suppress resize overlay briefly to avoid false triggers from layout recalc
+        g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
         g_force_rebuild = true;
         g_cells_valid = false;
     }
@@ -4232,6 +4343,8 @@ fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
 }
 
 /// Render split dividers between panes in the active tab.
+/// If split-divider-color is configured, uses that color (solid).
+/// Otherwise uses scrollbar-style rendering: black with alpha transparency.
 fn renderSplitDividers(tab: *const TabState, content_x: i32, content_y: i32, content_w: i32, content_h: i32, window_height: f32) void {
     if (!tab.tree.isSplit()) return;
 
@@ -4243,6 +4356,12 @@ fn renderSplitDividers(tab: *const TabState, content_x: i32, content_y: i32, con
 
     gl.UseProgram.?(shader_program);
     gl.BindVertexArray.?(vao);
+
+    // Check if custom color is configured
+    const use_custom_color = g_split_divider_color != null;
+    const custom_color = g_split_divider_color orelse .{ 0, 0, 0 };
+    // Default alpha - similar to scrollbar thumb (0.45) but slightly less prominent
+    const default_alpha: f32 = 0.35;
 
     // Walk the tree nodes and draw dividers for each split
     for (tab.tree.nodes, 0..) |node, i| {
@@ -4260,13 +4379,21 @@ fn renderSplitDividers(tab: *const TabState, content_x: i32, content_y: i32, con
                         // Vertical divider at ratio position
                         const div_x = slot_x + slot_w * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
                         const div_y = window_height - slot_y - slot_h;
-                        renderQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, g_split_divider_color);
+                        if (use_custom_color) {
+                            renderQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, custom_color);
+                        } else {
+                            renderQuadAlpha(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, .{ 0, 0, 0 }, default_alpha);
+                        }
                     },
                     .vertical => {
                         // Horizontal divider at ratio position
                         const div_x = slot_x;
                         const div_y = window_height - slot_y - slot_h * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
-                        renderQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), g_split_divider_color);
+                        if (use_custom_color) {
+                            renderQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), custom_color);
+                        } else {
+                            renderQuadAlpha(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), .{ 0, 0, 0 }, default_alpha);
+                        }
                     },
                 }
             },
@@ -4277,8 +4404,8 @@ fn renderSplitDividers(tab: *const TabState, content_x: i32, content_y: i32, con
 /// Unfocused split opacity (default 0.7, configurable)
 threadlocal var g_unfocused_split_opacity: f32 = 0.7;
 
-/// Split divider color (default mid-gray)
-threadlocal var g_split_divider_color: [3]f32 = .{ 0.3, 0.3, 0.3 };
+/// Split divider color (null = use scrollbar style with alpha)
+threadlocal var g_split_divider_color: ?[3]f32 = null;
 
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
 threadlocal var g_focus_follows_mouse: bool = false;
@@ -4824,6 +4951,14 @@ fn renderScrollbar(window_width: f32, window_height: f32, top_padding: f32) void
 fn resizeOverlayShow(cols: u16, rows: u16) void {
     const now = std.time.milliTimestamp();
 
+    // Check if overlay is suppressed (e.g., after tab switch)
+    if (now < g_resize_overlay_suppress_until) {
+        // Still update last cols/rows so we don't flash when suppression ends
+        g_resize_overlay_last_cols = cols;
+        g_resize_overlay_last_rows = rows;
+        return;
+    }
+
     // Mark resize as active (for cursor hiding)
     g_resize_active = true;
     g_resize_overlay_last_change = now;
@@ -4936,9 +5071,29 @@ fn renderResizeOverlayWithOffset(window_width: f32, window_height: f32, top_offs
     resizeOverlayUpdate();
     if (g_resize_overlay_opacity <= 0.01) return;
 
+    renderResizeOverlayText(g_resize_overlay_cols, g_resize_overlay_rows, window_width, window_height, top_offset, g_resize_overlay_opacity);
+}
+
+/// Render the resize overlay for a specific surface (used during divider dragging).
+/// Shows the surface's current dimensions centered in the viewport.
+/// Only shows if this surface's size actually changed during the drag.
+fn renderResizeOverlayForSurface(surface: *Surface, window_width: f32, window_height: f32) void {
+    // Only show during divider dragging and if this surface's size changed
+    if (!g_divider_dragging or !surface.resize_overlay_active) return;
+
+    const cols = surface.size.grid.cols;
+    const rows = surface.size.grid.rows;
+
+    renderResizeOverlayText(cols, rows, window_width, window_height, 0, 1.0);
+}
+
+/// Core function to render a resize overlay with specific dimensions.
+fn renderResizeOverlayText(cols: u16, rows: u16, window_width: f32, window_height: f32, top_offset: f32, alpha: f32) void {
+    if (alpha <= 0.01) return;
+
     // Format the size string: "cols x rows"
     var buf: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d} x {d}", .{ g_resize_overlay_cols, g_resize_overlay_rows }) catch return;
+    const text = std.fmt.bufPrint(&buf, "{d} x {d}", .{ cols, rows }) catch return;
 
     // Measure text width using titlebar glyph system
     var text_width: f32 = 0;
@@ -4959,8 +5114,6 @@ fn renderResizeOverlayWithOffset(window_width: f32, window_height: f32, top_offs
     const content_height = window_height - top_offset;
     const box_x = (window_width - box_width) / 2;
     const box_y = (content_height - box_height) / 2; // Centered in content area (GL coords)
-
-    const alpha = g_resize_overlay_opacity;
 
     // Enable blending
     gl.Enable.?(c.GL_BLEND);
@@ -5321,12 +5474,7 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     // --- Split config ---
     g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
     g_focus_follows_mouse = cfg.@"focus-follows-mouse";
-    if (cfg.@"split-divider-color") |color| {
-        g_split_divider_color = color;
-    } else {
-        // Default: mid-gray
-        g_split_divider_color = .{ 0.3, 0.3, 0.3 };
-    }
+    g_split_divider_color = cfg.@"split-divider-color";
 
     // Sync cursor style to all tabs' terminals (rendering reads from terminal state)
     for (0..g_tab_count) |ti| {
@@ -5887,6 +6035,24 @@ const win32_input = struct {
                     return;
                 }
 
+                // Check if click is on a split divider
+                if (hitTestDivider(ev.x, ev.y)) |hit| {
+                    g_divider_dragging = true;
+                    g_divider_drag_handle = hit.handle;
+                    g_divider_drag_layout = hit.layout;
+                    // Initialize per-surface resize tracking with current sizes
+                    // so we only show overlays on surfaces that actually change
+                    if (activeTab()) |tab| {
+                        var it = tab.tree.iterator();
+                        while (it.next()) |entry| {
+                            entry.surface.resize_overlay_active = false;
+                            entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
+                            entry.surface.resize_overlay_last_rows = entry.surface.size.grid.rows;
+                        }
+                    }
+                    return;
+                }
+
                 // Find which surface was clicked and focus it
                 const clicked_surface = surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse activeSurface() orelse return;
                 
@@ -5914,6 +6080,22 @@ const win32_input = struct {
             } else {
                 // Mouse up
                 g_scrollbar_dragging = false;
+
+                // Handle divider drag release
+                if (g_divider_dragging) {
+                    g_divider_dragging = false;
+                    g_divider_drag_handle = null;
+                    g_divider_drag_layout = null;
+                    // Reset per-surface resize overlay state
+                    if (activeTab()) |tab| {
+                        var it = tab.tree.iterator();
+                        while (it.next()) |entry| {
+                            entry.surface.resize_overlay_active = false;
+                        }
+                    }
+                    // Cursor will be reset in handleMouseMove
+                    return;
+                }
 
                 // Handle close button release — close tab if still on the close button
                 if (g_tab_close_pressed) |pressed_idx| {
@@ -6072,6 +6254,54 @@ const win32_input = struct {
         const xpos: f64 = @floatFromInt(ev.x);
         const ypos: f64 = @floatFromInt(ev.y);
 
+        // Handle divider dragging
+        if (g_divider_dragging) {
+            if (g_divider_drag_handle) |handle| {
+                const tab = activeTab() orelse return;
+                const allocator = g_allocator orelse return;
+
+                // Get spatial info for this split
+                var spatial = tab.tree.spatial(allocator) catch return;
+                defer spatial.deinit(allocator);
+
+                // Get content area dimensions
+                const win = g_window orelse return;
+                const fb = win.getFramebufferSize();
+                const content_x: f32 = @floatFromInt(DEFAULT_PADDING);
+                const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+                const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * DEFAULT_PADDING)));
+                const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(DEFAULT_PADDING)));
+
+                const slot = spatial.slots[handle.idx()];
+                const layout = g_divider_drag_layout orelse return;
+
+                // Calculate new ratio based on mouse position
+                const new_ratio: f16 = switch (layout) {
+                    .horizontal => blk: {
+                        const slot_x = content_x + @as(f32, @floatCast(slot.x)) * content_w;
+                        const slot_w = @as(f32, @floatCast(slot.width)) * content_w;
+                        const mouse_x: f32 = @floatCast(xpos);
+                        // Clamp ratio to 0.1-0.9 to prevent splits from becoming too small
+                        break :blk @floatCast(@max(0.1, @min(0.9, (mouse_x - slot_x) / slot_w)));
+                    },
+                    .vertical => blk: {
+                        const slot_y = content_y + @as(f32, @floatCast(slot.y)) * content_h;
+                        const slot_h = @as(f32, @floatCast(slot.height)) * content_h;
+                        const mouse_y: f32 = @floatCast(ypos);
+                        break :blk @floatCast(@max(0.1, @min(0.9, (mouse_y - slot_y) / slot_h)));
+                    },
+                };
+
+                // Update the ratio in place
+                tab.tree.resizeInPlace(handle, new_ratio);
+
+                // Force layout recalculation and redraw
+                g_force_rebuild = true;
+                g_cells_valid = false;
+            }
+            return;
+        }
+
         // Focus follows mouse: check if mouse is over a different split
         if (g_focus_follows_mouse) {
             updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
@@ -6096,6 +6326,23 @@ const win32_input = struct {
         if (g_scrollbar_dragging) {
             scrollbarDrag(ypos, h_f, top_pad);
             return;
+        }
+
+        // Check for divider hover and update cursor
+        if (!g_scrollbar_hover and !g_selecting) {
+            if (hitTestDivider(ev.x, ev.y)) |hit| {
+                // Set resize cursor based on layout
+                const cursor_id = switch (hit.layout) {
+                    .horizontal => win32_backend.IDC_SIZEWE, // left-right resize
+                    .vertical => win32_backend.IDC_SIZENS, // up-down resize
+                };
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
+                g_divider_hover = true;
+            } else if (g_divider_hover) {
+                // Reset to default cursor when leaving divider
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
+                g_divider_hover = false;
+            }
         }
 
         // Normal selection handling
@@ -6825,8 +7072,12 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                             renderUnfocusedOverlaySimple(@floatFromInt(rect.width), @floatFromInt(rect.height));
                         }
 
-                        // Render resize overlay centered in the focused split
-                        if (is_focused) {
+                        // Render resize overlay:
+                        // - During divider dragging: show on ALL splits with their current dimensions
+                        // - Otherwise: show only on focused split (for window resize)
+                        if (g_divider_dragging) {
+                            renderResizeOverlayForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height));
+                        } else if (is_focused) {
                             renderResizeOverlay(@floatFromInt(rect.width), @floatFromInt(rect.height));
                         }
                     }
