@@ -252,6 +252,14 @@ pub fn init(
     surface.dirty = std.atomic.Value(bool).init(true);
     surface.exited = std.atomic.Value(bool).init(false);
     surface.io_thread = null;
+    
+    // Initialize grid size to match terminal dimensions.
+    // This prevents spurious resize on first render when computeSplitLayout
+    // calls setScreenSize - without this, the default 80x24 would differ from
+    // the actual terminal dimensions, triggering a resize that can corrupt
+    // terminal state if the shell has already output content.
+    surface.size.grid.cols = cols;
+    surface.size.grid.rows = rows;
 
     // Initialize per-surface renderer (Ghostty architecture)
     surface.surface_renderer = Renderer.init(surface);

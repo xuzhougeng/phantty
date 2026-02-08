@@ -17,6 +17,7 @@ const SplitTree = @import("split_tree.zig");
 const renderer = @import("renderer.zig");
 const win32_backend = @import("win32.zig");
 const App = @import("App.zig");
+const Renderer = @import("Renderer.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -987,6 +988,9 @@ fn switchTab(idx: usize) void {
             var it = tab.tree.iterator();
             while (it.next()) |entry| {
                 entry.surface.bell_indicator = false;
+                // Force rebuild for this surface when switching to its tab
+                entry.surface.surface_renderer.force_rebuild = true;
+                entry.surface.surface_renderer.cells_valid = false;
             }
         }
         // Clear selection and divider drag state when switching tabs
@@ -1337,12 +1341,17 @@ threadlocal var g_cached_cursor_y: usize = 0;
 threadlocal var g_cached_cursor_style: CursorStyle = .block;
 threadlocal var g_cached_cursor_effective: ?CursorStyle = .block;
 threadlocal var g_cached_cursor_visible: bool = true;
+threadlocal var g_cached_cursor_in_viewport: bool = true; // cursor is within visible viewport
 threadlocal var g_cached_viewport_at_bottom: bool = true;
 
 threadlocal var g_last_viewport_active: bool = true; // track viewport position changes (scroll)
 // Viewport pin tracking — detects scroll position changes (like Ghostty's RenderState.viewport_pin)
 threadlocal var g_last_viewport_node: ?*anyopaque = null;
 threadlocal var g_last_viewport_y: usize = 0;
+// Cursor pin tracking — detects cursor position changes
+threadlocal var g_last_cursor_node: ?*anyopaque = null;
+threadlocal var g_last_cursor_pin_y: usize = 0;
+threadlocal var g_last_cursor_x: usize = 0;
 threadlocal var g_last_cols: usize = 0; // detect resize
 threadlocal var g_last_rows: usize = 0; // detect resize
 threadlocal var g_last_selection_active: bool = false; // detect selection changes
@@ -3764,12 +3773,11 @@ fn renderPlaceholderTab(window_width: f32, window_height: f32, top_pad: f32) voi
 /// into a flat buffer so rebuildCells can run outside the lock.
 /// Modeled after Ghostty's RenderState.update() which copies row data via
 /// fastmem.copy under the lock, then releases it for the renderer.
-fn snapshotCells(terminal: *ghostty_vt.Terminal) void {
+fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
     const screen = terminal.screens.active;
     const render_cols = terminal.cols;
 
-    g_snap_rows = terminal.rows;
-    g_snap_cols = render_cols;
+    rend.snap_cols = render_cols;
 
     var row_it = screen.pages.rowIterator(
         .right_down,
@@ -3824,8 +3832,8 @@ fn snapshotCells(terminal: *ghostty_vt.Terminal) void {
                 }
             }
 
-            if (row_base + col_idx < MAX_SNAP) {
-                var snap: SnapCell = .{
+            if (row_base + col_idx < Renderer.MAX_CELLS) {
+                var snap: Renderer.SnapCell = .{
                     .codepoint = cell.codepoint(),
                     .fg = fg_color,
                     .bg = bg_color,
@@ -3836,33 +3844,33 @@ fn snapshotCells(terminal: *ghostty_vt.Terminal) void {
                 // (emoji with skin tones, flags, ZWJ sequences, VS16, etc.)
                 if (cell.hasGrapheme()) {
                     if (p.lookupGrapheme(cell)) |extra_cps| {
-                        const len = @min(extra_cps.len, MAX_GRAPHEME);
+                        const len = @min(extra_cps.len, 8); // MAX_GRAPHEME
                         for (0..len) |gi| {
                             snap.grapheme[gi] = extra_cps[gi];
                         }
                         snap.grapheme_len = @intCast(len);
-
                     }
                 }
 
-                g_snap[row_base + col_idx] = snap;
+                rend.snap[row_base + col_idx] = snap;
             }
         }
         row_idx += 1;
     }
+    rend.snap_rows = row_idx;
 }
 
 /// Build GPU cell buffers from the snapshot. Does NOT require the terminal
-/// mutex — reads from g_snap which was filled by snapshotCells.
-fn rebuildCells() void {
-    const render_rows = g_snap_rows;
-    const render_cols = g_snap_cols;
+/// mutex — reads from rend.snap which was filled by snapshotCells.
+fn rebuildCells(rend: *Renderer) void {
+    const render_rows = rend.snap_rows;
+    const render_cols = rend.snap_cols;
     const atlas_size = if (g_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
     const color_atlas_size = if (g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
 
-    bg_cell_count = 0;
-    fg_cell_count = 0;
-    color_fg_cell_count = 0;
+    rend.bg_cell_count = 0;
+    rend.fg_cell_count = 0;
+    rend.color_fg_cell_count = 0;
 
     for (0..render_rows) |row_idx| {
         const row_f: f32 = @floatFromInt(row_idx);
@@ -3871,39 +3879,39 @@ fn rebuildCells() void {
         var skip_next_ri = false;
         for (0..render_cols) |col_idx| {
             const snap_idx = row_base + col_idx;
-            if (snap_idx >= MAX_SNAP) break;
-            const sc = g_snap[snap_idx];
+            if (snap_idx >= Renderer.MAX_CELLS) break;
+            const sc = rend.snap[snap_idx];
 
-            const is_cursor = g_cached_viewport_at_bottom and (col_idx == g_cached_cursor_x and row_idx == g_cached_cursor_y);
+            const is_cursor = rend.cached_viewport_at_bottom and (col_idx == rend.cached_cursor_x and row_idx == rend.cached_cursor_y);
             const is_selected = isCellSelected(col_idx, row_idx);
             const col_f: f32 = @floatFromInt(col_idx);
 
             var fg_color = sc.fg;
 
-            if (is_cursor and g_cached_cursor_visible) {
+            if (is_cursor and rend.cached_cursor_visible) {
                 // Block cursor: invert fg for text under cursor (bg drawn by overlay)
-                if (g_cached_cursor_effective) |effective_style| {
+                if (rend.cached_cursor_effective) |effective_style| {
                     if (effective_style == .block) {
                         fg_color = g_theme.cursor_text orelse g_theme.background;
                     }
                 }
                 // Draw cell background normally (cursor shape drawn by overlay)
                 if (sc.bg) |bg| {
-                    if (bg_cell_count < MAX_CELLS) {
-                        bg_cells[bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
-                        bg_cell_count += 1;
+                    if (rend.bg_cell_count < Renderer.MAX_CELLS) {
+                        rend.bg_cells[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
+                        rend.bg_cell_count += 1;
                     }
                 }
             } else if (is_selected) {
-                if (bg_cell_count < MAX_CELLS) {
-                    bg_cells[bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2] };
-                    bg_cell_count += 1;
+                if (rend.bg_cell_count < Renderer.MAX_CELLS) {
+                    rend.bg_cells[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2] };
+                    rend.bg_cell_count += 1;
                 }
                 fg_color = g_theme.selection_foreground orelse g_theme.foreground;
             } else if (sc.bg) |bg| {
-                if (bg_cell_count < MAX_CELLS) {
-                    bg_cells[bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
-                    bg_cell_count += 1;
+                if (rend.bg_cell_count < Renderer.MAX_CELLS) {
+                    rend.bg_cells[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
+                    rend.bg_cell_count += 1;
                 }
             }
 
@@ -3934,8 +3942,8 @@ fn rebuildCells() void {
                     const offsets = [_]usize{ 1, 2 };
                     for (offsets) |off| {
                         const next_snap_idx = row_base + col_idx + off;
-                        if (next_snap_idx < MAX_SNAP and col_idx + off < render_cols) {
-                            const next_sc = g_snap[next_snap_idx];
+                        if (next_snap_idx < Renderer.MAX_CELLS and col_idx + off < render_cols) {
+                            const next_sc = rend.snap[next_snap_idx];
                             if (isRegionalIndicator(next_sc.codepoint)) {
                                 const extras = [1]u21{next_sc.codepoint};
                                 const result = loadGraphemeGlyph(char, &extras);
@@ -3967,8 +3975,8 @@ fn rebuildCells() void {
                             const gx = (target_w - gw) / 2.0;
                             const gy = (cell_height - gh) / 2.0;
                             const uv = glyphUV(ch.region, color_atlas_size);
-                            if (color_fg_cell_count < MAX_CELLS) {
-                                color_fg_cells[color_fg_cell_count] = .{
+                            if (rend.color_fg_cell_count < Renderer.MAX_CELLS) {
+                                rend.color_fg_cells[rend.color_fg_cell_count] = .{
                                     .grid_col = col_f,
                                     .grid_row = row_f,
                                     .glyph_x = gx,
@@ -3983,7 +3991,7 @@ fn rebuildCells() void {
                                     .g = fg_color[1],
                                     .b = fg_color[2],
                                 };
-                                color_fg_cell_count += 1;
+                                rend.color_fg_cell_count += 1;
                             }
                         } else {
                             // Grayscale text glyph
@@ -3992,8 +4000,8 @@ fn rebuildCells() void {
                             const gy = cell_baseline - @as(f32, @floatFromInt(@as(i32, @intCast(ch.size_y)) - ch.bearing_y));
                             const gw = @as(f32, @floatFromInt(ch.size_x));
                             const gh = @as(f32, @floatFromInt(ch.size_y));
-                            if (fg_cell_count < MAX_CELLS) {
-                                fg_cells[fg_cell_count] = .{
+                            if (rend.fg_cell_count < Renderer.MAX_CELLS) {
+                                rend.fg_cells[rend.fg_cell_count] = .{
                                     .grid_col = col_f,
                                     .grid_row = row_f,
                                     .glyph_x = gx,
@@ -4008,7 +4016,7 @@ fn rebuildCells() void {
                                     .g = fg_color[1],
                                     .b = fg_color[2],
                                 };
-                                fg_cell_count += 1;
+                                rend.fg_cell_count += 1;
                             }
                         }
                     }
@@ -4020,34 +4028,27 @@ fn rebuildCells() void {
 
 /// Determine effective cursor style (factoring in blink, focus, and split focus).
 /// Returns null during blink-off phase (cursor hidden).
-fn cursorEffectiveStyle(terminal_style: TerminalCursorStyle, terminal_blink: bool) ?CursorStyle {
+/// This version uses per-surface renderer state.
+fn cursorEffectiveStyleForRenderer(rend: *const Renderer, terminal_style: Renderer.CursorStyle, terminal_blink: bool) ?Renderer.CursorStyle {
     // Hide cursor during active resize to avoid flicker artifacts
     if (g_resize_active) return null;
     // Unfocused window or tab rename: show hollow block
     if (!window_focused or g_tab_rename_active) return .block_hollow;
     // Unfocused split: show hollow block (no blinking)
-    if (!g_split_is_focused) return .block_hollow;
+    if (!rend.is_focused) return .block_hollow;
     const should_blink = terminal_blink and g_cursor_blink;
-    if (should_blink and !g_cursor_blink_visible) return null;
-    return switch (terminal_style) {
-        .block => .block,
-        .bar => .bar,
-        .underline => .underline,
-        .block_hollow => .block_hollow,
-    };
+    if (should_blink and !rend.cursor_blink_visible) return null;
+    return terminal_style;
 }
-
-/// Flag indicating if the surface being rendered is the focused split
-threadlocal var g_split_is_focused: bool = true;
 
 /// Current surface being rendered (for per-surface selection)
 threadlocal var g_current_render_surface: ?*Surface = null;
 
 /// Update terminal cells for a specific surface in a split tree.
 /// is_focused controls cursor appearance (unfocused shows block_hollow).
-fn updateTerminalCellsForSurface(terminal: *ghostty_vt.Terminal, is_focused: bool) bool {
-    g_split_is_focused = is_focused;
-    return updateTerminalCells(terminal);
+fn updateTerminalCellsForSurface(rend: *Renderer, terminal: *ghostty_vt.Terminal, is_focused: bool) bool {
+    rend.is_focused = is_focused;
+    return updateTerminalCells(rend, terminal);
 }
 
 /// Get the selection for the current surface being rendered.
@@ -4067,7 +4068,7 @@ fn currentRenderSelection() *Selection {
 /// Returns true if cells need rebuilding (caller should call rebuildCells()
 /// after releasing the lock). Modeled after Ghostty's split:
 ///   lock → RenderState.update() (snapshot) → unlock → rebuildCells()
-fn updateTerminalCells(terminal: *ghostty_vt.Terminal) bool {
+fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool {
     // If the application has enabled synchronized output (Mode 2026),
     // skip rendering entirely until the batch ends. This prevents
     // mid-update artifacts (e.g. fzf drawing its UI). Matches Ghostty's
@@ -4076,25 +4077,27 @@ fn updateTerminalCells(terminal: *ghostty_vt.Terminal) bool {
 
     const screen = terminal.screens.active;
     const viewport_active = screen.pages.viewport == .active;
-    const selection_active = activeSelection().active;
+    const selection_active = currentRenderSelection().active;
     const viewport_pin = screen.pages.getTopLeft(.viewport);
 
     const needs_rebuild = blk: {
-        if (g_force_rebuild) {
-            g_force_rebuild = false;
+        if (rend.force_rebuild) {
+            rend.force_rebuild = false;
             break :blk true;
         }
-        if (!g_cells_valid) break :blk true;
-        if (g_cursor_blink_visible != g_last_cursor_blink_visible) break :blk true;
-        if (viewport_active != g_last_viewport_active) break :blk true;
-        if (terminal.rows != g_last_rows or terminal.cols != g_last_cols) break :blk true;
-        if (selection_active != g_last_selection_active) break :blk true;
+        if (!rend.cells_valid) break :blk true;
+        if (rend.cursor_blink_visible != rend.last_cursor_blink_visible) break :blk true;
+        if (viewport_active != rend.last_viewport_active) break :blk true;
+        if (terminal.rows != rend.last_rows or terminal.cols != rend.last_cols) break :blk true;
+        if (selection_active != rend.last_selection_active) break :blk true;
         if (g_selecting) break :blk true;
         // Cursor position changed — need to rebuild so cursor bg is at the right cell
-        if (screen.cursor.x != g_cached_cursor_x or screen.cursor.y != g_cached_cursor_y) break :blk true;
+        if (screen.cursor.x != rend.last_cursor_x or
+            @as(?*anyopaque, screen.cursor.page_pin.node) != rend.last_cursor_node or
+            screen.cursor.page_pin.y != rend.last_cursor_pin_y) break :blk true;
         // Viewport pin changed — scroll happened (matches Ghostty's RenderState viewport_pin comparison)
-        if (@as(?*anyopaque, viewport_pin.node) != g_last_viewport_node or
-            viewport_pin.y != g_last_viewport_y) break :blk true;
+        if (@as(?*anyopaque, viewport_pin.node) != rend.last_viewport_node or
+            viewport_pin.y != rend.last_viewport_y) break :blk true;
         // Terminal-level dirty flags (eraseDisplay, fullReset, palette change, etc.)
         {
             const DirtyInt = @typeInfo(@TypeOf(terminal.flags.dirty)).@"struct".backing_integer.?;
@@ -4114,35 +4117,52 @@ fn updateTerminalCells(terminal: *ghostty_vt.Terminal) bool {
         break :blk false;
     };
 
-    // Always cache cursor state for drawing outside the lock
-    g_cached_cursor_x = screen.cursor.x;
-    g_cached_cursor_y = screen.cursor.y;
-    g_cached_viewport_at_bottom = screen.pages.viewport == .active;
-    g_cached_cursor_visible = terminal.modes.get(.cursor_visible);
-    const tcs: TerminalCursorStyle = switch (screen.cursor.cursor_style) {
+    // Always cache cursor state for drawing outside the lock.
+    // When viewport is at bottom (showing active area), cursor.y is in active coordinates
+    // which matches viewport coordinates. When scrolled up, cursor is not visible.
+    rend.cached_viewport_at_bottom = screen.pages.viewport == .active;
+    rend.cached_cursor_x = screen.cursor.x;
+    rend.cached_cursor_y = screen.cursor.y;
+    
+
+
+    rend.cached_cursor_visible = terminal.modes.get(.cursor_visible);
+    const tcs: Renderer.CursorStyle = switch (screen.cursor.cursor_style) {
         .bar => .bar,
         .block => .block,
         .underline => .underline,
         .block_hollow => .block_hollow,
     };
-    g_cached_cursor_effective = cursorEffectiveStyle(tcs, terminal.modes.get(.cursor_blinking));
-    if (g_cached_cursor_effective) |eff| {
-        g_cached_cursor_style = eff;
+    rend.cached_cursor_effective = cursorEffectiveStyleForRenderer(rend, tcs, terminal.modes.get(.cursor_blinking));
+    if (rend.cached_cursor_effective) |eff| {
+        rend.cached_cursor_style = eff;
     }
 
     if (needs_rebuild) {
         // Snapshot cell data under the lock — fast memcpy of resolved colors
         // and codepoints. Like Ghostty's RenderState.update() fastmem.copy.
-        snapshotCells(terminal);
+        snapshotCells(rend, terminal);
 
-        g_cells_valid = true;
-        g_last_cursor_blink_visible = g_cursor_blink_visible;
-        g_last_viewport_active = viewport_active;
-        g_last_viewport_node = viewport_pin.node;
-        g_last_viewport_y = viewport_pin.y;
-        g_last_rows = terminal.rows;
-        g_last_cols = terminal.cols;
-        g_last_selection_active = selection_active;
+        // Debug: check for cursor/content mismatch
+        if (rend.cached_cursor_y >= rend.snap_rows and rend.snap_rows > 0) {
+            std.log.warn("CURSOR MISMATCH: cursor_y={} snap_rows={} terminal.rows={} viewport={s}", .{
+                rend.cached_cursor_y, rend.snap_rows, terminal.rows,
+                if (screen.pages.viewport == .active) "active" else "pin",
+            });
+        }
+
+
+        rend.cells_valid = true;
+        rend.last_cursor_blink_visible = rend.cursor_blink_visible;
+        rend.last_viewport_active = viewport_active;
+        rend.last_viewport_node = viewport_pin.node;
+        rend.last_viewport_y = viewport_pin.y;
+        rend.last_cursor_node = screen.cursor.page_pin.node;
+        rend.last_cursor_pin_y = screen.cursor.page_pin.y;
+        rend.last_cursor_x = screen.cursor.x;
+        rend.last_rows = terminal.rows;
+        rend.last_cols = terminal.cols;
+        rend.last_selection_active = selection_active;
 
         // Clear dirty flags after snapshot
         terminal.flags.dirty = .{};
@@ -4158,9 +4178,9 @@ fn updateTerminalCells(terminal: *ghostty_vt.Terminal) bool {
 
 /// Draw terminal grid from CPU cell buffers. Does NOT require the terminal
 /// mutex — all terminal state was already read by updateTerminalCells().
-fn drawCells(window_height: f32, offset_x: f32, offset_y: f32) void {
+fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offset_y: f32) void {
     // --- Draw BG cells ---
-    if (bg_cell_count > 0 and bg_shader != 0) {
+    if (rend.bg_cell_count > 0 and bg_shader != 0) {
         gl.UseProgram.?(bg_shader);
         gl.Uniform2f.?(gl.GetUniformLocation.?(bg_shader, "cellSize"), cell_width, cell_height);
         gl.Uniform2f.?(gl.GetUniformLocation.?(bg_shader, "gridOffset"), offset_x, offset_y);
@@ -4169,12 +4189,12 @@ fn drawCells(window_height: f32, offset_x: f32, offset_y: f32) void {
 
         gl.BindVertexArray.?(bg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, bg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(CellBg) * bg_cell_count), &bg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(bg_cell_count)); g_draw_call_count += 1;
+        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), &rend.bg_cells);
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count)); g_draw_call_count += 1;
     }
 
     // --- Draw FG cells ---
-    if (fg_cell_count > 0 and fg_shader != 0) {
+    if (rend.fg_cell_count > 0 and fg_shader != 0) {
         gl.UseProgram.?(fg_shader);
         gl.Uniform2f.?(gl.GetUniformLocation.?(fg_shader, "cellSize"), cell_width, cell_height);
         gl.Uniform2f.?(gl.GetUniformLocation.?(fg_shader, "gridOffset"), offset_x, offset_y);
@@ -4187,14 +4207,14 @@ fn drawCells(window_height: f32, offset_x: f32, offset_y: f32) void {
 
         gl.BindVertexArray.?(fg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, fg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(CellFg) * fg_cell_count), &fg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(fg_cell_count)); g_draw_call_count += 1;
+        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.fg_cell_count), &rend.fg_cells);
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count)); g_draw_call_count += 1;
     }
 
     // --- Draw color emoji cells ---
     // Color emoji use premultiplied alpha, so we switch blend mode to (ONE, ONE_MINUS_SRC_ALPHA)
     // for this pass, then restore the normal blend mode afterwards.
-    if (color_fg_cell_count > 0 and color_fg_shader != 0) {
+    if (rend.color_fg_cell_count > 0 and color_fg_shader != 0) {
         gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
 
         gl.UseProgram.?(color_fg_shader);
@@ -4209,20 +4229,20 @@ fn drawCells(window_height: f32, offset_x: f32, offset_y: f32) void {
 
         gl.BindVertexArray.?(color_fg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, color_fg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(CellFg) * color_fg_cell_count), &color_fg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(color_fg_cell_count)); g_draw_call_count += 1;
+        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.color_fg_cell_count), &rend.color_fg_cells);
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count)); g_draw_call_count += 1;
 
         // Restore normal blend mode for subsequent draws (cursor, titlebar, etc.)
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
     }
 
     // --- Cursor overlay from cached state ---
-    if (g_cached_viewport_at_bottom and g_cached_cursor_visible) {
+    if (rend.cached_viewport_at_bottom and rend.cached_cursor_visible) {
         // Use the pre-computed effective cursor style which already factors in
         // window focus, tab rename, split focus, and blink state.
-        if (g_cached_cursor_effective) |style| {
-            const px = offset_x + @as(f32, @floatFromInt(g_cached_cursor_x)) * cell_width;
-            const py = window_height - offset_y - ((@as(f32, @floatFromInt(g_cached_cursor_y)) + 1) * cell_height);
+        if (rend.cached_cursor_effective) |style| {
+            const px = offset_x + @as(f32, @floatFromInt(rend.cached_cursor_x)) * cell_width;
+            const py = window_height - offset_y - ((@as(f32, @floatFromInt(rend.cached_cursor_y)) + 1) * cell_height);
 
             gl.UseProgram.?(shader_program);
             gl.BindVertexArray.?(vao);
@@ -4624,7 +4644,7 @@ fn renderPostProcess(width: c_int, height: c_int) void {
 /// Helper: render a frame to FBO, then apply post-processing to screen
 /// Render with post-processing. Called after updateTerminalCells() has
 /// already been called under the lock — this only does GL work.
-fn renderFrameWithPostFromCells(width: c_int, height: c_int, padding: f32) void {
+fn renderFrameWithPostFromCells(rend: *const Renderer, width: c_int, height: c_int, padding: f32) void {
     ensurePostFBO(width, height);
 
     // 1. Render terminal to FBO
@@ -4633,7 +4653,7 @@ fn renderFrameWithPostFromCells(width: c_int, height: c_int, padding: f32) void 
     setProjection(@floatFromInt(width), @floatFromInt(height));
     gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
     gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
-    drawCells(@floatFromInt(height), padding, padding);
+    drawCells(rend, @floatFromInt(height), padding, padding);
 
     // 2. Apply post-processing shader to screen
     renderPostProcess(width, height);
@@ -4679,8 +4699,6 @@ const TerminalCursorStyle = renderer.cursor.TerminalCursorStyle;
 // ============================================================================
 // FBO Management for Per-Surface Rendering
 // ============================================================================
-
-const Renderer = @import("Renderer.zig");
 
 /// Create or resize an FBO for a renderer.
 /// Must be called from main thread with GL context current.
@@ -5250,6 +5268,20 @@ fn updateCursorBlink() void {
     }
 }
 
+/// Update cursor blink for a specific renderer (per-surface blink state)
+fn updateCursorBlinkForRenderer(rend: *Renderer) void {
+    if (!g_cursor_blink) {
+        rend.cursor_blink_visible = true;
+        return;
+    }
+
+    const now = std.time.milliTimestamp();
+    if (now - rend.last_cursor_blink_time >= CURSOR_BLINK_INTERVAL_MS) {
+        rend.cursor_blink_visible = !rend.cursor_blink_visible;
+        rend.last_cursor_blink_time = now;
+    }
+}
+
 /// Clear all GL textures from the glyph cache and reset it.
 fn clearGlyphCache(allocator: std.mem.Allocator) void {
     glyph_cache.deinit(allocator);
@@ -5356,10 +5388,15 @@ fn onWin32Resize(width: i32, height: i32) void {
     if (width <= 0 or height <= 0) return;
     const allocator = g_allocator orelse return;
 
-    const padding: f32 = 10;
+    // Use same padding as computeSplitLayout to avoid size mismatch on new tab creation.
+    // Left/top/bottom = DEFAULT_PADDING, right = DEFAULT_PADDING + SCROLLBAR_WIDTH
+    const padding_left: f32 = @floatFromInt(DEFAULT_PADDING);
+    const padding_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
+    const padding_top: f32 = @floatFromInt(DEFAULT_PADDING);
+    const padding_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
     const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const content_w = @as(f32, @floatFromInt(width)) - padding * 2;
-    const content_h = @as(f32, @floatFromInt(height)) - padding - (padding + tb);
+    const content_w = @as(f32, @floatFromInt(width)) - padding_left - padding_right;
+    const content_h = @as(f32, @floatFromInt(height)) - padding_top - (padding_bottom + tb);
     if (content_w <= 0 or content_h <= 0) return;
 
     const new_cols: u16 = @intFromFloat(@max(1, content_w / cell_width));
@@ -5391,14 +5428,15 @@ fn onWin32Resize(width: i32, height: i32) void {
 
     // Snapshot + rebuild + draw
     if (activeSurface()) |surface| {
+        const rend = &surface.surface_renderer;
         var needs_rebuild: bool = false;
         {
             surface.render_state.mutex.lock();
             defer surface.render_state.mutex.unlock();
-            g_force_rebuild = true;
-            needs_rebuild = updateTerminalCells(&surface.terminal);
+            rend.force_rebuild = true;
+            needs_rebuild = updateTerminalCells(rend, &surface.terminal);
         }
-        if (needs_rebuild) rebuildCells();
+        if (needs_rebuild) rebuildCells(rend);
 
         // Sync atlas if needed
         if (g_atlas != null) syncAtlasTexture(&g_atlas, &g_atlas_texture, &g_atlas_modified);
@@ -5411,8 +5449,8 @@ fn onWin32Resize(width: i32, height: i32) void {
         gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
         renderTitlebar(@floatFromInt(width), @floatFromInt(height), tb);
-        drawCells(@floatFromInt(height), padding, padding + tb);
-        renderScrollbar(@floatFromInt(width), @floatFromInt(height), padding + tb);
+        drawCells(rend, @floatFromInt(height), padding_left, padding_top + tb);
+        renderScrollbar(@floatFromInt(width), @floatFromInt(height), padding_top + tb);
         renderResizeOverlay(@floatFromInt(width), @floatFromInt(height));
         renderDebugOverlay(@floatFromInt(width));
     } else {
@@ -5688,13 +5726,32 @@ const win32_input = struct {
 
         const width = win.width;
         const height = win.height;
-        const padding_f: f32 = 10;
+        // Calculate final grid size matching what setScreenSize will compute.
+        // The render loop subtracts padding once to get content area, then
+        // setScreenSize subtracts explicit_padding again. So we need to account
+        // for BOTH subtractions here.
+        //
+        // Render loop: content = window - 2*padding - titlebar (symmetric padding)
+        // setScreenSize: avail = content - explicit_padding (L=10, R=22, T=10, B=10)
+        //
+        // Total subtracted from width: 2*padding + L + R = 20 + 10 + 22 = 52
+        // Total subtracted from height: 2*padding + titlebar + T + B = 20 + 34 + 10 + 10 = 74
+        const render_padding: f32 = 10; // symmetric padding used by render loop
         const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-        const content_width = @as(f32, @floatFromInt(width)) - padding_f * 2;
-        const content_height = @as(f32, @floatFromInt(height)) - padding_f - (padding_f + tb_offset);
+        const explicit_left: f32 = @floatFromInt(DEFAULT_PADDING);
+        const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
+        const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
+        const explicit_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
+        
+        // Total padding to subtract
+        const total_width_padding = render_padding * 2 + explicit_left + explicit_right;
+        const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
+        
+        const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
+        const avail_height = @as(f32, @floatFromInt(height)) - total_height_padding;
 
-        const new_cols: u16 = @intFromFloat(@max(1, content_width / cell_width));
-        const new_rows: u16 = @intFromFloat(@max(1, content_height / cell_height));
+        const new_cols: u16 = @intFromFloat(@max(1, avail_width / cell_width));
+        const new_rows: u16 = @intFromFloat(@max(1, avail_height / cell_height));
 
         if (new_cols != term_cols or new_rows != term_rows) {
             g_pending_resize = true;
@@ -6564,17 +6621,8 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     const font_size = g_font_size;
     const shader_path = g_shader_path;
 
-    // Spawn the initial tab (PTY + terminal)
-    // Use the initial CWD if one was set (working directory inheritance)
-    const initial_cwd: ?[*:0]const u16 = if (g_initial_cwd_len > 0)
-        @ptrCast(&g_initial_cwd_buf)
-    else
-        null;
-    g_initial_cwd_len = 0; // Clear after use
-    if (!spawnTabWithCwd(allocator, initial_cwd)) {
-        std.debug.print("Failed to spawn initial tab\n", .{});
-        return error.SpawnFailed;
-    }
+    // NOTE: Initial tab is spawned AFTER window sizing (see below),
+    // so the terminal is created with the correct dimensions.
 
     // ================================================================
     // Initialize windowing backend
@@ -6830,17 +6878,79 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         if (quad_vbo != 0) gl.DeleteBuffers.?(1, &quad_vbo);
     }
 
-    // Calculate window size based on cell dimensions (small padding for aesthetics)
-    const padding: f32 = 10;
-    // Extra top offset for custom title bar (Win32 backend only)
-    const titlebar_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const top_padding: f32 = padding + titlebar_offset;
+    // Ghostty approach: calculate grid size from ACTUAL window size.
+    // This ensures the terminal is created with dimensions that match
+    // what setScreenSize will compute, avoiding any resize on startup.
+    //
+    // Padding breakdown for a SINGLE FULL-WINDOW split:
+    // - Render loop: content_w = fb_width - 20 (symmetric padding)
+    // - computeSplitLayout: adds back padding for edge splits: pw = content_w + 20 = fb_width
+    // - setScreenSize: subtracts explicit_padding: avail = pw - 32 (L=10, R=22)
+    // - So total subtracted from fb_width: 32
+    //
+    // For height:
+    // - Render loop: content_h = fb_height - top_padding - padding = fb_height - 44 - 10 = fb_height - 54
+    //   (where top_padding = padding + titlebar = 10 + 34 = 44)
+    // - computeSplitLayout: no edge extension for top/bottom, so ph = content_h
+    // - setScreenSize: subtracts explicit_padding: avail = ph - 20 (T=10, B=10)
+    // - So total subtracted from fb_height: 54 + 20 = 74
+    //   Wait, let me recalculate...
+    //   Actually: content_h = fb_height - (10+34) - 10 = fb_height - 54
+    //   Then setScreenSize: avail_h = content_h - 20 = fb_height - 74
+    //
+    // Actually there might be edge extension for top/bottom too. Let me just match exactly:
+    // For a full-window single split (at all edges):
+    //   pw = fb_width (after adding back padding for left+right edges)
+    //   ph = content_h = fb_height - top_padding - padding = fb_height - 44 - 10 = fb_height - 54
+    //   Wait, is there edge extension for y too?
+    //
+    // Looking at the code: only left/right edges get extension, not top/bottom.
+    // So:
+    //   setScreenSize(pw=fb_width, ph=fb_height-54, explicit_padding)
+    //   avail_w = fb_width - 10 - 22 = fb_width - 32
+    //   avail_h = (fb_height - 54) - 10 - 10 = fb_height - 74
+    const titlebar_height: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const explicit_left: f32 = @floatFromInt(DEFAULT_PADDING);
+    const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
+    const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
+    const explicit_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
+    const render_padding: f32 = 10;
+    
+    // For width: pw = fb_width, then subtract explicit_padding
+    const total_width_padding = explicit_left + explicit_right; // 32
+    // For height: ph = fb_height - (render_padding + titlebar) - render_padding, then subtract explicit_padding
+    const total_height_padding = (render_padding + titlebar_height) + render_padding + explicit_top + explicit_bottom; // 44 + 10 + 20 = 74
 
-    const content_width: f32 = cell_width * @as(f32, @floatFromInt(term_cols));
-    const content_height: f32 = cell_height * @as(f32, @floatFromInt(term_rows));
-    const window_width: i32 = @intFromFloat(content_width + padding * 2);
-    const window_height: i32 = @intFromFloat(content_height + padding + top_padding);
-    if (g_window) |w| w.setSize(window_width, window_height);
+    // Get actual window client size
+    const init_fb = win32_window.getFramebufferSize();
+    const actual_width: f32 = @floatFromInt(init_fb.width);
+    const actual_height: f32 = @floatFromInt(init_fb.height);
+    
+    // Calculate grid that fits in this window
+    const avail_width = actual_width - total_width_padding;
+    const avail_height = actual_height - total_height_padding;
+    
+    const computed_cols: u16 = @intFromFloat(@max(1, avail_width / cell_width));
+    const computed_rows: u16 = @intFromFloat(@max(1, avail_height / cell_height));
+    
+    // Update term_cols/term_rows to match what the window can actually display
+    term_cols = computed_cols;
+    term_rows = computed_rows;
+    
+    // Now spawn the initial tab with the correct dimensions.
+    // No resize will be needed because term_cols/term_rows match
+    // what setScreenSize will compute from the window size.
+    {
+        const initial_cwd: ?[*:0]const u16 = if (g_initial_cwd_len > 0)
+            @ptrCast(&g_initial_cwd_buf)
+        else
+            null;
+        g_initial_cwd_len = 0; // Clear after use
+        if (!spawnTabWithCwd(allocator, initial_cwd)) {
+            std.debug.print("Failed to spawn initial tab\n", .{});
+            return error.SpawnFailed;
+        }
+    }
 
     gl.Enable.?(c.GL_BLEND);
     gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
@@ -6966,6 +7076,11 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             }
         }
 
+        // Render padding constants - used for content area and titlebar positioning
+        const padding: f32 = 10;
+        const titlebar_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+        const top_padding: f32 = padding + titlebar_offset;
+
         if (activeTab()) |tab| {
             // Compute split layout for the active tab
             const content_x: i32 = @intFromFloat(padding);
@@ -6980,29 +7095,33 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                 // Post-processing path: only render focused surface for now
                 if (activeSurface()) |surface| {
                     var needs_rebuild: bool = false;
+                    const rend = &surface.surface_renderer;
                     {
                         surface.render_state.mutex.lock();
                         defer surface.render_state.mutex.unlock();
-                        updateCursorBlink();
+                        updateCursorBlinkForRenderer(rend);
                         g_current_render_surface = surface;
-                        needs_rebuild = updateTerminalCells(&surface.terminal);
+                        rend.is_focused = true; // Single surface is always focused
+                        needs_rebuild = updateTerminalCells(rend, &surface.terminal);
                     }
-                    if (needs_rebuild) rebuildCells();
-                    renderFrameWithPostFromCells(fb_width, fb_height, padding);
+                    if (needs_rebuild) rebuildCells(rend);
+                    renderFrameWithPostFromCells(rend, fb_width, fb_height, padding);
                 }
             } else if (split_count == 1) {
                 // Single surface (no splits): use original simple rendering path
                 // The surface padding is set by computeSplitLayout, so we use it here
                 if (activeSurface()) |surface| {
+                    const rend = &surface.surface_renderer;
                     var needs_rebuild: bool = false;
                     {
                         surface.render_state.mutex.lock();
                         defer surface.render_state.mutex.unlock();
-                        updateCursorBlink();
+                        updateCursorBlinkForRenderer(rend);
                         g_current_render_surface = surface;
-                        needs_rebuild = updateTerminalCells(&surface.terminal);
+                        rend.is_focused = true; // Single surface is always focused
+                        needs_rebuild = updateTerminalCells(rend, &surface.terminal);
                     }
-                    if (needs_rebuild) rebuildCells();
+                    if (needs_rebuild) rebuildCells(rend);
 
                     gl.Viewport.?(0, 0, fb_width, fb_height);
                     setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
@@ -7013,7 +7132,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     const pad = surface.getPadding();
                     const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                     renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-                    drawCells(@floatFromInt(fb_height), @floatFromInt(pad.left), pad_top);
+                    drawCells(rend, @floatFromInt(fb_height), @floatFromInt(pad.left), pad_top);
                     renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
 
                     // Render resize overlay centered in content area (offset for titlebar)
@@ -7033,6 +7152,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     for (0..split_count) |i| {
                         const rect = g_split_rects[i];
                         const is_focused = (rect.handle == tab.focused);
+                        const rend = &rect.surface.surface_renderer;
 
                         // Set viewport to this split's region
                         // OpenGL viewport: (x, y, width, height) where y is from bottom
@@ -7046,16 +7166,16 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                         {
                             rect.surface.render_state.mutex.lock();
                             defer rect.surface.render_state.mutex.unlock();
-                            if (is_focused) updateCursorBlink();
-                            g_force_rebuild = true;
+                            if (is_focused) updateCursorBlinkForRenderer(rend);
+                            rend.force_rebuild = true;
                             g_current_render_surface = rect.surface;
-                            _ = updateTerminalCellsForSurface(&rect.surface.terminal, is_focused);
+                            _ = updateTerminalCellsForSurface(rend, &rect.surface.terminal, is_focused);
                         }
-                        rebuildCells();
+                        rebuildCells(rend);
 
                         // Draw cells using the surface's computed padding
                         const pad = rect.surface.getPadding();
-                        drawCells(@floatFromInt(rect.height), @floatFromInt(pad.left), @floatFromInt(pad.top));
+                        drawCells(rend, @floatFromInt(rect.height), @floatFromInt(pad.left), @floatFromInt(pad.top));
 
                         // Render scrollbar for this surface within its viewport
                         renderScrollbarForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height), @floatFromInt(pad.top));
