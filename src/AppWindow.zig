@@ -1031,26 +1031,47 @@ fn splitFocused(direction: SplitTree.Split.Direction) void {
     // Get CWD from focused surface for working directory inheritance
     var cwd_buf: [260]u16 = undefined;
     var cwd: ?[*:0]const u16 = null;
-    if (tab.focusedSurface()) |surface| {
-        if (surface.getCwd()) |unix_path| {
-            if (unixPathToWindows(unix_path, &cwd_buf)) |len| {
-                cwd_buf[len] = 0;
-                cwd = @ptrCast(&cwd_buf);
-            }
+    const focused_surface = tab.focusedSurface() orelse return;
+    if (focused_surface.getCwd()) |unix_path| {
+        if (unixPathToWindows(unix_path, &cwd_buf)) |len| {
+            cwd_buf[len] = 0;
+            cwd = @ptrCast(&cwd_buf);
         }
     }
 
-    // Compute approximate dimensions for the new split surface.
-    // For a 50/50 split, the new surface gets half the space.
-    // We need reasonable initial dimensions so the PTY/shell starts correctly.
-    const split_cols: u16 = switch (direction) {
-        .left, .right => @max(10, term_cols / 2),
-        .up, .down => term_cols,
+    // Calculate exact dimensions for the new split surface.
+    // Use the focused surface's current screen size to compute what
+    // half of it would be (for 50/50 split), accounting for padding.
+    // This ensures the PTY starts with correct dimensions, avoiding
+    // a resize race that can corrupt terminal state.
+    const screen_w = focused_surface.size.screen.width;
+    const screen_h = focused_surface.size.screen.height;
+    const pad = focused_surface.getPadding();
+    const pad_w = pad.left + pad.right;
+    const pad_h = pad.top + pad.bottom;
+    
+    // New surface gets half the space minus divider, plus its own padding
+    const half_div = @divTrunc(SPLIT_DIVIDER_WIDTH, 2);
+    const new_screen_w: u32 = switch (direction) {
+        .left, .right => @max(1, (screen_w / 2) -| half_div),
+        .up, .down => screen_w,
     };
-    const split_rows: u16 = switch (direction) {
-        .left, .right => term_rows,
-        .up, .down => @max(5, term_rows / 2),
+    const new_screen_h: u32 = switch (direction) {
+        .left, .right => screen_h,
+        .up, .down => @max(1, (screen_h / 2) -| half_div),
     };
+    
+    // Calculate grid dimensions from screen size (same logic as setScreenSize)
+    const avail_w = @as(i32, @intCast(new_screen_w)) - @as(i32, @intCast(pad_w));
+    const avail_h = @as(i32, @intCast(new_screen_h)) - @as(i32, @intCast(pad_h));
+    const calc_cols: u16 = if (avail_w > 0) @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_w)) / cell_width)) else 10;
+    const calc_rows: u16 = if (avail_h > 0) @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_h)) / cell_height)) else 5;
+    
+    // Enforce minimum dimensions to avoid garbled output in tiny terminals
+    const MIN_COLS: u16 = 20;
+    const MIN_ROWS: u16 = 5;
+    const split_cols = @max(MIN_COLS, calc_cols);
+    const split_rows = @max(MIN_ROWS, calc_rows);
 
     const new_surface = Surface.init(
         allocator,
@@ -1065,6 +1086,14 @@ fn splitFocused(direction: SplitTree.Split.Direction) void {
         std.debug.print("Failed to create Surface for split\n", .{});
         return;
     };
+
+    // Pre-initialize the surface's size state to match what computeSplitLayout
+    // will compute, preventing a resize race during the first render.
+    new_surface.size.screen.width = new_screen_w;
+    new_surface.size.screen.height = new_screen_h;
+    new_surface.size.cell.width = cell_width;
+    new_surface.size.cell.height = cell_height;
+    new_surface.size.padding = pad;
 
     // Create a single-leaf tree for the new surface.
     // The tree takes ownership via ref(), so we unref our initial ownership.
