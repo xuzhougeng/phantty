@@ -416,6 +416,8 @@ const PM_REMOVE: UINT = 0x0001;
 // SWP flags for SetWindowPos
 const SWP_NOZORDER: UINT = 0x0004;
 const SWP_NOMOVE: UINT = 0x0002;
+const SWP_NOSIZE: UINT = 0x0001;
+const SWP_FRAMECHANGED: UINT = 0x0020;
 
 // ============================================================================
 // Window state
@@ -677,6 +679,10 @@ pub const Window = struct {
             .cyBottomHeight = 0,
         };
         _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+
+        // Force Windows to recalculate the non-client area using our WM_NCCALCSIZE handler.
+        // Without this, the native titlebar may still appear until the window is resized.
+        _ = SetWindowPos(hwnd, null, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
 
         const hdc = GetDC(hwnd) orelse {
             _ = DestroyWindow(hwnd);
@@ -947,6 +953,28 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         }
     }
 
+    // Handle WM_NCCALCSIZE even before g_win32_window is set (during CreateWindowExW).
+    // This is critical for removing the native titlebar on window creation.
+    if (msg == WM_NCCALCSIZE) {
+        if (wParam == 1) {
+            // Remove all non-client area (no default title bar or borders).
+            // Our WM_NCHITTEST handler provides resize borders and caption.
+            // Note: maximized window handling is done below when w is available.
+            if (g_win32_window) |w| {
+                if (IsZoomed(hwnd) != 0 and !w.is_fullscreen) {
+                    const params: *NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(lParam)));
+                    const border = getResizeBorderThickness();
+                    params.rgrc[0].top += border;
+                    params.rgrc[0].left += border;
+                    params.rgrc[0].right -= border;
+                    params.rgrc[0].bottom -= border;
+                }
+            }
+            return 0;
+        }
+        return 0;
+    }
+
     const w = g_win32_window orelse return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     switch (msg) {
@@ -993,27 +1021,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             return 1;
         },
 
-        // --- Custom title bar: remove default title bar ---
-        WM_NCCALCSIZE => {
-            if (wParam == 1) {
-                // Remove all non-client area (no default title bar or borders).
-                // Our WM_NCHITTEST handler provides resize borders and caption.
-                if (IsZoomed(hwnd) != 0 and !w.is_fullscreen) {
-                    // Maximized (not fullscreen): Windows extends the window
-                    // beyond the screen by the resize border thickness on all
-                    // sides. Inset all edges so content isn't clipped behind
-                    // screen edges/taskbar.
-                    const params: *NCCALCSIZE_PARAMS = @ptrFromInt(@as(usize, @bitCast(lParam)));
-                    const border = getResizeBorderThickness();
-                    params.rgrc[0].top += border;
-                    params.rgrc[0].left += border;
-                    params.rgrc[0].right -= border;
-                    params.rgrc[0].bottom -= border;
-                }
-                return 0;
-            }
-            return 0;
-        },
+        // WM_NCCALCSIZE is handled before the switch (to work during CreateWindowExW)
 
         // --- Custom title bar: hit testing ---
         WM_NCHITTEST => {
