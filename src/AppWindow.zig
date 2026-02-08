@@ -1068,8 +1068,9 @@ fn splitFocused(direction: SplitTree.Split.Direction) void {
     const calc_rows: u16 = if (avail_h > 0) @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_h)) / cell_height)) else 5;
     
     // Enforce minimum dimensions to avoid garbled output in tiny terminals
-    const MIN_COLS: u16 = 20;
-    const MIN_ROWS: u16 = 5;
+    // (matches Ghostty's min_window_width_cells/min_window_height_cells)
+    const MIN_COLS: u16 = 10;
+    const MIN_ROWS: u16 = 4;
     const split_cols = @max(MIN_COLS, calc_cols);
     const split_rows = @max(MIN_ROWS, calc_rows);
 
