@@ -6921,7 +6921,22 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     // For height: ph = fb_height - (render_padding + titlebar) - render_padding, then subtract explicit_padding
     const total_height_padding = (render_padding + titlebar_height) + render_padding + explicit_top + explicit_bottom; // 44 + 10 + 20 = 74
 
-    // Get actual window client size
+    // If config specifies window-width/window-height, resize window to fit that grid.
+    // term_cols/term_rows were set from config at init.
+    if (term_cols > 0 and term_rows > 0) {
+        // Calculate window size needed for desired grid
+        const desired_grid_width = cell_width * @as(f32, @floatFromInt(term_cols));
+        const desired_grid_height = cell_height * @as(f32, @floatFromInt(term_rows));
+        
+        // Work backwards: fb_width = grid_width + total_width_padding
+        //                 fb_height = grid_height + total_height_padding
+        const target_fb_width: i32 = @intFromFloat(desired_grid_width + total_width_padding);
+        const target_fb_height: i32 = @intFromFloat(desired_grid_height + total_height_padding);
+        
+        win32_window.setSize(target_fb_width, target_fb_height);
+    }
+
+    // Get actual window client size (after potential resize)
     const init_fb = win32_window.getFramebufferSize();
     const actual_width: f32 = @floatFromInt(init_fb.width);
     const actual_height: f32 = @floatFromInt(init_fb.height);
