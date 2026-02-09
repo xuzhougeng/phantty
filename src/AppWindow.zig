@@ -318,6 +318,9 @@ threadlocal var g_divider_dragging: bool = false; // Currently dragging a divide
 threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
 threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
 
+// Split resize overlay (for equalize/keyboard resize - shows overlay on all splits temporarily)
+threadlocal var g_split_resize_overlay_until: i64 = 0; // Timestamp when overlay should hide
+
 // ============================================================================
 // Resize overlay — shows terminal size during resize (like Ghostty)
 // ============================================================================
@@ -1214,6 +1217,32 @@ fn gotoSplit(direction: SplitTree.Goto) void {
         g_force_rebuild = true;
         g_cells_valid = false;
     }
+}
+
+/// Equalize all split ratios based on weight (number of leaves per branch)
+fn equalizeSplits() void {
+    const allocator = g_allocator orelse return;
+    const tab = activeTab() orelse return;
+
+    // Initialize per-surface resize tracking with current sizes
+    // so we can detect which surfaces changed after equalize
+    var it = tab.tree.iterator();
+    while (it.next()) |entry| {
+        entry.surface.resize_overlay_active = true; // Will show overlay
+        entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
+        entry.surface.resize_overlay_last_rows = entry.surface.size.grid.rows;
+    }
+
+    const new_tree = tab.tree.equalize(allocator) catch return;
+    tab.tree.deinit();
+    tab.tree = new_tree;
+
+    // Show resize overlay on all splits for a short duration
+    g_split_resize_overlay_until = std.time.milliTimestamp() + RESIZE_OVERLAY_DURATION_MS;
+
+    // Force re-layout of all surfaces (layout recomputed in next render frame)
+    g_force_rebuild = true;
+    g_cells_valid = false;
 }
 
 /// Update focus from mouse position (for focus-follows-mouse)
@@ -5114,12 +5143,14 @@ fn renderResizeOverlayWithOffset(window_width: f32, window_height: f32, top_offs
     renderResizeOverlayText(g_resize_overlay_cols, g_resize_overlay_rows, window_width, window_height, top_offset, g_resize_overlay_opacity);
 }
 
-/// Render the resize overlay for a specific surface (used during divider dragging).
+/// Render the resize overlay for a specific surface (used during divider dragging or equalize).
 /// Shows the surface's current dimensions centered in the viewport.
-/// Only shows if this surface's size actually changed during the drag.
+/// Only shows if this surface's size actually changed during the drag/equalize.
 fn renderResizeOverlayForSurface(surface: *Surface, window_width: f32, window_height: f32) void {
-    // Only show during divider dragging and if this surface's size changed
-    if (!g_divider_dragging or !surface.resize_overlay_active) return;
+    // Show during divider dragging OR during timed split resize overlay (equalize, keyboard resize)
+    const show_timed = std.time.milliTimestamp() < g_split_resize_overlay_until;
+    if (!g_divider_dragging and !show_timed) return;
+    if (!surface.resize_overlay_active) return;
 
     const cols = surface.size.grid.cols;
     const rows = surface.size.grid.rows;
@@ -5909,6 +5940,11 @@ const win32_input = struct {
         // Ctrl+Shift+] = goto next split
         if (ev.ctrl and ev.shift and ev.vk == win32_backend.VK_OEM_6) { // ']'
             gotoSplit(.next_wrapped);
+            return;
+        }
+        // Ctrl+Shift+Z = equalize splits
+        if (ev.ctrl and ev.shift and ev.vk == 0x5A) { // 'Z'
+            equalizeSplits();
             return;
         }
         // Ctrl+Tab = next tab
@@ -7233,9 +7269,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                         }
 
                         // Render resize overlay:
-                        // - During divider dragging: show on ALL splits with their current dimensions
+                        // - During divider dragging or timed overlay (equalize): show on ALL splits
                         // - Otherwise: show only on focused split (for window resize)
-                        if (g_divider_dragging) {
+                        const show_timed_overlay = std.time.milliTimestamp() < g_split_resize_overlay_until;
+                        if (g_divider_dragging or show_timed_overlay) {
                             renderResizeOverlayForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height));
                         } else if (is_focused) {
                             renderResizeOverlay(@floatFromInt(rect.width), @floatFromInt(rect.height));
