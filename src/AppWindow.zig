@@ -18,6 +18,7 @@ const renderer = @import("renderer.zig");
 const win32_backend = @import("win32.zig");
 const App = @import("App.zig");
 const Renderer = @import("Renderer.zig");
+pub const tab = @import("appwindow/tab.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -63,12 +64,12 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     term_cols = app.initial_cols;
     term_rows = app.initial_rows;
 
-    g_scrollback_limit = app.scrollback_limit;
+    tab.g_scrollback_limit = app.scrollback_limit;
 
     // Copy shell command from App
-    @memcpy(g_shell_cmd_buf[0..app.shell_cmd_len], app.shell_cmd_buf[0..app.shell_cmd_len]);
-    g_shell_cmd_buf[app.shell_cmd_len] = 0;
-    g_shell_cmd_len = app.shell_cmd_len;
+    @memcpy(tab.g_shell_cmd_buf[0..app.shell_cmd_len], app.shell_cmd_buf[0..app.shell_cmd_len]);
+    tab.g_shell_cmd_buf[app.shell_cmd_len] = 0;
+    tab.g_shell_cmd_len = app.shell_cmd_len;
 
     // Store config values we need for init
     g_requested_font = app.font_family;
@@ -77,7 +78,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     g_shader_path = app.shader_path;
     g_start_maximize = app.maximize;
     g_start_fullscreen = app.fullscreen;
-    g_forced_title = app.title;
+    tab.g_forced_title = app.title;
 
     // Get initial CWD for this window (if any) - copy into thread-local buffer
     g_initial_cwd_len = app.takeInitialCwd(&g_initial_cwd_buf);
@@ -105,14 +106,14 @@ pub fn getHwnd(self: *AppWindow) ?win32_backend.HWND {
 /// Clean up resources.
 pub fn deinit(self: *AppWindow) void {
     // Clean up all tabs
-    for (0..g_tab_count) |ti| {
-        if (g_tabs[ti]) |tab| {
-            tab.deinit(self.allocator);
-            self.allocator.destroy(tab);
-            g_tabs[ti] = null;
+    for (0..tab.g_tab_count) |ti| {
+        if (tab.g_tabs[ti]) |t| {
+            t.deinit(self.allocator);
+            self.allocator.destroy(t);
+            tab.g_tabs[ti] = null;
         }
     }
-    g_tab_count = 0;
+    tab.g_tab_count = 0;
 }
 
 // ============================================================================
@@ -132,7 +133,6 @@ threadlocal var g_requested_weight: directwrite.DWRITE_FONT_WEIGHT = .NORMAL;
 threadlocal var g_shader_path: ?[]const u8 = null;
 threadlocal var g_start_maximize: bool = false;
 threadlocal var g_start_fullscreen: bool = false;
-threadlocal var g_forced_title: ?[]const u8 = null;
 
 // Global theme (set at startup via config)
 threadlocal var g_theme: Theme = Theme.default();
@@ -347,249 +347,9 @@ threadlocal var g_resize_active: bool = false; // True while actively resizing
 // Suppress resize overlay briefly after tab switch/creation to avoid false triggers
 threadlocal var g_resize_overlay_suppress_until: i64 = 0;
 
-// ============================================================================
-// Tab rename — inline editing state
-// ============================================================================
 
-// Per-tab text hit region (synced from renderer for double-click rename)
-threadlocal var g_tab_text_x_start: [MAX_TABS]f32 = .{0} ** MAX_TABS;
-threadlocal var g_tab_text_x_end: [MAX_TABS]f32 = .{0} ** MAX_TABS;
-
-threadlocal var g_tab_rename_active: bool = false;
-threadlocal var g_tab_rename_idx: usize = 0;
-threadlocal var g_tab_rename_buf: [256]u8 = undefined;
-threadlocal var g_tab_rename_len: usize = 0;
-threadlocal var g_tab_rename_cursor: usize = 0; // byte offset cursor position
-threadlocal var g_tab_rename_select_all: bool = false; // entire text is selected
-threadlocal var g_tab_rename_orig_buf: [256]u8 = undefined; // original title at rename start
-threadlocal var g_tab_rename_orig_len: usize = 0;
-
-fn startTabRename(tab_idx: usize) void {
-    if (tab_idx >= g_tab_count) return;
-    const tab = g_tabs[tab_idx] orelse return;
-    const title = tab.getTitle();
-    const len = @min(title.len, g_tab_rename_buf.len);
-    @memcpy(g_tab_rename_buf[0..len], title[0..len]);
-    g_tab_rename_len = len;
-    g_tab_rename_cursor = len;
-    // Save original title for comparison on commit
-    @memcpy(g_tab_rename_orig_buf[0..len], title[0..len]);
-    g_tab_rename_orig_len = len;
-    g_tab_rename_idx = tab_idx;
-    g_tab_rename_active = true;
-    g_tab_rename_select_all = true;
-}
-
-fn commitTabRename() void {
-    if (!g_tab_rename_active) return;
-    if (g_tab_rename_idx < g_tab_count) {
-        if (g_tabs[g_tab_rename_idx]) |tab| {
-            // Only set override if the title was actually changed
-            const changed = g_tab_rename_len != g_tab_rename_orig_len or
-                !std.mem.eql(u8, g_tab_rename_buf[0..g_tab_rename_len], g_tab_rename_orig_buf[0..g_tab_rename_orig_len]);
-            if (changed) {
-                // Empty name clears the override (reverts to automatic title)
-                if (tab.focusedSurface()) |surface| {
-                    surface.setTitleOverride(g_tab_rename_buf[0..g_tab_rename_len]);
-                }
-            }
-        }
-    }
-    g_tab_rename_active = false;
-}
-
-fn cancelTabRename() void {
-    g_tab_rename_active = false;
-}
-
-fn handleRenameKey(ev: win32_backend.KeyEvent) void {
-    // Reset blink so cursor is visible after any key
-    g_cursor_blink_visible = true;
-    g_last_blink_time = std.time.milliTimestamp();
-
-    if (ev.vk == win32_backend.VK_RETURN) {
-        commitTabRename();
-        return;
-    }
-    if (ev.vk == win32_backend.VK_ESCAPE) {
-        cancelTabRename();
-        return;
-    }
-    if (ev.vk == win32_backend.VK_BACK) {
-        if (g_tab_rename_select_all) {
-            g_tab_rename_len = 0;
-            g_tab_rename_cursor = 0;
-            g_tab_rename_select_all = false;
-            return;
-        }
-        // Delete one UTF-8 codepoint before cursor
-        if (g_tab_rename_cursor > 0) {
-            // Walk back over UTF-8 continuation bytes
-            var i = g_tab_rename_cursor - 1;
-            while (i > 0 and (g_tab_rename_buf[i] & 0xC0) == 0x80) i -= 1;
-            const removed = g_tab_rename_cursor - i;
-            // Shift remaining bytes left
-            const remaining = g_tab_rename_len - g_tab_rename_cursor;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, g_tab_rename_buf[i..], g_tab_rename_buf[g_tab_rename_cursor .. g_tab_rename_cursor + remaining]);
-            }
-            g_tab_rename_len -= removed;
-            g_tab_rename_cursor = i;
-        }
-        return;
-    }
-    if (ev.vk == win32_backend.VK_DELETE) {
-        if (g_tab_rename_select_all) {
-            g_tab_rename_len = 0;
-            g_tab_rename_cursor = 0;
-            g_tab_rename_select_all = false;
-            return;
-        }
-        // Delete one UTF-8 codepoint after cursor
-        if (g_tab_rename_cursor < g_tab_rename_len) {
-            var end = g_tab_rename_cursor + 1;
-            while (end < g_tab_rename_len and (g_tab_rename_buf[end] & 0xC0) == 0x80) end += 1;
-            const removed = end - g_tab_rename_cursor;
-            const remaining = g_tab_rename_len - end;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, g_tab_rename_buf[g_tab_rename_cursor..], g_tab_rename_buf[end .. end + remaining]);
-            }
-            g_tab_rename_len -= removed;
-        }
-        return;
-    }
-    if (ev.vk == win32_backend.VK_LEFT) {
-        g_tab_rename_select_all = false;
-        if (g_tab_rename_cursor > 0) {
-            g_tab_rename_cursor -= 1;
-            while (g_tab_rename_cursor > 0 and (g_tab_rename_buf[g_tab_rename_cursor] & 0xC0) == 0x80)
-                g_tab_rename_cursor -= 1;
-        }
-        return;
-    }
-    if (ev.vk == win32_backend.VK_RIGHT) {
-        g_tab_rename_select_all = false;
-        if (g_tab_rename_cursor < g_tab_rename_len) {
-            g_tab_rename_cursor += 1;
-            while (g_tab_rename_cursor < g_tab_rename_len and (g_tab_rename_buf[g_tab_rename_cursor] & 0xC0) == 0x80)
-                g_tab_rename_cursor += 1;
-        }
-        return;
-    }
-    // Ctrl+A = move to start (like terminal prompt)
-    if (ev.ctrl and ev.vk == 0x41) {
-        g_tab_rename_select_all = false;
-        g_tab_rename_cursor = 0;
-        return;
-    }
-    // Ctrl+E = move to end
-    if (ev.ctrl and ev.vk == 0x45) {
-        g_tab_rename_select_all = false;
-        g_tab_rename_cursor = g_tab_rename_len;
-        return;
-    }
-    // Ctrl+U = delete from cursor to start (forward delete in terminal speak)
-    if (ev.ctrl and ev.vk == 0x55) {
-        if (g_tab_rename_select_all) {
-            g_tab_rename_len = 0;
-            g_tab_rename_cursor = 0;
-            g_tab_rename_select_all = false;
-        } else if (g_tab_rename_cursor > 0) {
-            const remaining = g_tab_rename_len - g_tab_rename_cursor;
-            if (remaining > 0) {
-                std.mem.copyForwards(u8, g_tab_rename_buf[0..remaining], g_tab_rename_buf[g_tab_rename_cursor .. g_tab_rename_cursor + remaining]);
-            }
-            g_tab_rename_len = remaining;
-            g_tab_rename_cursor = 0;
-        }
-        return;
-    }
-    // Ctrl+K = delete from cursor to end
-    if (ev.ctrl and ev.vk == 0x4B) {
-        if (g_tab_rename_select_all) {
-            g_tab_rename_len = 0;
-            g_tab_rename_cursor = 0;
-            g_tab_rename_select_all = false;
-        } else {
-            g_tab_rename_len = g_tab_rename_cursor;
-        }
-        return;
-    }
-}
-
-fn handleRenameChar(codepoint: u21) void {
-    // Reset blink so cursor is visible after typing
-    g_cursor_blink_visible = true;
-    g_last_blink_time = std.time.milliTimestamp();
-
-    // Encode codepoint as UTF-8
-    var buf: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(codepoint, &buf) catch return;
-
-    // If select-all is active, replace entire text
-    if (g_tab_rename_select_all) {
-        if (len > g_tab_rename_buf.len) return;
-        @memcpy(g_tab_rename_buf[0..len], buf[0..len]);
-        g_tab_rename_len = len;
-        g_tab_rename_cursor = len;
-        g_tab_rename_select_all = false;
-        return;
-    }
-
-    if (g_tab_rename_len + len > g_tab_rename_buf.len) return;
-
-    // Make room at cursor
-    if (g_tab_rename_cursor < g_tab_rename_len) {
-        const remaining = g_tab_rename_len - g_tab_rename_cursor;
-        std.mem.copyBackwards(u8, g_tab_rename_buf[g_tab_rename_cursor + len .. g_tab_rename_cursor + len + remaining], g_tab_rename_buf[g_tab_rename_cursor .. g_tab_rename_cursor + remaining]);
-    }
-    @memcpy(g_tab_rename_buf[g_tab_rename_cursor .. g_tab_rename_cursor + len], buf[0..len]);
-    g_tab_rename_len += len;
-    g_tab_rename_cursor += len;
-}
-
-// ============================================================================
-// Tab close button — fade-in on hover per tab
-// ============================================================================
-
-const TAB_CLOSE_BTN_W: f32 = 36; // width of the close button hit area
-const TAB_CLOSE_FADE_SPEED: f32 = 6.0; // opacity units per second (0→1 in ~170ms)
-threadlocal var g_tab_close_opacity: [MAX_TABS]f32 = .{0} ** MAX_TABS; // per-tab close button opacity
-threadlocal var g_tab_close_pressed: ?usize = null; // tab index whose close btn is pressed (mouse-down)
-threadlocal var g_last_frame_time_ms: i64 = 0; // for delta-time computation
-
-// ============================================================================
-// Tab model — each tab owns a Surface (PTY + terminal + OSC state)
-// ============================================================================
-
-const TabState = struct {
-    tree: SplitTree,
-    focused: SplitTree.Node.Handle = .root,
-
-    /// Get the focused surface in this tab, or null if tree is empty
-    fn focusedSurface(self: *const TabState) ?*Surface {
-        if (self.tree.isEmpty()) return null;
-        return switch (self.tree.nodes[self.focused.idx()]) {
-            .leaf => |surface| surface,
-            .split => null, // focused should always be a leaf
-        };
-    }
-
-    /// Get the display title for this tab (delegates to focused Surface, unless forced)
-    fn getTitle(self: *const TabState) []const u8 {
-        // If a forced title is set via config, always use that
-        if (g_forced_title) |forced| {
-            return forced;
-        }
-        const surface = self.focusedSurface() orelse return "phantty";
-        return surface.getTitle();
-    }
-
-    fn deinit(self: *TabState, allocator: std.mem.Allocator) void {
-        _ = allocator; // Tree uses its internal arena's child allocator
-        self.tree.deinit();
-    }
-};
+// Tab model — see appwindow/tab.zig
+const TabState = tab.TabState;
 
 // ============================================================================
 // Split layout — computed pixel rects for each surface in a split tree
@@ -607,19 +367,13 @@ pub const SplitRect = struct {
     handle: SplitTree.Node.Handle,
 };
 
-/// Maximum number of split surfaces per tab
-const MAX_SPLITS_PER_TAB = 16;
+const MAX_SPLITS_PER_TAB = tab.MAX_SPLITS_PER_TAB;
+const SPLIT_DIVIDER_WIDTH = tab.SPLIT_DIVIDER_WIDTH;
+const DEFAULT_PADDING = tab.DEFAULT_PADDING;
 
 /// Computed split rects for the active tab (updated each frame)
 threadlocal var g_split_rects: [MAX_SPLITS_PER_TAB]SplitRect = undefined;
 threadlocal var g_split_rect_count: usize = 0;
-
-/// Divider width in pixels between split panes
-const SPLIT_DIVIDER_WIDTH: i32 = 2;
-
-/// Default padding for terminal content (pixels).
-/// This is the minimum padding applied to all surfaces.
-const DEFAULT_PADDING: u32 = 10;
 
 /// Find the surface under a given point (window coordinates).
 /// Returns null if no surface is found at that position.
@@ -644,11 +398,11 @@ const DividerHit = struct {
 /// Check if a point is over a split divider.
 /// Returns the split node handle and layout if found, null otherwise.
 fn hitTestDivider(x: i32, y: i32) ?DividerHit {
-    const tab = activeTab() orelse return null;
-    if (tab.tree.isEmpty() or !tab.tree.isSplit()) return null;
+    const active_tab = activeTab() orelse return null;
+    if (active_tab.tree.isEmpty() or !active_tab.tree.isSplit()) return null;
 
     const allocator = g_allocator orelse return null;
-    var spatial = tab.tree.spatial(allocator) catch return null;
+    var spatial = active_tab.tree.spatial(allocator) catch return null;
     defer spatial.deinit(allocator);
 
     // Get content area dimensions
@@ -664,7 +418,7 @@ fn hitTestDivider(x: i32, y: i32) ?DividerHit {
     const half_hit = SPLIT_DIVIDER_HIT_WIDTH / 2;
 
     // Check each split node for divider hit
-    for (tab.tree.nodes, 0..) |node, i| {
+    for (active_tab.tree.nodes, 0..) |node, i| {
         switch (node) {
             .split => |s| {
                 const handle: SplitTree.Node.Handle = @enumFromInt(i);
@@ -708,7 +462,7 @@ fn hitTestDivider(x: i32, y: i32) ?DividerHit {
 /// Each surface is resized to fit its allocated area with proper padding.
 /// Returns the number of surfaces (0 if tree is empty).
 fn computeSplitLayout(
-    tab: *const TabState,
+    active_tab: *const TabState,
     content_x: i32,
     content_y: i32,
     content_w: i32,
@@ -716,15 +470,15 @@ fn computeSplitLayout(
     cw: f32, // cell_width
     ch: f32, // cell_height
 ) usize {
-    if (tab.tree.isEmpty()) return 0;
+    if (active_tab.tree.isEmpty()) return 0;
 
     // Get spatial representation (normalized 0-1 coordinates)
     const allocator = g_allocator orelse return 0;
-    var spatial = tab.tree.spatial(allocator) catch return 0;
+    var spatial = active_tab.tree.spatial(allocator) catch return 0;
     defer spatial.deinit(allocator);
 
     var count: usize = 0;
-    var it = tab.tree.iterator();
+    var it = active_tab.tree.iterator();
     while (it.next()) |entry| {
         if (count >= MAX_SPLITS_PER_TAB) break;
 
@@ -830,112 +584,84 @@ fn computeSplitLayout(
     return count;
 }
 
-const MAX_TABS = 16;
-threadlocal var g_tabs: [MAX_TABS]?*TabState = .{null} ** MAX_TABS;
-threadlocal var g_tab_count: usize = 0;
-threadlocal var g_active_tab: usize = 0;
+const MAX_TABS = tab.MAX_TABS;
 
-// Global shell command for spawning new tabs (set once at startup from config)
-threadlocal var g_shell_cmd_buf: [256]u16 = undefined;
-threadlocal var g_shell_cmd_len: usize = 0;
-threadlocal var g_scrollback_limit: u32 = 10_000_000;
+// ============================================================================
+// Tab/split operation wrappers — delegate to tab module, handle UI side effects
+// ============================================================================
 
-fn getShellCmd() [:0]const u16 {
-    return g_shell_cmd_buf[0..g_shell_cmd_len :0];
+fn activeTab() ?*TabState {
+    return tab.activeTab();
 }
 
-/// Get the active tab's focused surface's selection
-fn activeSelection() *Selection {
-    if (g_tab_count > 0) {
-        if (g_tabs[g_active_tab]) |tab| {
-            if (tab.focusedSurface()) |surface| {
-                return &surface.selection;
-            }
-        }
-    }
-    // Fallback — should never happen in practice
-    const S = struct {
-        var dummy: Selection = .{};
-    };
-    return &S.dummy;
-}
-
-/// Get the active Surface, or null
 fn activeSurface() ?*Surface {
-    if (g_tab_count == 0) return null;
-    const tab = g_tabs[g_active_tab] orelse return null;
-    return tab.focusedSurface();
+    return tab.activeSurface();
 }
 
-// OSC scanning and title management moved to Surface.zig
+fn activeSelection() *Selection {
+    return tab.activeSelection();
+}
 
-/// Spawn a new tab with its own Surface (PTY + terminal).
-/// Called for both the initial tab and Ctrl+Shift+T.
-/// If cwd is provided, the shell starts in that directory.
-fn spawnTabWithCwd(allocator: std.mem.Allocator, cwd: ?[*:0]const u16) bool {
-    if (g_tab_count >= MAX_TABS) return false;
+fn isActiveTabTerminal() bool {
+    return tab.isActiveTabTerminal();
+}
 
-    // Create Surface (owns PTY + terminal + OSC state)
-    const surface = Surface.init(
-        allocator,
-        term_cols,
-        term_rows,
-        getShellCmd(),
-        g_scrollback_limit,
-        g_cursor_style,
-        g_cursor_blink,
-        cwd,
-    ) catch {
-        std.debug.print("Failed to create Surface for new tab\n", .{});
-        return false;
-    };
-
-    // Initialize split tree with the single surface.
-    // The tree takes ownership via ref(), so we unref our initial ownership.
-    const tree = SplitTree.init(allocator, surface) catch {
-        std.debug.print("Failed to create SplitTree for new tab\n", .{});
-        surface.deinit(allocator);
-        return false;
-    };
-    surface.unref(allocator); // Transfer ownership to tree
-
-    // Allocate TabState on the heap so pointers stay stable when tabs shift
-    const tab = allocator.create(TabState) catch {
-        std.debug.print("Failed to allocate TabState\n", .{});
-        var tree_mut = tree;
-        tree_mut.deinit();
-        return false;
-    };
-    tab.tree = tree;
-    tab.focused = .root;
-
-    g_tabs[g_tab_count] = tab;
-    g_active_tab = g_tab_count;
-    g_tab_count += 1;
-
-    // Clear selection and divider drag state when switching to new tab
+/// Clear UI state after tab creation or switch.
+fn clearUiStateOnTabChange() void {
     g_selecting = false;
     g_divider_dragging = false;
     g_divider_drag_handle = null;
     g_divider_drag_layout = null;
-    // Reset resize overlay so it doesn't carry over to new tab
     g_resize_overlay_visible = false;
     g_resize_overlay_opacity = 0;
-    // Suppress resize overlay briefly to avoid false triggers from initial layout
     g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
     g_force_rebuild = true;
     g_cells_valid = false;
+}
 
-    std.debug.print("New tab spawned (count={}), active: {}\n", .{ g_tab_count, g_active_tab });
+/// Convert the active surface's CWD from Unix to Windows path.
+fn getActiveCwd(cwd_buf: *[260]u16) ?[*:0]const u16 {
+    if (tab.activeSurface()) |surface| {
+        if (surface.getCwd()) |unix_path| {
+            if (unixPathToWindows(unix_path, cwd_buf)) |len| {
+                cwd_buf[len] = 0;
+                return @ptrCast(cwd_buf);
+            }
+        }
+    }
+    return null;
+}
+
+fn spawnTabWithCwd(allocator: std.mem.Allocator, cwd: ?[*:0]const u16) bool {
+    if (!tab.spawnTabWithCwd(allocator, term_cols, term_rows, g_cursor_style, g_cursor_blink, cwd)) return false;
+    clearUiStateOnTabChange();
     return true;
 }
 
-/// Spawn a new tab, inheriting CWD from the active tab if available.
 fn spawnTab(allocator: std.mem.Allocator) bool {
-    // Get CWD from active tab for working directory inheritance
+    var cwd_buf: [260]u16 = undefined;
+    const cwd = getActiveCwd(&cwd_buf);
+    return spawnTabWithCwd(allocator, cwd);
+}
+
+fn closeTab(idx: usize) void {
+    const allocator = g_allocator orelse return;
+    tab.closeTab(idx, allocator);
+    g_selecting = false;
+    g_force_rebuild = true;
+    g_cells_valid = false;
+}
+
+fn switchTab(idx: usize) void {
+    tab.switchTab(idx);
+    clearUiStateOnTabChange();
+}
+
+fn splitFocused(direction: SplitTree.Split.Direction) void {
+    const allocator = g_allocator orelse return;
     var cwd_buf: [260]u16 = undefined;
     var cwd: ?[*:0]const u16 = null;
-    if (activeSurface()) |surface| {
+    if (tab.activeSurface()) |surface| {
         if (surface.getCwd()) |unix_path| {
             if (unixPathToWindows(unix_path, &cwd_buf)) |len| {
                 cwd_buf[len] = 0;
@@ -943,320 +669,58 @@ fn spawnTab(allocator: std.mem.Allocator) bool {
             }
         }
     }
-    return spawnTabWithCwd(allocator, cwd);
-}
-
-fn closeTab(idx: usize) void {
-    if (g_tab_count <= 1) return; // last tab closed via g_should_close instead
-    if (idx >= g_tab_count) return;
-
-    const allocator = g_allocator orelse return;
-
-    // Deinit and free the tab
-    if (g_tabs[idx]) |tab| {
-        tab.deinit(allocator);
-        allocator.destroy(tab);
-    }
-
-    // Shift tabs and close button opacity down
-    var i = idx;
-    while (i + 1 < g_tab_count) : (i += 1) {
-        g_tabs[i] = g_tabs[i + 1];
-        g_tab_close_opacity[i] = g_tab_close_opacity[i + 1];
-    }
-    g_tabs[g_tab_count - 1] = null;
-    g_tab_close_opacity[g_tab_count - 1] = 0;
-    g_tab_count -= 1;
-
-    // Adjust active tab index
-    if (g_active_tab == idx) {
-        if (g_active_tab >= g_tab_count) {
-            g_active_tab = g_tab_count - 1;
-        }
-    } else if (g_active_tab > idx) {
-        g_active_tab -= 1;
-    }
-
-    // Clear selection state when tab changes
-    g_selecting = false;
-    g_force_rebuild = true;
-    g_cells_valid = false;
-}
-
-fn switchTab(idx: usize) void {
-    if (idx < g_tab_count) {
-        g_active_tab = idx;
-        // Clear bell indicator when switching to this tab (like Ghostty)
-        if (g_tabs[idx]) |tab| {
-            var it = tab.tree.iterator();
-            while (it.next()) |entry| {
-                entry.surface.bell_indicator = false;
-                // Force rebuild for this surface when switching to its tab
-                entry.surface.surface_renderer.force_rebuild = true;
-                entry.surface.surface_renderer.cells_valid = false;
-            }
-        }
-        // Clear selection and divider drag state when switching tabs
-        g_selecting = false;
-        g_divider_dragging = false;
-        g_divider_drag_handle = null;
-        g_divider_drag_layout = null;
-        // Reset resize overlay so it doesn't carry over between tabs
-        g_resize_overlay_visible = false;
-        g_resize_overlay_opacity = 0;
-        // Suppress resize overlay briefly to avoid false triggers from layout recalc
-        g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
+    if (tab.splitFocused(allocator, direction, cell_width, cell_height, g_cursor_style, g_cursor_blink, cwd)) {
+        g_resize_active = false;
         g_force_rebuild = true;
         g_cells_valid = false;
     }
 }
 
-fn isActiveTabTerminal() bool {
-    if (g_tab_count == 0) return false;
-    return g_tabs[g_active_tab] != null;
-}
-
-/// Get the active tab, or null
-fn activeTab() ?*TabState {
-    if (g_tab_count == 0) return null;
-    return g_tabs[g_active_tab];
-}
-
-// ============================================================================
-// Split operations
-// ============================================================================
-
-/// Split the focused surface in the given direction, creating a new surface.
-fn splitFocused(direction: SplitTree.Split.Direction) void {
-    const allocator = g_allocator orelse return;
-    const tab = activeTab() orelse return;
-
-    // Get CWD from focused surface for working directory inheritance
-    var cwd_buf: [260]u16 = undefined;
-    var cwd: ?[*:0]const u16 = null;
-    const focused_surface = tab.focusedSurface() orelse return;
-    if (focused_surface.getCwd()) |unix_path| {
-        if (unixPathToWindows(unix_path, &cwd_buf)) |len| {
-            cwd_buf[len] = 0;
-            cwd = @ptrCast(&cwd_buf);
-        }
-    }
-
-    // Calculate exact dimensions for the new split surface.
-    // Use the focused surface's current screen size to compute what
-    // half of it would be (for 50/50 split), accounting for padding.
-    // This ensures the PTY starts with correct dimensions, avoiding
-    // a resize race that can corrupt terminal state.
-    const screen_w = focused_surface.size.screen.width;
-    const screen_h = focused_surface.size.screen.height;
-    const pad = focused_surface.getPadding();
-    const pad_w = pad.left + pad.right;
-    const pad_h = pad.top + pad.bottom;
-    
-    // New surface gets half the space minus divider, plus its own padding
-    const half_div = @divTrunc(SPLIT_DIVIDER_WIDTH, 2);
-    const new_screen_w: u32 = switch (direction) {
-        .left, .right => @max(1, (screen_w / 2) -| half_div),
-        .up, .down => screen_w,
-    };
-    const new_screen_h: u32 = switch (direction) {
-        .left, .right => screen_h,
-        .up, .down => @max(1, (screen_h / 2) -| half_div),
-    };
-    
-    // Calculate grid dimensions from screen size (same logic as setScreenSize)
-    const avail_w = @as(i32, @intCast(new_screen_w)) - @as(i32, @intCast(pad_w));
-    const avail_h = @as(i32, @intCast(new_screen_h)) - @as(i32, @intCast(pad_h));
-    const calc_cols: u16 = if (avail_w > 0) @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_w)) / cell_width)) else 10;
-    const calc_rows: u16 = if (avail_h > 0) @intFromFloat(@max(1, @as(f32, @floatFromInt(avail_h)) / cell_height)) else 5;
-    
-    // Enforce minimum dimensions to avoid garbled output in tiny terminals
-    const MIN_COLS: u16 = 20;
-    const MIN_ROWS: u16 = 5;
-    const split_cols = @max(MIN_COLS, calc_cols);
-    const split_rows = @max(MIN_ROWS, calc_rows);
-
-    const new_surface = Surface.init(
-        allocator,
-        split_cols,
-        split_rows,
-        getShellCmd(),
-        g_scrollback_limit,
-        g_cursor_style,
-        g_cursor_blink,
-        cwd,
-    ) catch {
-        std.debug.print("Failed to create Surface for split\n", .{});
-        return;
-    };
-
-    // Pre-initialize the surface's size state to match what computeSplitLayout
-    // will compute, preventing a resize race during the first render.
-    new_surface.size.screen.width = new_screen_w;
-    new_surface.size.screen.height = new_screen_h;
-    new_surface.size.cell.width = cell_width;
-    new_surface.size.cell.height = cell_height;
-    new_surface.size.padding = pad;
-
-    // Create a single-leaf tree for the new surface.
-    // The tree takes ownership via ref(), so we unref our initial ownership.
-    var insert_tree = SplitTree.init(allocator, new_surface) catch {
-        std.debug.print("Failed to create SplitTree for split\n", .{});
-        new_surface.deinit(allocator);
-        return;
-    };
-    new_surface.unref(allocator); // Transfer ownership to tree
-    defer insert_tree.deinit();
-
-    // Split the current tree at the focused node
-    const new_tree = tab.tree.split(
-        allocator,
-        tab.focused,
-        direction,
-        0.5, // 50/50 split
-        &insert_tree,
-    ) catch {
-        std.debug.print("Failed to split tree\n", .{});
-        return;
-    };
-
-    // The new surface's handle is at the first index after the old tree's nodes
-    // (since split() copies old nodes first, then insert nodes, then creates split node)
-    const new_handle: SplitTree.Node.Handle = @enumFromInt(tab.tree.nodes.len);
-
-    // Replace old tree with new tree
-    var old_tree = tab.tree;
-    tab.tree = new_tree;
-    old_tree.deinit();
-
-    // Focus the new surface
-    tab.focused = new_handle;
-
-    // Clear resize state to ensure cursor shows and layout is fresh
-    g_resize_active = false;
-
-    // Trigger resize for all surfaces in the tree to recalculate dimensions
-    g_force_rebuild = true;
-    g_cells_valid = false;
-
-    std.debug.print("Split created: initial size {}x{}, handle: {}, tree nodes: {}\n", .{ split_cols, split_rows, @intFromEnum(new_handle), tab.tree.nodes.len });
-}
-
-/// Close the focused split. If it's the last surface in the tab, close the tab instead.
 fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
-    const tab = activeTab() orelse return;
-
-    // If only one surface (no splits), close the tab instead
-    if (!tab.tree.isSplit()) {
-        if (g_tab_count <= 1) {
+    switch (tab.closeFocusedSplit(allocator)) {
+        .closed_split => {
+            g_force_rebuild = true;
+            g_cells_valid = false;
+        },
+        .closed_tab => {
+            g_selecting = false;
+            g_force_rebuild = true;
+            g_cells_valid = false;
+        },
+        .close_window => {
             g_should_close = true;
-        } else {
-            closeTab(g_active_tab);
-        }
-        return;
+        },
+        .no_op => {},
     }
-
-    // Find the next surface to focus before removing
-    const next_focus = tab.tree.goto(allocator, tab.focused, .next_wrapped) catch null;
-
-    // Remove the focused surface from the tree
-    const new_tree = tab.tree.remove(allocator, tab.focused) catch {
-        std.debug.print("Failed to remove split from tree\n", .{});
-        return;
-    };
-
-    // Replace old tree with new tree
-    var old_tree = tab.tree;
-    tab.tree = new_tree;
-    old_tree.deinit();
-
-    // Update focus - need to find the handle in the new tree
-    // After removal, handles may have shifted, so we need to find a valid leaf
-    if (tab.tree.isEmpty()) {
-        // Tree is empty, close the tab
-        if (g_tab_count <= 1) {
-            g_should_close = true;
-        } else {
-            closeTab(g_active_tab);
-        }
-        return;
-    }
-
-    // Find the first leaf in the new tree as a fallback
-    var it = tab.tree.iterator();
-    if (it.next()) |entry| {
-        // Try to use next_focus if it's still valid in the new tree
-        if (next_focus) |nf| {
-            if (nf != tab.focused and @intFromEnum(nf) < tab.tree.nodes.len) {
-                tab.focused = nf;
-            } else {
-                tab.focused = entry.handle;
-            }
-        } else {
-            tab.focused = entry.handle;
-        }
-    } else {
-        tab.focused = .root;
-    }
-
-    g_force_rebuild = true;
-    g_cells_valid = false;
-
-    std.debug.print("Split closed, new focused handle: {}, tree nodes: {}\n", .{ @intFromEnum(tab.focused), tab.tree.nodes.len });
 }
 
-/// Navigate to a split in the given direction
 fn gotoSplit(direction: SplitTree.Goto) void {
     const allocator = g_allocator orelse return;
-    const tab = activeTab() orelse return;
-
-    const new_focus = tab.tree.goto(allocator, tab.focused, direction) catch return;
-    if (new_focus) |handle| {
-        tab.focused = handle;
+    if (tab.gotoSplit(allocator, direction)) {
         g_force_rebuild = true;
         g_cells_valid = false;
     }
 }
 
-/// Equalize all split ratios based on weight (number of leaves per branch)
 fn equalizeSplits() void {
     const allocator = g_allocator orelse return;
-    const tab = activeTab() orelse return;
-
-    // Initialize per-surface resize tracking with current sizes
-    // so we can detect which surfaces changed after equalize
-    var it = tab.tree.iterator();
-    while (it.next()) |entry| {
-        entry.surface.resize_overlay_active = true; // Will show overlay
-        entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
-        entry.surface.resize_overlay_last_rows = entry.surface.size.grid.rows;
+    if (tab.equalizeSplits(allocator)) {
+        g_split_resize_overlay_until = std.time.milliTimestamp() + RESIZE_OVERLAY_DURATION_MS;
+        g_force_rebuild = true;
+        g_cells_valid = false;
     }
-
-    const new_tree = tab.tree.equalize(allocator) catch return;
-    tab.tree.deinit();
-    tab.tree = new_tree;
-
-    // Show resize overlay on all splits for a short duration
-    g_split_resize_overlay_until = std.time.milliTimestamp() + RESIZE_OVERLAY_DURATION_MS;
-
-    // Force re-layout of all surfaces (layout recomputed in next render frame)
-    g_force_rebuild = true;
-    g_cells_valid = false;
 }
 
-/// Update focus from mouse position (for focus-follows-mouse)
 fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
-    const tab = activeTab() orelse return;
-
-    // Check which split rect contains the mouse
+    const t = tab.activeTab() orelse return;
     for (0..g_split_rect_count) |i| {
         const rect = g_split_rects[i];
         if (mouse_x >= rect.x and mouse_x < rect.x + rect.width and
             mouse_y >= rect.y and mouse_y < rect.y + rect.height)
         {
-            if (rect.handle != tab.focused) {
-                tab.focused = rect.handle;
+            if (rect.handle != t.focused) {
+                t.focused = rect.handle;
                 g_force_rebuild = true;
                 g_cells_valid = false;
             }
@@ -3159,8 +2623,8 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
     const caption_area_w: f32 = caption_btn_w * 3; // min + max + close
     const plus_btn_w: f32 = 46; // + button width (same as caption buttons)
     const gap_w: f32 = 42; // breathing room between + and caption buttons
-    const show_plus = g_tab_count > 1;
-    const num_tabs = g_tab_count;
+    const show_plus = tab.g_tab_count > 1;
+    const num_tabs = tab.g_tab_count;
 
     // Calculate space: tabs fill remaining width after + button, gap, and caption buttons
     const plus_total: f32 = if (show_plus) plus_btn_w else 0;
@@ -3177,14 +2641,14 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
 
     // --- Update close button fade animation (delta-time based) ---
     const now_ms = std.time.milliTimestamp();
-    const dt: f32 = if (g_last_frame_time_ms > 0)
-        @as(f32, @floatFromInt(now_ms - g_last_frame_time_ms)) / 1000.0
+    const dt: f32 = if (tab.g_last_frame_time_ms > 0)
+        @as(f32, @floatFromInt(now_ms - tab.g_last_frame_time_ms)) / 1000.0
     else
         0.016; // ~60fps default on first frame
-    g_last_frame_time_ms = now_ms;
+    tab.g_last_frame_time_ms = now_ms;
 
     for (0..num_tabs) |tab_idx| {
-        const is_active = (tab_idx == g_active_tab);
+        const is_active = (tab_idx == tab.g_active_tab);
 
         // Check if mouse is hovering this tab
         const tab_hovered = blk: {
@@ -3197,20 +2661,20 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
         // Animate close button opacity: fade in when hovered, fade out when not
         if (num_tabs > 1) {
             if (tab_hovered) {
-                g_tab_close_opacity[tab_idx] = @min(1.0, g_tab_close_opacity[tab_idx] + TAB_CLOSE_FADE_SPEED * dt);
+                tab.g_tab_close_opacity[tab_idx] = @min(1.0, tab.g_tab_close_opacity[tab_idx] + tab.TAB_CLOSE_FADE_SPEED * dt);
             } else {
-                g_tab_close_opacity[tab_idx] = @max(0.0, g_tab_close_opacity[tab_idx] - TAB_CLOSE_FADE_SPEED * dt);
+                tab.g_tab_close_opacity[tab_idx] = @max(0.0, tab.g_tab_close_opacity[tab_idx] - tab.TAB_CLOSE_FADE_SPEED * dt);
             }
         } else {
-            g_tab_close_opacity[tab_idx] = 0;
+            tab.g_tab_close_opacity[tab_idx] = 0;
         }
 
         // Animate bell indicator opacity (for focused surface in tab)
-        if (g_tabs[tab_idx]) |tab| {
-            if (tab.focusedSurface()) |surface| {
+        if (tab.g_tabs[tab_idx]) |tb| {
+            if (tb.focusedSurface()) |surface| {
                 if (surface.bell_indicator) {
                     // Fade in
-                    surface.bell_opacity = @min(1.0, surface.bell_opacity + TAB_CLOSE_FADE_SPEED * dt);
+                    surface.bell_opacity = @min(1.0, surface.bell_opacity + tab.TAB_CLOSE_FADE_SPEED * dt);
 
                     // On active tab: after 1s hold, start fading out and clear indicator
                     if (is_active and surface.bell_opacity >= 1.0) {
@@ -3221,7 +2685,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                     }
                 } else {
                     // Fade out
-                    surface.bell_opacity = @max(0.0, surface.bell_opacity - TAB_CLOSE_FADE_SPEED * dt);
+                    surface.bell_opacity = @max(0.0, surface.bell_opacity - tab.TAB_CLOSE_FADE_SPEED * dt);
                 }
             }
         }
@@ -3246,10 +2710,10 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
 
         // Tab title text — rendered at native 14pt via titlebar font (no scaling)
         // Shortcut label (^1 through ^0) rendered right-aligned, only for tabs 1–10 in multi-tab
-        const is_renaming = g_tab_rename_active and tab_idx == g_tab_rename_idx;
+        const is_renaming = tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx;
         const title = if (is_renaming)
-            g_tab_rename_buf[0..g_tab_rename_len]
-        else if (g_tabs[tab_idx]) |t|
+            tab.g_tab_rename_buf[0..tab.g_tab_rename_len]
+        else if (tab.g_tabs[tab_idx]) |t|
             t.getTitle()
         else
             "New Tab";
@@ -3285,7 +2749,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
             var text_width: f32 = 0;
 
             // Bell indicator opacity (rendered independently of text layout)
-            const bell_opacity: f32 = if (g_tabs[tab_idx]) |t| (if (t.focusedSurface()) |s| s.bell_opacity else 0) else 0;
+            const bell_opacity: f32 = if (tab.g_tabs[tab_idx]) |t| (if (t.focusedSurface()) |s| s.bell_opacity else 0) else 0;
             const has_bell = bell_opacity > 0.01;
             const bell_emoji_width: f32 = if (has_bell) blk: {
                 if (loadBellEmoji()) |bell| {
@@ -3351,7 +2815,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 var found_cursor = false;
 
                 for (codepoints[0..cp_count]) |cp| {
-                    if (is_renaming and !found_cursor and byte_pos >= g_tab_rename_cursor) {
+                    if (is_renaming and !found_cursor and byte_pos >= tab.g_tab_rename_cursor) {
                         rename_cursor_x = text_x;
                         found_cursor = true;
                     }
@@ -3362,7 +2826,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
 
                 // Render rename selection highlight or cursor
                 if (is_renaming) {
-                    if (g_tab_rename_select_all and text_width > 0) {
+                    if (tab.g_tab_rename_select_all and text_width > 0) {
                         // Highlight behind the text — use cursor color
                         renderQuad(text_start_x, text_y, text_width, g_titlebar_cell_height, g_theme.cursor_color);
                         // Re-render text on top in contrasting color
@@ -3382,8 +2846,8 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 }
 
                 // Record text bounds for double-click hit testing
-                g_tab_text_x_start[tab_idx] = text_start_x;
-                g_tab_text_x_end[tab_idx] = text_x;
+                tab.g_tab_text_x_start[tab_idx] = text_start_x;
+                tab.g_tab_text_x_end[tab_idx] = text_x;
             } else {
                 // Middle truncation
                 const ellipsis_char: u32 = 0x2026;
@@ -3438,7 +2902,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 // Render rename selection highlight or cursor (same as non-truncated path)
                 if (is_renaming) {
                     const trunc_width = text_x - text_x_start;
-                    if (g_tab_rename_select_all and trunc_width > 0) {
+                    if (tab.g_tab_rename_select_all and trunc_width > 0) {
                         // Highlight behind the text — use cursor color
                         renderQuad(text_x_start, text_y, trunc_width, g_titlebar_cell_height, g_theme.cursor_color);
                         // Re-render text on top in contrasting color
@@ -3454,7 +2918,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                             renderTitlebarChar(cp, sel_x, text_y, sel_text_color);
                             sel_x += titlebarGlyphAdvance(cp);
                         }
-                    } else if (!g_tab_rename_select_all) {
+                    } else if (!tab.g_tab_rename_select_all) {
                         // Blink cursor at end (cursor position tracking in truncated
                         // text is approximate — place at end for simplicity)
                         if (g_cursor_blink_visible) {
@@ -3464,15 +2928,15 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 }
 
                 // Record text bounds for double-click hit testing
-                g_tab_text_x_start[tab_idx] = text_x_start;
-                g_tab_text_x_end[tab_idx] = text_x;
+                tab.g_tab_text_x_start[tab_idx] = text_x_start;
+                tab.g_tab_text_x_end[tab_idx] = text_x;
             }
 
             // Right side: shortcut and close button crossfade in the same position.
             // close_opacity (0→1) drives the animation:
             //   0 = shortcut visible, close hidden
             //   1 = shortcut slid down + faded out, close faded in
-            const close_opacity = g_tab_close_opacity[tab_idx];
+            const close_opacity = tab.g_tab_close_opacity[tab_idx];
             const shortcut_opacity = 1.0 - close_opacity;
 
             const right_edge = center_offset + center_region - tab_pad;
@@ -3498,12 +2962,12 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
             // Close button — fades in, centered on the shortcut's visual center
             if (close_opacity > 0.01 and num_tabs > 1) {
                 const shortcut_center = right_edge - shortcut_w / 2;
-                const close_btn_x = shortcut_center - TAB_CLOSE_BTN_W / 2;
+                const close_btn_x = shortcut_center - tab.TAB_CLOSE_BTN_W / 2;
                 const close_hovered = blk: {
                     if (!tab_hovered) break :blk false;
                     const win = g_window orelse break :blk false;
                     const fx: f32 = @floatFromInt(win.mouse_x);
-                    break :blk fx >= close_btn_x and fx < close_btn_x + TAB_CLOSE_BTN_W;
+                    break :blk fx >= close_btn_x and fx < close_btn_x + tab.TAB_CLOSE_BTN_W;
                 };
 
                 const base_close_color = [3]f32{ 0.6, 0.6, 0.6 };
@@ -3523,17 +2987,17 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                         @min(1.0, bg[2] + 0.1),
                     };
                     const btn_size: f32 = 22;
-                    const bx = close_btn_x + (TAB_CLOSE_BTN_W - btn_size) / 2;
+                    const bx = close_btn_x + (tab.TAB_CLOSE_BTN_W - btn_size) / 2;
                     const by = tb_top + (titlebar_h - btn_size) / 2;
                     renderQuadAlpha(bx, by, btn_size, btn_size, hover_bg, close_opacity);
                 }
 
                 if (icon_face != null) {
                     if (loadIconGlyph(0xE8BB)) |ch| {
-                        renderIconGlyph(ch, close_btn_x, tb_top, TAB_CLOSE_BTN_W, titlebar_h, faded_close_color, 1.0);
+                        renderIconGlyph(ch, close_btn_x, tb_top, tab.TAB_CLOSE_BTN_W, titlebar_h, faded_close_color, 1.0);
                     }
                 } else {
-                    const cx = close_btn_x + TAB_CLOSE_BTN_W / 2;
+                    const cx = close_btn_x + tab.TAB_CLOSE_BTN_W / 2;
                     const cy = tb_top + titlebar_h / 2;
                     const arm: f32 = 4;
                     const t: f32 = 1.0;
@@ -3557,9 +3021,9 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 const sc_w = titlebarGlyphAdvance('^') + titlebarGlyphAdvance(digit);
                 const re = cursor_x + tab_w - tp;
                 const sc_center = re - sc_w / 2;
-                const cb_x = sc_center - TAB_CLOSE_BTN_W / 2;
+                const cb_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
                 w.close_btn_x_start[tab_idx] = @intFromFloat(cb_x);
-                w.close_btn_x_end[tab_idx] = @intFromFloat(cb_x + TAB_CLOSE_BTN_W);
+                w.close_btn_x_end[tab_idx] = @intFromFloat(cb_x + tab.TAB_CLOSE_BTN_W);
             }
         }
 
@@ -3584,7 +3048,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
         }
 
         // Left border — skip when last tab is active (no visual break needed)
-        if (g_active_tab != num_tabs - 1) {
+        if (tab.g_active_tab != num_tabs - 1) {
             renderQuad(cursor_x, tb_top, bdr, titlebar_h, border_color);
         }
 
@@ -4091,7 +3555,7 @@ fn cursorEffectiveStyleForRenderer(rend: *const Renderer, terminal_style: Render
     // Hide cursor during active resize to avoid flicker artifacts
     if (g_resize_active) return null;
     // Unfocused window or tab rename: show hollow block
-    if (!window_focused or g_tab_rename_active) return .block_hollow;
+    if (!window_focused or tab.g_tab_rename_active) return .block_hollow;
     // Unfocused split: show hollow block (no blinking)
     if (!rend.is_focused) return .block_hollow;
     const should_blink = terminal_blink and g_cursor_blink;
@@ -4416,13 +3880,13 @@ fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
 /// Render split dividers between panes in the active tab.
 /// If split-divider-color is configured, uses that color (solid).
 /// Otherwise uses scrollbar-style rendering: black with alpha transparency.
-fn renderSplitDividers(tab: *const TabState, content_x: i32, content_y: i32, content_w: i32, content_h: i32, window_height: f32) void {
-    if (!tab.tree.isSplit()) return;
+fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_y: i32, content_w: i32, content_h: i32, window_height: f32) void {
+    if (!active_tab.tree.isSplit()) return;
 
     const allocator = g_allocator orelse return;
 
     // Get spatial representation
-    var spatial = tab.tree.spatial(allocator) catch return;
+    var spatial = active_tab.tree.spatial(allocator) catch return;
     defer spatial.deinit(allocator);
 
     gl.UseProgram.?(shader_program);
@@ -4435,7 +3899,7 @@ fn renderSplitDividers(tab: *const TabState, content_x: i32, content_y: i32, con
     const default_alpha: f32 = 0.35;
 
     // Walk the tree nodes and draw dividers for each split
-    for (tab.tree.nodes, 0..) |node, i| {
+    for (active_tab.tree.nodes, 0..) |node, i| {
         switch (node) {
             .leaf => {},
             .split => |s| {
@@ -5479,10 +4943,10 @@ fn onWin32Resize(width: i32, height: i32) void {
         // Show resize overlay with new dimensions
         resizeOverlayShow(new_cols, new_rows);
 
-        for (0..g_tab_count) |ti| {
-            if (g_tabs[ti]) |tab| {
+        for (0..tab.g_tab_count) |ti| {
+            if (tab.g_tabs[ti]) |active_t| {
                 // Resize all surfaces in this tab's split tree
-                var it = tab.tree.iterator();
+                var it = active_t.tree.iterator();
                 while (it.next()) |entry| {
                     entry.surface.render_state.mutex.lock();
                     entry.surface.terminal.resize(allocator, term_cols, term_rows) catch {};
@@ -5575,10 +5039,10 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     g_split_divider_color = cfg.@"split-divider-color";
 
     // Sync cursor style to all tabs' terminals (rendering reads from terminal state)
-    for (0..g_tab_count) |ti| {
-        if (g_tabs[ti]) |tab| {
+    for (0..tab.g_tab_count) |ti| {
+        if (tab.g_tabs[ti]) |tb| {
             // Update all surfaces in this tab's split tree
-            var it = tab.tree.iterator();
+            var it = tb.tree.iterator();
             while (it.next()) |entry| {
                 entry.surface.render_state.mutex.lock();
                 entry.surface.terminal.screens.active.cursor.cursor_style = switch (g_cursor_style) {
@@ -5639,10 +5103,10 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
         resizeWindowToGrid();
 
         // Resize ALL tabs' terminals and PTYs to match
-        for (0..g_tab_count) |ti| {
-            if (g_tabs[ti]) |tab| {
+        for (0..tab.g_tab_count) |ti| {
+            if (tab.g_tabs[ti]) |tb| {
                 // Resize all surfaces in this tab's split tree
-                var it = tab.tree.iterator();
+                var it = tb.tree.iterator();
                 while (it.next()) |entry| {
                     entry.surface.render_state.mutex.lock();
                     entry.surface.terminal.resize(allocator, term_cols, term_rows) catch {};
@@ -5826,8 +5290,10 @@ const win32_input = struct {
 
     fn handleChar(ev: win32_backend.CharEvent) void {
         // When tab rename is active, route chars to the rename buffer
-        if (g_tab_rename_active) {
-            handleRenameChar(ev.codepoint);
+        if (tab.g_tab_rename_active) {
+            g_cursor_blink_visible = true;
+            g_last_blink_time = std.time.milliTimestamp();
+            tab.handleRenameChar(ev.codepoint);
             return;
         }
         if (!isActiveTabTerminal()) return;
@@ -5852,7 +5318,7 @@ const win32_input = struct {
     fn handleKey(ev: win32_backend.KeyEvent) void {
         // Ctrl+Shift+N = new window (even during tab rename)
         if (ev.ctrl and ev.shift and ev.vk == 0x4E) { // 'N'
-            if (g_tab_rename_active) commitTabRename();
+            if (tab.g_tab_rename_active) tab.commitTabRename();
             if (g_app) |app| {
                 const hwnd = if (g_window) |w| w.hwnd else null;
                 // Get CWD from active tab for working directory inheritance
@@ -5881,25 +5347,27 @@ const win32_input = struct {
         }
         // Ctrl+Shift+T = new tab (even during tab rename)
         if (ev.ctrl and ev.shift and ev.vk == 0x54) { // 'T'
-            if (g_tab_rename_active) commitTabRename();
+            if (tab.g_tab_rename_active) tab.commitTabRename();
             _ = spawnTab(g_allocator orelse return);
             return;
         }
         // Ctrl+Shift+O = new split right (vertical divider)
         if (ev.ctrl and ev.shift and ev.vk == 0x4F) { // 'O'
-            if (g_tab_rename_active) commitTabRename();
+            if (tab.g_tab_rename_active) tab.commitTabRename();
             splitFocused(.right);
             return;
         }
         // Ctrl+Shift+E = new split down (horizontal divider)
         if (ev.ctrl and ev.shift and ev.vk == 0x45) { // 'E'
-            if (g_tab_rename_active) commitTabRename();
+            if (tab.g_tab_rename_active) tab.commitTabRename();
             splitFocused(.down);
             return;
         }
         // When tab rename is active, handle special keys
-        if (g_tab_rename_active) {
-            handleRenameKey(ev);
+        if (tab.g_tab_rename_active) {
+            g_cursor_blink_visible = true;
+            g_last_blink_time = std.time.milliTimestamp();
+            tab.handleRenameKey(ev);
             return;
         }
         // Ctrl+Shift+C = copy
@@ -5951,16 +5419,16 @@ const win32_input = struct {
         if (ev.ctrl and ev.vk == win32_backend.VK_TAB) {
             if (ev.shift) {
                 // Ctrl+Shift+Tab = previous tab
-                if (g_active_tab > 0) switchTab(g_active_tab - 1) else switchTab(g_tab_count - 1);
+                if (tab.g_active_tab > 0) switchTab(tab.g_active_tab - 1) else switchTab(tab.g_tab_count - 1);
             } else {
-                switchTab((g_active_tab + 1) % g_tab_count);
+                switchTab((tab.g_active_tab + 1) % tab.g_tab_count);
             }
             return;
         }
         // Ctrl+1-9 = switch to tab N
         if (ev.ctrl and !ev.shift and ev.vk >= 0x31 and ev.vk <= 0x39) { // '1'-'9'
             const tab_idx = @as(usize, @intCast(ev.vk - 0x31));
-            if (tab_idx < g_tab_count) switchTab(tab_idx);
+            if (tab_idx < tab.g_tab_count) switchTab(tab_idx);
             return;
         }
         // Ctrl+, = open config
@@ -6066,8 +5534,8 @@ const win32_input = struct {
             if (ypos < titlebar_h) {
                 if (hitTestTab(xpos)) |tab_idx| {
                     // Only rename if clicking on the text itself
-                    if (tab_idx < MAX_TABS and xf >= g_tab_text_x_start[tab_idx] and xf <= g_tab_text_x_end[tab_idx]) {
-                        startTabRename(tab_idx);
+                    if (tab_idx < MAX_TABS and xf >= tab.g_tab_text_x_start[tab_idx] and xf <= tab.g_tab_text_x_end[tab_idx]) {
+                        tab.startTabRename(tab_idx);
                     } else {
                         // Double-click on tab but not on text — maximize/restore
                         if (g_window) |w| {
@@ -6099,7 +5567,7 @@ const win32_input = struct {
             const titlebar_h: f64 = if (g_window) |w| @floatFromInt(w.titlebar_height) else 40;
             if (ypos < titlebar_h) {
                 if (hitTestTab(xpos)) |tab_idx| {
-                    if (g_tab_count <= 1) {
+                    if (tab.g_tab_count <= 1) {
                         g_should_close = true;
                     } else {
                         closeTab(tab_idx);
@@ -6116,7 +5584,7 @@ const win32_input = struct {
 
             if (ev.action == .press) {
                 // Commit rename on any click
-                if (g_tab_rename_active) commitTabRename();
+                if (tab.g_tab_rename_active) tab.commitTabRename();
 
                 // Check if click is in the titlebar (tab bar area)
                 if (ypos < titlebar_h) {
@@ -6160,8 +5628,8 @@ const win32_input = struct {
                     g_divider_drag_layout = hit.layout;
                     // Initialize per-surface resize tracking with current sizes
                     // so we only show overlays on surfaces that actually change
-                    if (activeTab()) |tab| {
-                        var it = tab.tree.iterator();
+                    if (activeTab()) |tb| {
+                        var it = tb.tree.iterator();
                         while (it.next()) |entry| {
                             entry.surface.resize_overlay_active = false;
                             entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
@@ -6173,12 +5641,12 @@ const win32_input = struct {
 
                 // Find which surface was clicked and focus it
                 const clicked_surface = surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse activeSurface() orelse return;
-                
+
                 // Focus the clicked split if different from current focus
-                if (activeTab()) |tab| {
+                if (activeTab()) |tb| {
                     for (0..g_split_rect_count) |i| {
                         if (g_split_rects[i].surface == clicked_surface) {
-                            tab.focused = g_split_rects[i].handle;
+                            tb.focused = g_split_rects[i].handle;
                             break;
                         }
                     }
@@ -6205,8 +5673,8 @@ const win32_input = struct {
                     g_divider_drag_handle = null;
                     g_divider_drag_layout = null;
                     // Reset per-surface resize overlay state
-                    if (activeTab()) |tab| {
-                        var it = tab.tree.iterator();
+                    if (activeTab()) |tb| {
+                        var it = tb.tree.iterator();
                         while (it.next()) |entry| {
                             entry.surface.resize_overlay_active = false;
                         }
@@ -6216,11 +5684,11 @@ const win32_input = struct {
                 }
 
                 // Handle close button release — close tab if still on the close button
-                if (g_tab_close_pressed) |pressed_idx| {
-                    g_tab_close_pressed = null;
-                    if (ypos < titlebar_h and pressed_idx < g_tab_count) {
+                if (tab.g_tab_close_pressed) |pressed_idx| {
+                    tab.g_tab_close_pressed = null;
+                    if (ypos < titlebar_h and pressed_idx < tab.g_tab_count) {
                         if (hitTestTabCloseButton(xpos, pressed_idx)) {
-                            if (g_tab_count <= 1) {
+                            if (tab.g_tab_count <= 1) {
                                 g_should_close = true;
                             } else {
                                 closeTab(pressed_idx);
@@ -6245,8 +5713,8 @@ const win32_input = struct {
 
     fn handleTabBarPress(xpos: f64) void {
         // Commit any active rename when clicking in the tab bar
-        if (g_tab_rename_active) {
-            commitTabRename();
+        if (tab.g_tab_rename_active) {
+            tab.commitTabRename();
         }
         const win = g_window orelse return;
         const window_width: f64 = blk: {
@@ -6258,8 +5726,8 @@ const win32_input = struct {
         const caption_area_w: f64 = 46 * 3;
         const gap_w: f64 = 42;
         const plus_btn_w: f64 = 46;
-        const show_plus = g_tab_count > 1;
-        const num_tabs = g_tab_count;
+        const show_plus = tab.g_tab_count > 1;
+        const num_tabs = tab.g_tab_count;
 
         const plus_total: f64 = if (show_plus) plus_btn_w else 0;
         const right_reserved: f64 = caption_area_w + gap_w + plus_total;
@@ -6271,12 +5739,12 @@ const win32_input = struct {
         for (0..num_tabs) |tab_idx| {
             if (xpos >= cursor and xpos < cursor + tab_w) {
                 // Check if the close button was clicked (centered on shortcut position)
-                if (num_tabs > 1 and g_tab_close_opacity[tab_idx] > 0.1) {
+                if (num_tabs > 1 and tab.g_tab_close_opacity[tab_idx] > 0.1) {
                     const sc_w: f64 = @floatCast(titlebarGlyphAdvance('^') + titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
                     const sc_center = cursor + tab_w - 12 - sc_w / 2;
-                    const close_btn_x = sc_center - TAB_CLOSE_BTN_W / 2;
-                    if (xpos >= close_btn_x and xpos < close_btn_x + TAB_CLOSE_BTN_W) {
-                        g_tab_close_pressed = tab_idx;
+                    const close_btn_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
+                    if (xpos >= close_btn_x and xpos < close_btn_x + tab.TAB_CLOSE_BTN_W) {
+                        tab.g_tab_close_pressed = tab_idx;
                         return;
                     }
                 }
@@ -6303,8 +5771,8 @@ const win32_input = struct {
         const caption_area_w: f64 = 46 * 3;
         const gap_w: f64 = 42;
         const plus_btn_w: f64 = 46;
-        const show_plus = g_tab_count > 1;
-        const num_tabs = g_tab_count;
+        const show_plus = tab.g_tab_count > 1;
+        const num_tabs = tab.g_tab_count;
 
         const plus_total: f64 = if (show_plus) plus_btn_w else 0;
         const right_reserved: f64 = caption_area_w + gap_w + plus_total;
@@ -6332,8 +5800,8 @@ const win32_input = struct {
         const caption_area_w: f64 = 46 * 3;
         const gap_w: f64 = 42;
         const plus_btn_w: f64 = 46;
-        const show_plus = g_tab_count > 1;
-        const num_tabs = g_tab_count;
+        const show_plus = tab.g_tab_count > 1;
+        const num_tabs = tab.g_tab_count;
 
         const plus_total: f64 = if (show_plus) plus_btn_w else 0;
         const right_reserved: f64 = caption_area_w + gap_w + plus_total;
@@ -6343,8 +5811,8 @@ const win32_input = struct {
         const tab_x = tab_w * @as(f64, @floatFromInt(tab_idx));
         const sc_w: f64 = @floatCast(titlebarGlyphAdvance('^') + titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
         const sc_center = tab_x + tab_w - 12 - sc_w / 2;
-        const close_btn_x = sc_center - TAB_CLOSE_BTN_W / 2;
-        return xpos >= close_btn_x and xpos < close_btn_x + TAB_CLOSE_BTN_W;
+        const close_btn_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
+        return xpos >= close_btn_x and xpos < close_btn_x + tab.TAB_CLOSE_BTN_W;
     }
 
     fn hitTestPlusButton(xpos: f64) bool {
@@ -6358,12 +5826,12 @@ const win32_input = struct {
         const caption_area_w: f64 = 46 * 3;
         const gap_w: f64 = 42;
         const plus_btn_w: f64 = 46;
-        if (g_tab_count <= 1) return false;
+        if (tab.g_tab_count <= 1) return false;
 
         const right_reserved: f64 = caption_area_w + gap_w + plus_btn_w;
         const tab_area_w: f64 = window_width - right_reserved;
-        const tab_w: f64 = tab_area_w / @as(f64, @floatFromInt(g_tab_count));
-        const plus_x = tab_w * @as(f64, @floatFromInt(g_tab_count));
+        const tab_w: f64 = tab_area_w / @as(f64, @floatFromInt(tab.g_tab_count));
+        const plus_x = tab_w * @as(f64, @floatFromInt(tab.g_tab_count));
 
         return xpos >= plus_x and xpos < plus_x + plus_btn_w;
     }
@@ -6375,11 +5843,11 @@ const win32_input = struct {
         // Handle divider dragging
         if (g_divider_dragging) {
             if (g_divider_drag_handle) |handle| {
-                const tab = activeTab() orelse return;
+                const active_tab = activeTab() orelse return;
                 const allocator = g_allocator orelse return;
 
                 // Get spatial info for this split
-                var spatial = tab.tree.spatial(allocator) catch return;
+                var spatial = active_tab.tree.spatial(allocator) catch return;
                 defer spatial.deinit(allocator);
 
                 // Get content area dimensions
@@ -6411,7 +5879,7 @@ const win32_input = struct {
                 };
 
                 // Update the ratio in place
-                tab.tree.resizeInPlace(handle, new_ratio);
+                active_tab.tree.resizeInPlace(handle, new_ratio);
 
                 // Force layout recalculation and redraw
                 g_force_rebuild = true;
@@ -7087,10 +6555,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     term_rows = g_pending_rows;
 
                     // Resize ALL tabs' terminals and PTYs (lock each surface)
-                    for (0..g_tab_count) |ti| {
-                        if (g_tabs[ti]) |tab| {
+                    for (0..tab.g_tab_count) |ti| {
+                        if (tab.g_tabs[ti]) |tb| {
                             // Resize all surfaces in this tab's split tree
-                            var it = tab.tree.iterator();
+                            var it = tb.tree.iterator();
                             while (it.next()) |entry| {
                                 entry.surface.render_state.mutex.lock();
                                 entry.surface.terminal.resize(allocator, term_cols, term_rows) catch |err| {
@@ -7124,7 +6592,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         running = win.pollEvents() and !g_should_close;
 
         // Sync tab count to win32 for hit-testing
-        win.tab_count = g_tab_count;
+        win.tab_count = tab.g_tab_count;
 
         // Process all queued input events (keyboard, mouse, resize)
         win32_input.processEvents(win);
@@ -7147,13 +6615,13 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         if (g_titlebar_atlas != null) syncAtlasTexture(&g_titlebar_atlas, &g_titlebar_atlas_texture, &g_titlebar_atlas_modified);
 
         // Check all tabs for pending bell notifications (set by IO thread)
-        for (0..g_tab_count) |ti| {
-            if (g_tabs[ti]) |tab| {
+        for (0..tab.g_tab_count) |ti| {
+            if (tab.g_tabs[ti]) |tb| {
                 // Check all surfaces in this tab's split tree for pending bells
-                var it = tab.tree.iterator();
+                var it = tb.tree.iterator();
                 while (it.next()) |entry| {
                     if (entry.surface.bell_pending.swap(false, .acquire)) {
-                        handleBell(entry.surface, win, ti == g_active_tab);
+                        handleBell(entry.surface, win, ti == tab.g_active_tab);
                     }
                 }
             }
@@ -7164,13 +6632,13 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         const titlebar_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
         const top_padding: f32 = padding + titlebar_offset;
 
-        if (activeTab()) |tab| {
+        if (activeTab()) |active_tab| {
             // Compute split layout for the active tab
             const content_x: i32 = @intFromFloat(padding);
             const content_y: i32 = @intFromFloat(top_padding);
             const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - padding * 2);
             const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_height)) - top_padding - padding);
-            const split_count = computeSplitLayout(tab, content_x, content_y, content_w, content_h, cell_width, cell_height);
+            const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, cell_width, cell_height);
 
             // Debug: print split count on first few frames
             // GL rendering
@@ -7234,7 +6702,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                 if (split_count > 0) {
                     for (0..split_count) |i| {
                         const rect = g_split_rects[i];
-                        const is_focused = (rect.handle == tab.focused);
+                        const is_focused = (rect.handle == active_tab.focused);
                         const rend = &rect.surface.surface_renderer;
 
                         // Set viewport to this split's region
@@ -7284,7 +6752,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
                     // Draw split dividers
-                    renderSplitDividers(tab, content_x, content_y, content_w, content_h, @floatFromInt(fb_height));
+                    renderSplitDividers(active_tab, content_x, content_y, content_w, content_h, @floatFromInt(fb_height));
                 }
             }
         } else if (!g_post_enabled) {
