@@ -7,9 +7,7 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const freetype = @import("freetype");
-const harfbuzz = @import("harfbuzz");
 const Pty = @import("pty.zig").Pty;
-const sprite = @import("font/sprite.zig");
 const directwrite = @import("directwrite.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
@@ -19,6 +17,7 @@ const win32_backend = @import("win32.zig");
 const App = @import("App.zig");
 const Renderer = @import("Renderer.zig");
 pub const tab = @import("appwindow/tab.zig");
+pub const font = @import("appwindow/font.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -74,7 +73,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     // Store config values we need for init
     g_requested_font = app.font_family;
     g_requested_weight = app.font_weight;
-    g_font_size = app.font_size;
+    font.g_font_size = app.font_size;
     g_shader_path = app.shader_path;
     g_start_maximize = app.maximize;
     g_start_fullscreen = app.fullscreen;
@@ -135,12 +134,7 @@ threadlocal var g_start_maximize: bool = false;
 threadlocal var g_start_fullscreen: bool = false;
 
 // Global theme (set at startup via config)
-threadlocal var g_theme: Theme = Theme.default();
-
-/// Convert FreeType 26.6 fixed-point to f64 (like Ghostty)
-fn f26dot6ToF64(v: anytype) f64 {
-    return @as(f64, @floatFromInt(v)) / 64.0;
-}
+pub threadlocal var g_theme: Theme = Theme.default();
 
 /// Convert a Unix-style path to a Windows path (UTF-16).
 /// Handles:
@@ -280,7 +274,7 @@ fn getWslDistroName() ?[]const u8 {
 
 // Global pointers for callbacks
 threadlocal var g_window: ?*win32_backend.Window = null;
-threadlocal var g_allocator: ?std.mem.Allocator = null;
+pub threadlocal var g_allocator: ?std.mem.Allocator = null;
 
 // Selection is defined in Surface.zig
 const Selection = Surface.Selection;
@@ -467,8 +461,8 @@ fn computeSplitLayout(
     content_y: i32,
     content_w: i32,
     content_h: i32,
-    cw: f32, // cell_width
-    ch: f32, // cell_height
+    cw: f32, // font.cell_width
+    ch: f32, // font.cell_height
 ) usize {
     if (active_tab.tree.isEmpty()) return 0;
 
@@ -669,7 +663,7 @@ fn splitFocused(direction: SplitTree.Split.Direction) void {
             }
         }
     }
-    if (tab.splitFocused(allocator, direction, cell_width, cell_height, g_cursor_style, g_cursor_blink, cwd)) {
+    if (tab.splitFocused(allocator, direction, font.cell_width, font.cell_height, g_cursor_style, g_cursor_blink, cwd)) {
         g_resize_active = false;
         g_force_rebuild = true;
         g_cells_valid = false;
@@ -738,61 +732,14 @@ const embedded = @import("font/embedded.zig");
 // reasonable defaults since we don't auto-detect screen size.
 threadlocal var term_cols: u16 = 80;
 threadlocal var term_rows: u16 = 24;
-const DEFAULT_FONT_SIZE: u32 = 14;
-
 // OpenGL context from glad
-threadlocal var gl: c.GladGLContext = undefined;
+pub threadlocal var gl: c.GladGLContext = undefined;
 
-const FontAtlas = @import("font/Atlas.zig");
+// Convenience aliases for font types used throughout this file
+const Character = font.Character;
+const FontAtlas = font.FontAtlas;
+const GlyphUV = font.GlyphUV;
 
-const Character = struct {
-    // Atlas region (UV coordinates derived from this + atlas size)
-    region: FontAtlas.Region,
-    size_x: i32,
-    size_y: i32,
-    bearing_x: i32,
-    bearing_y: i32,
-    advance: i64,
-    valid: bool = false,
-    is_color: bool = false, // true if stored in BGRA color atlas (emoji)
-};
-
-// Glyph cache using a hashmap for Unicode support
-threadlocal var glyph_cache: std.AutoHashMapUnmanaged(u32, Character) = .empty;
-// Grapheme cluster cache — keyed by hash of full codepoint sequence
-threadlocal var grapheme_cache: std.AutoHashMapUnmanaged(u64, Character) = .empty;
-threadlocal var glyph_face: ?freetype.Face = null;
-threadlocal var icon_face: ?freetype.Face = null; // Segoe MDL2 Assets for caption button icons
-threadlocal var icon_cache: std.AutoHashMapUnmanaged(u32, Character) = .empty;
-
-
-// Font atlas — single texture for all glyphs (replaces per-glyph textures)
-threadlocal var g_atlas: ?FontAtlas = null;
-threadlocal var g_atlas_texture: c.GLuint = 0;
-threadlocal var g_atlas_modified: usize = 0; // Last synced modified counter
-
-// Color atlas — BGRA texture for color emoji (like Ghostty's separate color atlas)
-threadlocal var g_color_atlas: ?FontAtlas = null;
-threadlocal var g_color_atlas_texture: c.GLuint = 0;
-threadlocal var g_color_atlas_modified: usize = 0;
-
-// Icon atlas — separate atlas for caption button icons (Segoe MDL2)
-threadlocal var g_icon_atlas: ?FontAtlas = null;
-threadlocal var g_icon_atlas_texture: c.GLuint = 0;
-threadlocal var g_icon_atlas_modified: usize = 0;
-
-
-
-// Titlebar font — separate face/cache/atlas at fixed 14pt for crisp titlebar text.
-// Avoids scaling artifacts from rendering terminal-size glyphs at a smaller size.
-threadlocal var g_titlebar_face: ?freetype.Face = null;
-threadlocal var g_titlebar_cache: std.AutoHashMapUnmanaged(u32, Character) = .empty;
-threadlocal var g_titlebar_atlas: ?FontAtlas = null;
-threadlocal var g_titlebar_atlas_texture: c.GLuint = 0;
-threadlocal var g_titlebar_atlas_modified: usize = 0;
-threadlocal var g_titlebar_cell_width: f32 = 8;
-threadlocal var g_titlebar_cell_height: f32 = 14;
-threadlocal var g_titlebar_baseline: f32 = 3;
 threadlocal var vao: c.GLuint = 0;
 threadlocal var vbo: c.GLuint = 0;
 threadlocal var shader_program: c.GLuint = 0;
@@ -838,13 +785,12 @@ threadlocal var color_fg_cell_count: usize = 0;
 
 // Snapshot buffer: resolved cell data copied under the lock so that
 // rebuildCells can run outside the lock (like Ghostty's RenderState).
-const MAX_GRAPHEME: usize = 8; // Max codepoints per grapheme cluster (covers flags, ZWJ sequences, etc.)
 const SnapCell = struct {
     codepoint: u21,
     fg: [3]f32,
     bg: ?[3]f32,
     wide: enum(u2) { narrow = 0, wide = 1, spacer_tail = 2, spacer_head = 3 } = .narrow,
-    grapheme: [MAX_GRAPHEME]u21 = .{0} ** MAX_GRAPHEME,
+    grapheme: [font.MAX_GRAPHEME]u21 = .{0} ** font.MAX_GRAPHEME,
     grapheme_len: u4 = 0, // 0 = single codepoint, >0 = multi-codepoint cluster
 };
 const MAX_SNAP = MAX_CELLS;
@@ -1000,11 +946,6 @@ const overlay_fragment_source: [*c]const u8 =
     \\}
 ;
 threadlocal var overlay_shader: c.GLuint = 0;
-threadlocal var cell_width: f32 = 10;
-threadlocal var cell_height: f32 = 20;
-threadlocal var cell_baseline: f32 = 4; // Distance from bottom of cell to baseline
-threadlocal var cursor_height: f32 = 16; // Height of cursor (ascender portion)
-threadlocal var box_thickness: u32 = 1; // Thickness for box drawing characters
 threadlocal var window_focused: bool = true; // Track window focus state
 
 // Fullscreen state (Alt+Enter to toggle)
@@ -1141,18 +1082,6 @@ threadlocal var g_draw_call_count: u32 = 0; // Reset each frame, incremented on 
 threadlocal var g_fps_frame_count: u32 = 0; // Frames since last FPS update
 threadlocal var g_fps_last_time: i64 = 0; // Timestamp of last FPS calculation
 threadlocal var g_fps_value: f32 = 0; // Current FPS value to display
-
-// Font fallback system
-threadlocal var g_ft_lib: ?freetype.Library = null;
-threadlocal var g_font_discovery: ?*directwrite.FontDiscovery = null;
-threadlocal var g_fallback_faces: std.AutoHashMapUnmanaged(u32, freetype.Face) = .empty; // codepoint -> fallback face
-threadlocal var g_no_fallback: std.AutoHashMapUnmanaged(u32, void) = .empty; // codepoints with no fallback (negative cache)
-threadlocal var g_font_size: u32 = DEFAULT_FONT_SIZE;
-
-// HarfBuzz shaping state
-threadlocal var g_hb_buf: ?harfbuzz.Buffer = null;
-threadlocal var g_hb_font: ?harfbuzz.Font = null; // HB font for primary face
-threadlocal var g_hb_fallback_fonts: std.AutoHashMapUnmanaged(u32, harfbuzz.Font) = .empty; // codepoint -> HB font for fallback faces
 
 const vertex_shader_source: [*c]const u8 =
     \\#version 330 core
@@ -1382,928 +1311,26 @@ fn initInstancedBuffers() void {
     if (overlay_shader == 0) std.debug.print("Overlay shader failed\n", .{});
 }
 
-/// Load a single glyph into the cache
-fn loadGlyph(codepoint: u32) ?Character {
-    // Check if already cached
-    if (glyph_cache.get(codepoint)) |ch| {
-        return ch;
-    }
+// Font functions moved to appwindow/font.zig
 
-    const alloc = g_allocator orelse return null;
-
-    // Try sprite rendering first for special characters
-    if (sprite.isSprite(codepoint)) {
-        if (loadSpriteGlyph(codepoint, alloc)) |char_data| {
-            glyph_cache.put(alloc, codepoint, char_data) catch return null;
-            return char_data;
-        }
-    }
-
-    // Fall back to FreeType font rendering
-    const primary_face = glyph_face orelse return null;
-
-    // Get glyph index for this codepoint from primary font
-    var glyph_index = primary_face.getCharIndex(codepoint) orelse 0;
-    var face_to_use = primary_face;
-
-    // If glyph is missing (index 0), try to find a fallback font
-    if (glyph_index == 0) {
-        if (findOrLoadFallbackFace(codepoint, alloc)) |fallback| {
-            const fallback_index = fallback.getCharIndex(codepoint) orelse 0;
-            if (fallback_index != 0) {
-                glyph_index = fallback_index;
-                face_to_use = fallback;
-            }
-        }
-    }
-
-    // If still no glyph found, don't render the .notdef tofu box
-    if (glyph_index == 0) return null;
-
-    // Detect if this face has color glyphs (emoji fonts like Segoe UI Emoji, Noto Color Emoji).
-    // Like Ghostty, we set FT_LOAD_COLOR so FreeType renders BGRA bitmaps for color glyphs.
-    const is_color_face = face_to_use.hasColor();
-    face_to_use.loadGlyph(@intCast(glyph_index), .{
-        .target = .light,
-        .color = is_color_face,
-    }) catch return null;
-    face_to_use.renderGlyph(.light) catch return null;
-
-    const glyph = face_to_use.handle.*.glyph;
-    const bitmap = glyph.*.bitmap;
-
-    // Check if this glyph actually rendered as BGRA (color emoji)
-    const is_color_glyph = bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_BGRA;
-
-    if (is_color_glyph) {
-        // Color emoji — pack into BGRA atlas
-        const region = packColorBitmapIntoAtlas(
-            alloc,
-            bitmap.width,
-            bitmap.rows,
-            bitmap.buffer,
-            @intCast(@as(c_uint, @intCast(@abs(bitmap.pitch)))),
-        ) orelse return null;
-
-        // Scale color emoji to fit cell height (like Ghostty's constraint system)
-        // Color emoji bitmaps are often much larger than the cell, so we record
-        // the original bitmap size and let the renderer scale them.
-        const char_data = Character{
-            .region = region,
-            .size_x = @intCast(bitmap.width),
-            .size_y = @intCast(bitmap.rows),
-            .bearing_x = glyph.*.bitmap_left,
-            .bearing_y = glyph.*.bitmap_top,
-            .advance = glyph.*.advance.x,
-            .valid = true,
-            .is_color = true,
-        };
-
-        glyph_cache.put(alloc, codepoint, char_data) catch return null;
-        return char_data;
-    }
-
-    // Grayscale glyph — pack into grayscale atlas
-    const region = packBitmapIntoAtlas(
-        &g_atlas,
-        alloc,
-        bitmap.width,
-        bitmap.rows,
-        bitmap.buffer,
-        @intCast(bitmap.pitch),
-    ) orelse return null;
-
-    const char_data = Character{
-        .region = region,
-        .size_x = @intCast(bitmap.width),
-        .size_y = @intCast(bitmap.rows),
-        .bearing_x = glyph.*.bitmap_left,
-        .bearing_y = glyph.*.bitmap_top,
-        .advance = glyph.*.advance.x,
-        .valid = true,
-    };
-
-    // Store in cache
-    glyph_cache.put(alloc, codepoint, char_data) catch return null;
-
-    return char_data;
-}
-
-/// Returns true if the codepoint is a Regional Indicator Symbol (used for flag emoji).
-fn isRegionalIndicator(cp: u21) bool {
-    return cp >= 0x1F1E6 and cp <= 0x1F1FF;
-}
-
-/// Hash a grapheme cluster (base codepoint + extra codepoints) for cache lookup.
-fn graphemeHash(base_cp: u21, extra: []const u21) u64 {
-    var h = std.hash.Wyhash.init(0);
-    h.update(std.mem.asBytes(&base_cp));
-    for (extra) |cp| {
-        h.update(std.mem.asBytes(&cp));
-    }
-    return h.final();
-}
-
-/// Load a glyph for a grapheme cluster (multi-codepoint emoji) using HarfBuzz shaping.
-/// The cluster is: base_cp followed by extra_cps[0..extra_len].
-/// HarfBuzz shapes the sequence into the correct glyph (flags, skin tones, ZWJ, VS16, etc.)
-fn loadGraphemeGlyph(base_cp: u21, extra_cps: []const u21) ?Character {
-    const hash = graphemeHash(base_cp, extra_cps);
-
-
-    // Check grapheme cache first
-    if (grapheme_cache.get(hash)) |ch| {
-        return ch;
-    }
-
-    const alloc = g_allocator orelse {
-        return null;
-    };
-    var hb_buf = g_hb_buf orelse {
-        return null;
-    };
-
-    // Build the full codepoint sequence: base + extras
-    var codepoints: [1 + MAX_GRAPHEME]u32 = undefined;
-    codepoints[0] = @intCast(base_cp);
-    for (extra_cps, 0..) |cp, i| {
-        codepoints[1 + i] = @intCast(cp);
-    }
-    const total_len = 1 + extra_cps.len;
-
-    // Try primary face first, then fallback
-    const primary_face = glyph_face orelse return null;
-    var face_to_use = primary_face;
-    var hb_font = g_hb_font orelse return null;
-
-    // For multi-codepoint grapheme clusters (emoji sequences), we try the fallback
-    // font (typically an emoji font like Segoe UI Emoji) FIRST, because the primary
-    // monospace font will shape regional indicators / skin tones as separate glyphs
-    // (not composed), and we'd never fall back. The emoji font has GSUB ligatures
-    // that compose these sequences into single glyphs.
-    var glyph_infos: []harfbuzz.GlyphInfo = &.{};
-    var tried_fallback = false;
-
-    if (findOrLoadFallbackFace(@intCast(base_cp), alloc)) |fallback_face| {
-        if (fallback_face.hasColor()) {
-            // Emoji/color font — try this first for grapheme clusters
-            const fb_hb_font = g_hb_fallback_fonts.get(@intCast(base_cp)) orelse blk: {
-                const new_hb = harfbuzz.freetype.createFont(fallback_face.handle) catch null;
-                if (new_hb) |hf| {
-                    g_hb_fallback_fonts.put(alloc, @intCast(base_cp), hf) catch {
-                        var f = hf;
-                        f.destroy();
-                        break :blk null;
-                    };
-                    break :blk hf;
-                }
-                break :blk null;
-            };
-
-            if (fb_hb_font) |fb_font| {
-                hb_buf.reset();
-                hb_buf.addCodepoints(codepoints[0..total_len]);
-                hb_buf.guessSegmentProperties();
-                harfbuzz.shape(fb_font, hb_buf, &.{});
-
-                glyph_infos = hb_buf.getGlyphInfos();
-                tried_fallback = true;
-
-                // Check if the emoji font successfully composed the sequence
-                // (produced a non-.notdef glyph)
-                if (glyph_infos.len > 0 and glyph_infos[0].codepoint != 0) {
-                    face_to_use = fallback_face;
-                    hb_font = fb_font;
-                } else {
-                    // Emoji font didn't help, will try primary below
-                    glyph_infos = &.{};
-                }
-            }
-        }
-    } else {
-    }
-
-    // If fallback didn't produce a result, try primary font
-    if (glyph_infos.len == 0) {
-        hb_buf.reset();
-        hb_buf.addCodepoints(codepoints[0..total_len]);
-        hb_buf.guessSegmentProperties();
-        harfbuzz.shape(hb_font, hb_buf, &.{});
-        glyph_infos = hb_buf.getGlyphInfos();
-
-        // If primary also failed, try non-color fallback
-        if (!tried_fallback and (glyph_infos.len == 0 or glyph_infos[0].codepoint == 0)) {
-            if (findOrLoadFallbackFace(@intCast(base_cp), alloc)) |fallback_face| {
-                const fb_hb_font = g_hb_fallback_fonts.get(@intCast(base_cp)) orelse blk: {
-                    const new_hb = harfbuzz.freetype.createFont(fallback_face.handle) catch null;
-                    if (new_hb) |hf| {
-                        g_hb_fallback_fonts.put(alloc, @intCast(base_cp), hf) catch {
-                            var f = hf;
-                            f.destroy();
-                            break :blk null;
-                        };
-                        break :blk hf;
-                    }
-                    break :blk null;
-                };
-
-                if (fb_hb_font) |fb_font| {
-                    hb_buf.reset();
-                    hb_buf.addCodepoints(codepoints[0..total_len]);
-                    hb_buf.guessSegmentProperties();
-                    harfbuzz.shape(fb_font, hb_buf, &.{});
-
-                    glyph_infos = hb_buf.getGlyphInfos();
-                    if (glyph_infos.len > 0 and glyph_infos[0].codepoint != 0) {
-                        face_to_use = fallback_face;
-                        hb_font = fb_font;
-                    }
-                }
-            }
-        }
-    }
-
-    if (glyph_infos.len == 0 or glyph_infos[0].codepoint == 0) {
-        return null;
-    }
-
-    // Use the first shaped glyph (HarfBuzz composes the sequence into one glyph for emoji)
-    const shaped_glyph_index = glyph_infos[0].codepoint;
-
-    // Render the glyph via FreeType using the glyph index from HarfBuzz
-    const is_color_face = face_to_use.hasColor();
-    face_to_use.loadGlyph(@intCast(shaped_glyph_index), .{
-        .target = .light,
-        .color = is_color_face,
-    }) catch return null;
-    face_to_use.renderGlyph(.light) catch return null;
-
-    const glyph = face_to_use.handle.*.glyph;
-    const bitmap = glyph.*.bitmap;
-
-    const is_color_glyph = bitmap.pixel_mode == freetype.c.FT_PIXEL_MODE_BGRA;
-
-    if (is_color_glyph) {
-        const region = packColorBitmapIntoAtlas(
-            alloc,
-            bitmap.width,
-            bitmap.rows,
-            bitmap.buffer,
-            @intCast(@as(c_uint, @intCast(@abs(bitmap.pitch)))),
-        ) orelse return null;
-
-        const char_data = Character{
-            .region = region,
-            .size_x = @intCast(bitmap.width),
-            .size_y = @intCast(bitmap.rows),
-            .bearing_x = glyph.*.bitmap_left,
-            .bearing_y = glyph.*.bitmap_top,
-            .advance = glyph.*.advance.x,
-            .valid = true,
-            .is_color = true,
-        };
-        grapheme_cache.put(alloc, hash, char_data) catch return null;
-        return char_data;
-    }
-
-    // Grayscale glyph
-    const region = packBitmapIntoAtlas(
-        &g_atlas,
-        alloc,
-        bitmap.width,
-        bitmap.rows,
-        bitmap.buffer,
-        @intCast(bitmap.pitch),
-    ) orelse return null;
-
-    const char_data = Character{
-        .region = region,
-        .size_x = @intCast(bitmap.width),
-        .size_y = @intCast(bitmap.rows),
-        .bearing_x = glyph.*.bitmap_left,
-        .bearing_y = glyph.*.bitmap_top,
-        .advance = glyph.*.advance.x,
-        .valid = true,
-    };
-    grapheme_cache.put(alloc, hash, char_data) catch return null;
-    return char_data;
-}
-
-/// Pack a bitmap into an atlas (growing if necessary), returning the region.
-/// `src_buffer` may be null for zero-size bitmaps (returns a zero-size region).
-/// `src_pitch` is the stride of the source bitmap in bytes (may differ from width).
-fn packBitmapIntoAtlas(
-    atlas_ptr: *?FontAtlas,
-    alloc: std.mem.Allocator,
-    width: u32,
-    height: u32,
-    src_buffer: ?[*]const u8,
-    src_pitch: u32,
-) ?FontAtlas.Region {
-    // Zero-size glyph (e.g., space) — return a trivial region
-    if (width == 0 or height == 0) {
-        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-    }
-
-    // Ensure atlas exists
-    if (atlas_ptr.* == null) {
-        atlas_ptr.* = FontAtlas.init(alloc, 512, .grayscale) catch return null;
-    }
-    var atlas = &atlas_ptr.*.?;
-
-    // Copy source bitmap to tightly-packed buffer (FreeType pitch may != width)
-    const tight = alloc.alloc(u8, width * height) catch return null;
-    defer alloc.free(tight);
-    const src = src_buffer orelse return null;
-    for (0..height) |row| {
-        const src_offset = row * src_pitch;
-        const dst_offset = row * width;
-        @memcpy(tight[dst_offset..][0..width], src[src_offset..][0..width]);
-    }
-
-    // Try to reserve space; grow atlas if full (up to reasonable max)
-    var region = atlas.reserve(alloc, width, height) catch |err| switch (err) {
-        error.AtlasFull => blk: {
-            const new_size = atlas.size * 2;
-            if (new_size > 8192) return null; // Safety cap
-            std.debug.print("Atlas full ({0}x{0}), growing to {1}x{1}\n", .{ atlas.size, new_size });
-            atlas.grow(alloc, new_size) catch return null;
-            break :blk atlas.reserve(alloc, width, height) catch return null;
-        },
-        else => return null,
-    };
-
-    // Copy pixels into atlas
-    atlas.set(region, tight);
-
-    // Ensure region dimensions match what we asked for
-    region.width = width;
-    region.height = height;
-
-    return region;
-}
-
-/// Pack a tightly-packed pixel buffer into an atlas (no pitch conversion needed).
-fn packPixelsIntoAtlas(
-    atlas_ptr: *?FontAtlas,
-    alloc: std.mem.Allocator,
-    width: u32,
-    height: u32,
-    pixels: []const u8,
-) ?FontAtlas.Region {
-    if (width == 0 or height == 0) {
-        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-    }
-
-    if (atlas_ptr.* == null) {
-        atlas_ptr.* = FontAtlas.init(alloc, 512, .grayscale) catch return null;
-    }
-    var atlas = &atlas_ptr.*.?;
-
-    var region = atlas.reserve(alloc, width, height) catch |err| switch (err) {
-        error.AtlasFull => blk: {
-            const new_size = atlas.size * 2;
-            if (new_size > 8192) return null;
-            std.debug.print("Atlas full ({0}x{0}), growing to {1}x{1}\n", .{ atlas.size, new_size });
-            atlas.grow(alloc, new_size) catch return null;
-            break :blk atlas.reserve(alloc, width, height) catch return null;
-        },
-        else => return null,
-    };
-
-    atlas.set(region, pixels);
-    region.width = width;
-    region.height = height;
-
-    return region;
-}
-
-/// Pack a BGRA color bitmap into the color emoji atlas.
-/// Handles pitch != width*4 (FreeType BGRA bitmaps may have padding).
-fn packColorBitmapIntoAtlas(
-    alloc: std.mem.Allocator,
-    width: u32,
-    height: u32,
-    src_buffer: ?[*]const u8,
-    src_pitch: u32,
-) ?FontAtlas.Region {
-    if (width == 0 or height == 0) {
-        return .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-    }
-
-    if (g_color_atlas == null) {
-        g_color_atlas = FontAtlas.init(alloc, 512, .bgra) catch return null;
-    }
-    var atlas = &g_color_atlas.?;
-
-    // Copy source bitmap to tightly-packed BGRA buffer
-    const depth: u32 = 4; // BGRA
-    const tight = alloc.alloc(u8, width * height * depth) catch return null;
-    defer alloc.free(tight);
-    const src = src_buffer orelse return null;
-    for (0..height) |row| {
-        const src_offset = row * src_pitch;
-        const dst_offset = row * width * depth;
-        @memcpy(tight[dst_offset..][0..width * depth], src[src_offset..][0..width * depth]);
-    }
-
-    var region = atlas.reserve(alloc, width, height) catch |err| switch (err) {
-        error.AtlasFull => blk: {
-            const new_size = atlas.size * 2;
-            if (new_size > 8192) return null;
-            std.debug.print("Color atlas full ({0}x{0}), growing to {1}x{1}\n", .{ atlas.size, new_size });
-            atlas.grow(alloc, new_size) catch return null;
-            break :blk atlas.reserve(alloc, width, height) catch return null;
-        },
-        else => return null,
-    };
-
-    atlas.set(region, tight);
-    region.width = width;
-    region.height = height;
-
-    return region;
-}
-
-/// Find or load a fallback font that contains the given codepoint
-fn findOrLoadFallbackFace(codepoint: u32, alloc: std.mem.Allocator) ?freetype.Face {
-    // Check if we already have a fallback for this codepoint
-    if (g_fallback_faces.get(codepoint)) |face| {
-        return face;
-    }
-
-    // Check negative cache - if we already know there's no fallback, skip DirectWrite
-    if (g_no_fallback.contains(codepoint)) {
-        return null;
-    }
-
-    // Need DirectWrite and FreeType library to find fallbacks
-    const dw = g_font_discovery orelse return null;
-    const ft_lib = g_ft_lib orelse return null;
-
-    // Use DirectWrite to find a font with this codepoint
-    const maybe_font = dw.findFallbackFont(codepoint) catch {
-        // Cache the negative result to avoid repeated DirectWrite queries
-        g_no_fallback.put(alloc, codepoint, {}) catch {};
-        return null;
-    };
-    const font = maybe_font orelse {
-        // Cache the negative result
-        g_no_fallback.put(alloc, codepoint, {}) catch {};
-        return null;
-    };
-    defer font.release();
-
-    // Get the font face to extract file path
-    const dw_face = font.createFontFace() catch return null;
-    defer dw_face.release();
-
-    // Get font file
-    const font_file = dw_face.getFiles() catch return null;
-    defer font_file.release();
-
-    // Get file loader
-    const loader = font_file.getLoader() catch return null;
-    defer loader.release();
-
-    // Get local font file loader
-    const local_loader = loader.queryLocalFontFileLoader() orelse return null;
-    defer local_loader.release();
-
-    // Get reference key
-    const ref_key = font_file.getReferenceKey() catch return null;
-
-    // Get path length
-    const path_len = local_loader.getFilePathLengthFromKey(ref_key.key, ref_key.size) catch return null;
-
-    // Allocate buffer for path
-    var path_buf = alloc.alloc(u16, path_len + 1) catch return null;
-    defer alloc.free(path_buf);
-
-    // Get the path
-    local_loader.getFilePathFromKey(ref_key.key, ref_key.size, path_buf) catch return null;
-
-    // Convert to UTF-8
-    const utf8_path = std.unicode.utf16LeToUtf8AllocZ(alloc, path_buf[0..path_len]) catch return null;
-    defer alloc.free(utf8_path);
-
-    const face_index = dw_face.getIndex();
-
-    // Load with FreeType
-    const ft_face = ft_lib.initFace(utf8_path, @intCast(face_index)) catch return null;
-
-    // Set size to match primary font
-    ft_face.setCharSize(0, @as(i32, @intCast(g_font_size)) * 64, 96, 96) catch {
-        ft_face.deinit();
-        return null;
-    };
-
-    // Cache the fallback face for this codepoint
-    g_fallback_faces.put(alloc, codepoint, ft_face) catch {
-        ft_face.deinit();
-        return null;
-    };
-
-    return ft_face;
-}
-
-/// Load a sprite glyph (box drawing, powerline, etc.)
-fn loadSpriteGlyph(codepoint: u32, alloc: std.mem.Allocator) ?Character {
-    const metrics = sprite.Metrics{
-        .cell_width = @intFromFloat(cell_width),
-        .cell_height = @intFromFloat(cell_height),
-        .box_thickness = box_thickness,
-    };
-
-    var result = sprite.renderSprite(alloc, codepoint, metrics) catch return null;
-    if (result == null) return null;
-
-    defer result.?.deinit();
-
-    const r = result.?;
-
-    // Extract only the trimmed region for the texture (like Ghostty's writeAtlas)
-    // We need to copy row by row since the trimmed region is smaller than the surface
-    var trimmed_data = alloc.alloc(u8, r.width * r.height) catch return null;
-    defer alloc.free(trimmed_data);
-
-    const src_stride = r.surface_width;
-    for (0..r.height) |y| {
-        const src_y = y + r.clip_top;
-        const src_start = src_y * src_stride + r.clip_left;
-        const dst_start = y * r.width;
-        @memcpy(trimmed_data[dst_start..][0..r.width], r.data[src_start..][0..r.width]);
-    }
-
-    // Pack into font atlas
-    const region = packPixelsIntoAtlas(&g_atlas, alloc, @intCast(r.width), @intCast(r.height), trimmed_data) orelse return null;
-
-    // Calculate glyph offsets like Ghostty does:
-    // Ghostty: offset_x = clip_left - padding_x  
-    // Ghostty: offset_y = region.height + clip_bottom - padding_y
-    //
-    // Ghostty's offset_y is the distance from cell BOTTOM to glyph TOP.
-    // 
-    // Our renderChar formula: y0 = y + cell_baseline - (size_y - bearing_y)
-    //                         glyph_top = y0 + size_y = y + cell_baseline + bearing_y
-    //
-    // We want glyph_top = y + offset_y (cell bottom + distance to glyph top)
-    // So: y + cell_baseline + bearing_y = y + offset_y
-    // Thus: bearing_y = offset_y - cell_baseline
-    const offset_x: i32 = @as(i32, @intCast(r.clip_left)) - @as(i32, @intCast(r.padding_x));
-    var offset_y: i32 = @as(i32, @intCast(r.height + r.clip_bottom)) - @as(i32, @intCast(r.padding_y));
-    const baseline_i: i32 = @intFromFloat(cell_baseline);
-
-    // For braille (no trim, no padding), offset_y = cell_height, meaning glyph top = cell top.
-    // But braille should sit ON the baseline like text, not fill from cell top.
-    // Experimentally: subtracting full baseline (6) is too low, 0 is too high.
-    // Try half the baseline as a compromise.
-    if (codepoint >= 0x2800 and codepoint <= 0x28FF) {
-        offset_y -= @divFloor(baseline_i, 2);
-    }
-
-    const bearing_y = offset_y - baseline_i;
-
-    return Character{
-        .region = region,
-        .size_x = @intCast(r.width),
-        .size_y = @intCast(r.height),
-        .bearing_x = offset_x,
-        .bearing_y = bearing_y,
-        .advance = @as(i64, @intCast(r.cell_width)) << 6, // Cell width in 26.6 fixed point
-        .valid = true,
-    };
-}
-
-/// Preload common character ranges
-fn preloadCharacters(face: freetype.Face) void {
-    gl.PixelStorei.?(c.GL_UNPACK_ALIGNMENT, 1);
-
-    // Store face for later on-demand loading
-    glyph_face = face;
-
-    // Create HarfBuzz font from primary FreeType face for grapheme cluster shaping
-    if (g_hb_font) |*hf| hf.destroy();
-    g_hb_font = harfbuzz.freetype.createFont(face.handle) catch null;
-    if (g_hb_buf == null) {
-        g_hb_buf = harfbuzz.Buffer.create() catch null;
-    }
-
-    std.debug.print("Starting glyph preload, g_allocator set: {}\n", .{g_allocator != null});
-
-    // Calculate cell dimensions FIRST from font metrics (like Ghostty)
-    // This must happen before loading sprites so they use correct dimensions
-    //
-    // Cell width is the maximum advance of all visible ASCII characters (like Ghostty)
-    // This ensures proper spacing for monospace fonts
-    {
-        var max_advance: f64 = 0;
-        var ascii_char: u8 = ' ';
-        while (ascii_char < 127) : (ascii_char += 1) {
-            if (loadGlyph(ascii_char)) |char| {
-                const advance = @as(f64, @floatFromInt(char.advance)) / 64.0; // 26.6 fixed point
-                max_advance = @max(max_advance, advance);
-            }
-        }
-        if (max_advance > 0) {
-            cell_width = @floatCast(max_advance);
-        }
-    }
-
-    if (loadGlyph('M')) |_| {
-
-        // Get metrics like Ghostty does - from font tables with fallback to FreeType
-        const size_metrics = face.handle.*.size.*.metrics;
-        const px_per_em: f64 = @floatFromInt(size_metrics.y_ppem);
-
-        // Get units_per_em from head table or FreeType
-        const units_per_em: f64 = blk: {
-            if (face.getSfntTable(.head)) |head| {
-                break :blk @floatFromInt(head.Units_Per_EM);
-            }
-            if (face.handle.*.face_flags & freetype.c.FT_FACE_FLAG_SCALABLE != 0) {
-                break :blk @floatFromInt(face.handle.*.units_per_EM);
-            }
-            break :blk @floatFromInt(size_metrics.y_ppem);
-        };
-        const px_per_unit = px_per_em / units_per_em;
-
-        // Get vertical metrics from font tables (like Ghostty)
-        const ascent: f64, const descent: f64, const line_gap: f64 = vertical_metrics: {
-            const hhea_ = face.getSfntTable(.hhea);
-            const os2_ = face.getSfntTable(.os2);
-
-            // If no hhea table, fall back to FreeType metrics
-            const hhea = hhea_ orelse {
-                const ft_ascender = f26dot6ToF64(size_metrics.ascender);
-                const ft_descender = f26dot6ToF64(size_metrics.descender);
-                const ft_height = f26dot6ToF64(size_metrics.height);
-                break :vertical_metrics .{
-                    ft_ascender,
-                    ft_descender,
-                    ft_height + ft_descender - ft_ascender,
-                };
-            };
-
-            const hhea_ascent: f64 = @floatFromInt(hhea.Ascender);
-            const hhea_descent: f64 = @floatFromInt(hhea.Descender);
-            const hhea_line_gap: f64 = @floatFromInt(hhea.Line_Gap);
-
-            // If no OS/2 table, use hhea metrics
-            const os2 = os2_ orelse break :vertical_metrics .{
-                hhea_ascent * px_per_unit,
-                hhea_descent * px_per_unit,
-                hhea_line_gap * px_per_unit,
-            };
-
-            // Check for invalid OS/2 table
-            if (os2.version == 0xFFFF) break :vertical_metrics .{
-                hhea_ascent * px_per_unit,
-                hhea_descent * px_per_unit,
-                hhea_line_gap * px_per_unit,
-            };
-
-            const os2_ascent: f64 = @floatFromInt(os2.sTypoAscender);
-            const os2_descent: f64 = @floatFromInt(os2.sTypoDescender);
-            const os2_line_gap: f64 = @floatFromInt(os2.sTypoLineGap);
-
-            // If USE_TYPO_METRICS bit is set (bit 7), use OS/2 typo metrics
-            if (os2.fsSelection & (1 << 7) != 0) {
-                break :vertical_metrics .{
-                    os2_ascent * px_per_unit,
-                    os2_descent * px_per_unit,
-                    os2_line_gap * px_per_unit,
-                };
-            }
-
-            // Otherwise prefer hhea if available
-            if (hhea.Ascender != 0 or hhea.Descender != 0) {
-                break :vertical_metrics .{
-                    hhea_ascent * px_per_unit,
-                    hhea_descent * px_per_unit,
-                    hhea_line_gap * px_per_unit,
-                };
-            }
-
-            // Fall back to OS/2 sTypo metrics
-            if (os2_ascent != 0 or os2_descent != 0) {
-                break :vertical_metrics .{
-                    os2_ascent * px_per_unit,
-                    os2_descent * px_per_unit,
-                    os2_line_gap * px_per_unit,
-                };
-            }
-
-            // Last resort: OS/2 usWin metrics
-            const win_ascent: f64 = @floatFromInt(os2.usWinAscent);
-            const win_descent: f64 = @floatFromInt(os2.usWinDescent);
-            break :vertical_metrics .{
-                win_ascent * px_per_unit,
-                -win_descent * px_per_unit, // usWinDescent is positive, flip sign
-                0.0,
-            };
-        };
-
-        // Calculate cell dimensions like Ghostty
-        const face_height = ascent - descent + line_gap;
-        cell_height = @floatCast(@round(face_height));
-
-        // Split line gap in half for top/bottom padding (like Ghostty)
-        const half_line_gap = line_gap / 2.0;
-
-        // Calculate baseline from bottom of cell (like Ghostty)
-        // face_baseline = half_line_gap - descent (descent is negative, so this adds)
-        const face_baseline = half_line_gap - descent;
-        // Center the baseline by accounting for rounding difference
-        const baseline_centered = face_baseline - (cell_height - face_height) / 2.0;
-        cell_baseline = @floatCast(@round(baseline_centered));
-
-        // Cursor height is the ascender
-        cursor_height = @floatCast(@round(ascent));
-
-        // Get underline thickness from post table for box drawing (like Ghostty)
-        const underline_thickness: f64 = ul_thick: {
-            if (face.getSfntTable(.post)) |post| {
-                if (post.underlineThickness != 0) {
-                    break :ul_thick @as(f64, @floatFromInt(post.underlineThickness)) * px_per_unit;
-                }
-            }
-            // Fallback: use a reasonable default based on cell height
-            break :ul_thick @max(1.0, @round(cell_height / 16.0));
-        };
-        // Use ceiling like Ghostty
-        box_thickness = @max(1, @as(u32, @intFromFloat(@ceil(underline_thickness))));
-
-        std.debug.print("Cell dimensions: {d:.0}x{d:.0} (ascent={d:.1}, descent={d:.1}, line_gap={d:.1}, baseline={d:.0}, box_thick={})\n", .{
-            cell_width, cell_height, ascent, descent, line_gap, cell_baseline, box_thickness,
-        });
-    } else {
-        std.debug.print("ERROR: Could not load 'M' glyph!\n", .{});
-    }
-
-    // Preload ASCII printable characters (32-126)
-    var ascii_loaded: u32 = 0;
-    for (32..127) |char| {
-        if (loadGlyph(@intCast(char)) != null) {
-            ascii_loaded += 1;
-        }
-    }
-    std.debug.print("ASCII glyphs loaded: {}\n", .{ascii_loaded});
-
-    // Preload box drawing characters (U+2500 - U+257F)
-    var box_loaded: u32 = 0;
-    for (0x2500..0x2580) |char| {
-        if (loadGlyph(@intCast(char)) != null) {
-            box_loaded += 1;
-        }
-    }
-    std.debug.print("Box drawing glyphs loaded: {}\n", .{box_loaded});
-
-    // Preload block elements (U+2580 - U+259F)
-    for (0x2580..0x25A0) |char| {
-        _ = loadGlyph(@intCast(char));
-    }
-
-    std.debug.print("Total glyphs in cache: {}\n", .{glyph_cache.count()});
-}
-
-fn indexToRgb(color_idx: u8) [3]f32 {
-    // Use theme palette for colors 0-15
-    if (color_idx < 16) {
-        return g_theme.palette[color_idx];
-    } else if (color_idx < 232) {
-        // 216 color cube (6x6x6): indices 16-231
-        const idx = color_idx - 16;
-        const r = idx / 36;
-        const g = (idx / 6) % 6;
-        const b = idx % 6;
-        return .{
-            if (r == 0) 0.0 else (@as(f32, @floatFromInt(r)) * 40.0 + 55.0) / 255.0,
-            if (g == 0) 0.0 else (@as(f32, @floatFromInt(g)) * 40.0 + 55.0) / 255.0,
-            if (b == 0) 0.0 else (@as(f32, @floatFromInt(b)) * 40.0 + 55.0) / 255.0,
-        };
-    } else {
-        // Grayscale: indices 232-255 (24 shades)
-        const gray = (@as(f32, @floatFromInt(color_idx - 232)) * 10.0 + 8.0) / 255.0;
-        return .{ gray, gray, gray };
-    }
-}
-
-/// Sync the font atlas CPU data to the GPU texture.
-/// Called once per frame before rendering. Only uploads if the atlas was modified.
-/// Supports both grayscale (GL_RED) and BGRA (GL_RGBA) atlas formats.
-fn syncAtlasTexture(atlas_ptr: *?FontAtlas, texture_ptr: *c.GLuint, modified_ptr: *usize) void {
-    const atlas = atlas_ptr.*.?;
-    const modified = atlas.modified.load(.monotonic);
-    if (modified <= modified_ptr.*) return;
-
-    const size: c_int = @intCast(atlas.size);
-
-    // Pick GL format based on atlas pixel format.
-    // FreeType color emoji bitmaps are BGRA byte order, so we upload with GL_BGRA
-    // which tells OpenGL to swizzle B↔R on upload, giving us proper RGBA in the texture.
-    const gl_internal: c.GLint = if (atlas.format == .bgra) c.GL_RGBA8 else c.GL_RED;
-    const gl_format: c.GLenum = if (atlas.format == .bgra) c.GL_BGRA else c.GL_RED;
-
-    if (texture_ptr.* == 0) {
-        // First time — create the texture
-        gl.GenTextures.?(1, texture_ptr);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, texture_ptr.*);
-        gl.TexImage2D.?(c.GL_TEXTURE_2D, 0, gl_internal, size, size, 0, gl_format, c.GL_UNSIGNED_BYTE, atlas.data.ptr);
-        gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-        gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
-        gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-        gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-    } else {
-        gl.BindTexture.?(c.GL_TEXTURE_2D, texture_ptr.*);
-        // Check if atlas grew beyond current GPU texture size
-        var current_size: c.GLint = 0;
-        gl.GetTexLevelParameteriv.?(c.GL_TEXTURE_2D, 0, c.GL_TEXTURE_WIDTH, &current_size);
-        if (current_size < size) {
-            // Atlas grew — need a new texture
-            gl.DeleteTextures.?(1, texture_ptr);
-            gl.GenTextures.?(1, texture_ptr);
-            gl.BindTexture.?(c.GL_TEXTURE_2D, texture_ptr.*);
-            gl.TexImage2D.?(c.GL_TEXTURE_2D, 0, gl_internal, size, size, 0, gl_format, c.GL_UNSIGNED_BYTE, atlas.data.ptr);
-            gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-            gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
-            gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-            gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-        } else {
-            // Same size — sub-image upload
-            gl.TexSubImage2D.?(c.GL_TEXTURE_2D, 0, 0, 0, size, size, gl_format, c.GL_UNSIGNED_BYTE, atlas.data.ptr);
-        }
-    }
-
-    modified_ptr.* = modified;
-}
-
-/// Load a glyph for the titlebar (14pt, separate cache/atlas).
-fn loadTitlebarGlyph(codepoint: u32) ?Character {
-    if (g_titlebar_cache.get(codepoint)) |ch| return ch;
-
-    const alloc = g_allocator orelse return null;
-    const face = g_titlebar_face orelse return null;
-
-    var glyph_index = face.getCharIndex(codepoint) orelse 0;
-    var face_to_use = face;
-
-    // Try fallback for missing glyphs
-    if (glyph_index == 0) {
-        if (findOrLoadFallbackFace(codepoint, alloc)) |fallback| {
-            const fi = fallback.getCharIndex(codepoint) orelse 0;
-            if (fi != 0) {
-                glyph_index = fi;
-                face_to_use = fallback;
-            }
-        }
-    }
-
-    face_to_use.loadGlyph(@intCast(glyph_index), .{ .target = .light }) catch return null;
-    face_to_use.renderGlyph(.light) catch return null;
-
-    const glyph = face_to_use.handle.*.glyph;
-    const bitmap = glyph.*.bitmap;
-    const region = packBitmapIntoAtlas(
-        &g_titlebar_atlas,
-        alloc,
-        bitmap.width,
-        bitmap.rows,
-        bitmap.buffer,
-        @intCast(bitmap.pitch),
-    ) orelse return null;
-
-    const ch = Character{
-        .region = region,
-        .size_x = @intCast(bitmap.width),
-        .size_y = @intCast(bitmap.rows),
-        .bearing_x = glyph.*.bitmap_left,
-        .bearing_y = glyph.*.bitmap_top,
-        .advance = glyph.*.advance.x,
-        .valid = true,
-    };
-
-    g_titlebar_cache.put(alloc, codepoint, ch) catch return null;
-    return ch;
-}
 
 /// Render a titlebar glyph at 1:1 atlas size (no scaling).
 /// Supports both grayscale (titlebar atlas) and color emoji (color atlas).
 fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
     if (codepoint < 32) return;
-    const ch: Character = loadTitlebarGlyph(codepoint) orelse return;
+    const ch: Character = font.loadTitlebarGlyph(codepoint) orelse return;
     if (ch.region.width == 0 or ch.region.height == 0) return;
 
     if (ch.is_color) {
         // Color emoji — scale down to fit titlebar height and render with simple color shader
-        const scale = g_titlebar_cell_height / @as(f32, @floatFromInt(ch.size_y));
+        const scale = font.g_titlebar_cell_height / @as(f32, @floatFromInt(ch.size_y));
         const w = @as(f32, @floatFromInt(ch.size_x)) * scale;
         const h = @as(f32, @floatFromInt(ch.size_y)) * scale;
         const x0 = x;
         const y0 = y;
 
-        const atlas_size = if (g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
-        const uv = glyphUV(ch.region, atlas_size);
+        const atlas_size = if (font.g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+        const uv = font.glyphUV(ch.region, atlas_size);
 
         const vertices = [6][4]f32{
             .{ x0, y0 + h, uv.u0, uv.v0 },
@@ -2331,7 +1358,7 @@ fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
         gl.Uniform1f.?(gl.GetUniformLocation.?(simple_color_shader, "opacity"), 1.0);
         // Premultiplied alpha blend for color emoji (BGRA bitmaps from FreeType)
         gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, g_color_atlas_texture);
+        gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
@@ -2342,12 +1369,12 @@ fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
     } else {
         // Grayscale glyph — render with text shader from titlebar atlas
         const x0 = x + @as(f32, @floatFromInt(ch.bearing_x));
-        const y0 = y + g_titlebar_baseline - @as(f32, @floatFromInt(ch.size_y - ch.bearing_y));
+        const y0 = y + font.g_titlebar_baseline - @as(f32, @floatFromInt(ch.size_y - ch.bearing_y));
         const w = @as(f32, @floatFromInt(ch.size_x));
         const h = @as(f32, @floatFromInt(ch.size_y));
 
-        const atlas_size = if (g_titlebar_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
-        const uv = glyphUV(ch.region, atlas_size);
+        const atlas_size = if (font.g_titlebar_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+        const uv = font.glyphUV(ch.region, atlas_size);
 
         const vertices = [6][4]f32{
             .{ x0, y0 + h, uv.u0, uv.v0 },
@@ -2359,7 +1386,7 @@ fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
         };
 
         gl.Uniform3f.?(gl.GetUniformLocation.?(shader_program, "textColor"), color[0], color[1], color[2]);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, g_titlebar_atlas_texture);
+        gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_titlebar_atlas_texture);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
@@ -2369,102 +1396,32 @@ fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
 
 /// Get the advance width of a titlebar glyph.
 fn titlebarGlyphAdvance(codepoint: u32) f32 {
-    if (loadTitlebarGlyph(codepoint)) |g| {
+    if (font.loadTitlebarGlyph(codepoint)) |g| {
         const raw_advance = @as(f32, @floatFromInt(g.advance >> 6));
         if (g.is_color) {
             // Color emoji: scale advance to match the scaled-down rendering size
-            const scale = g_titlebar_cell_height / @as(f32, @floatFromInt(g.size_y));
+            const scale = font.g_titlebar_cell_height / @as(f32, @floatFromInt(g.size_y));
             return raw_advance * scale;
         }
         return raw_advance;
     }
-    return g_titlebar_cell_width;
-}
-
-/// Render the 🔔 bell emoji in the titlebar using the main glyph loader (color emoji path).
-/// This ensures the bell renders as a full-color emoji rather than a small monochrome glyph.
-/// Cached bell emoji glyph (loaded once from color emoji font)
-const BellCache = struct {
-    region: FontAtlas.Region,
-    bmp_w: f32,
-    bmp_h: f32,
-};
-threadlocal var g_bell_cache: ?BellCache = null;
-
-/// Dedicated color emoji face for bell rendering (loaded once)
-threadlocal var g_bell_emoji_face: ?freetype.Face = null;
-
-fn loadBellEmoji() ?BellCache {
-    if (g_bell_cache) |cached| return cached;
-
-    const alloc = g_allocator orelse return null;
-    const ft_lib = g_ft_lib orelse return null;
-    const bell_cp: u32 = 0x1F514;
-
-    // Load a color emoji font face if we haven't yet
-    if (g_bell_emoji_face == null) {
-        const dw = g_font_discovery orelse return null;
-        // Try well-known color emoji fonts
-        const emoji_fonts = [_][]const u8{ "Segoe UI Emoji", "Noto Color Emoji" };
-        for (emoji_fonts) |font_name| {
-            if (dw.findFontFilePath(alloc, font_name, .NORMAL, .NORMAL) catch null) |result| {
-                defer alloc.free(result.path);
-                const emoji_face = ft_lib.initFace(result.path, @intCast(result.face_index)) catch continue;
-                // Set a large size for crisp color emoji bitmaps
-                emoji_face.setCharSize(0, 12 * 64, 96, 96) catch {
-                    emoji_face.deinit();
-                    continue;
-                };
-                if (emoji_face.hasColor()) {
-                    g_bell_emoji_face = emoji_face;
-                    break;
-                }
-                emoji_face.deinit();
-            }
-        }
-    }
-
-    const face = g_bell_emoji_face orelse return null;
-    const glyph_index = face.getCharIndex(bell_cp) orelse return null;
-    if (glyph_index == 0) return null;
-
-    face.loadGlyph(@intCast(glyph_index), .{ .target = .light, .color = true }) catch return null;
-    face.renderGlyph(.light) catch return null;
-
-    const glyph = face.handle.*.glyph;
-    const bitmap = glyph.*.bitmap;
-    if (bitmap.pixel_mode != freetype.c.FT_PIXEL_MODE_BGRA) return null;
-
-    const region = packColorBitmapIntoAtlas(
-        alloc,
-        bitmap.width,
-        bitmap.rows,
-        bitmap.buffer,
-        @intCast(@as(c_uint, @intCast(@abs(bitmap.pitch)))),
-    ) orelse return null;
-
-    g_bell_cache = .{
-        .region = region,
-        .bmp_w = @floatFromInt(bitmap.width),
-        .bmp_h = @floatFromInt(bitmap.rows),
-    };
-    return g_bell_cache;
+    return font.g_titlebar_cell_width;
 }
 
 fn renderBellEmoji(x: f32, y: f32, opacity: f32) void {
-    const bell = loadBellEmoji() orelse {
+    const bell = font.loadBellEmoji() orelse {
         renderTitlebarChar(0x1F514, x, y, .{ 1.0, 0.84, 0.0 });
         return;
     };
 
     const aspect = bell.bmp_w / bell.bmp_h;
-    const h = g_titlebar_cell_height * 0.85;
+    const h = font.g_titlebar_cell_height * 0.85;
     const w = h * aspect;
     const x0 = x;
     const y0 = y;
 
-    const atlas_size = if (g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
-    const uv = glyphUV(bell.region, atlas_size);
+    const atlas_size = if (font.g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+    const uv = font.glyphUV(bell.region, atlas_size);
 
     const vertices = [6][4]f32{
         .{ x0, y0 + h, uv.u0, uv.v0 },
@@ -2492,7 +1449,7 @@ fn renderBellEmoji(x: f32, y: f32, opacity: f32) void {
     gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
     gl.Uniform1f.?(gl.GetUniformLocation.?(simple_color_shader, "opacity"), opacity);
     gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_color_atlas_texture);
+    gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
@@ -2512,8 +1469,8 @@ fn renderIconGlyph(ch: Character, btn_x: f32, btn_y: f32, btn_w: f32, btn_h: f32
     const gx = btn_x + (btn_w - gw) / 2;
     const gy = btn_y + (btn_h - gh) / 2;
 
-    const icon_atlas_size = if (g_icon_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
-    const uv = glyphUV(ch.region, icon_atlas_size);
+    const icon_atlas_size = if (font.g_icon_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+    const uv = font.glyphUV(ch.region, icon_atlas_size);
 
     const vertices = [6][4]f32{
         .{ gx, gy + gh, uv.u0, uv.v0 },
@@ -2525,22 +1482,11 @@ fn renderIconGlyph(ch: Character, btn_x: f32, btn_y: f32, btn_w: f32, btn_h: f32
     };
 
     gl.Uniform3f.?(gl.GetUniformLocation.?(shader_program, "textColor"), color[0], color[1], color[2]);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_icon_atlas_texture);
+    gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_icon_atlas_texture);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
     gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); g_draw_call_count += 1;
-}
-
-/// Compute UV coordinates from an atlas region and atlas size.
-const GlyphUV = struct { u0: f32, v0: f32, u1: f32, v1: f32 };
-fn glyphUV(region: FontAtlas.Region, atlas_size: f32) GlyphUV {
-    return .{
-        .u0 = @as(f32, @floatFromInt(region.x)) / atlas_size,
-        .v0 = @as(f32, @floatFromInt(region.y)) / atlas_size,
-        .u1 = @as(f32, @floatFromInt(region.x + region.width)) / atlas_size,
-        .v1 = @as(f32, @floatFromInt(region.y + region.height)) / atlas_size,
-    };
 }
 
 fn renderChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
@@ -2548,18 +1494,18 @@ fn renderChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
     if (codepoint < 32) return;
 
     // Get character from cache (load on-demand if needed)
-    const ch: Character = loadGlyph(codepoint) orelse return;
+    const ch: Character = font.loadGlyph(codepoint) orelse return;
     if (ch.region.width == 0 or ch.region.height == 0) return;
 
     // Position glyph relative to baseline (like Ghostty)
     const x0 = x + @as(f32, @floatFromInt(ch.bearing_x));
-    const y0 = y + cell_baseline - @as(f32, @floatFromInt(ch.size_y - ch.bearing_y));
+    const y0 = y + font.cell_baseline - @as(f32, @floatFromInt(ch.size_y - ch.bearing_y));
     const w = @as(f32, @floatFromInt(ch.size_x));
     const h = @as(f32, @floatFromInt(ch.size_y));
 
     // Compute atlas UVs from region
-    const atlas_size = if (g_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
-    const uv = glyphUV(ch.region, atlas_size);
+    const atlas_size = if (font.g_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+    const uv = font.glyphUV(ch.region, atlas_size);
 
     const vertices = [6][4]f32{
         .{ x0, y0 + h, uv.u0, uv.v0 },
@@ -2571,7 +1517,7 @@ fn renderChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
     };
 
     gl.Uniform3f.?(gl.GetUniformLocation.?(shader_program, "textColor"), color[0], color[1], color[2]);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, g_atlas_texture);
+    gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_atlas_texture);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
@@ -2752,9 +1698,9 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
             const bell_opacity: f32 = if (tab.g_tabs[tab_idx]) |t| (if (t.focusedSurface()) |s| s.bell_opacity else 0) else 0;
             const has_bell = bell_opacity > 0.01;
             const bell_emoji_width: f32 = if (has_bell) blk: {
-                if (loadBellEmoji()) |bell| {
+                if (font.loadBellEmoji()) |bell| {
                     const aspect = bell.bmp_w / bell.bmp_h;
-                    break :blk g_titlebar_cell_height * 0.85 * aspect;
+                    break :blk font.g_titlebar_cell_height * 0.85 * aspect;
                 }
                 break :blk titlebarGlyphAdvance(0x1F514);
             } else 0;
@@ -2770,7 +1716,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 }
             }
 
-            const text_y = tb_top + (titlebar_h - g_titlebar_cell_height) / 2;
+            const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
 
             // Left edge the bell must not cross (same padding as close button side)
             const left_edge = center_offset + tab_pad;
@@ -2828,7 +1774,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                 if (is_renaming) {
                     if (tab.g_tab_rename_select_all and text_width > 0) {
                         // Highlight behind the text — use cursor color
-                        renderQuad(text_start_x, text_y, text_width, g_titlebar_cell_height, g_theme.cursor_color);
+                        renderQuad(text_start_x, text_y, text_width, font.g_titlebar_cell_height, g_theme.cursor_color);
                         // Re-render text on top in contrasting color
                         const sel_text_color = g_theme.cursor_text orelse g_theme.background;
                         var sel_x = text_start_x;
@@ -2840,7 +1786,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                         if (!found_cursor) rename_cursor_x = text_x;
                         // Blink the cursor using the existing blink timer
                         if (g_cursor_blink_visible) {
-                            renderQuad(rename_cursor_x, text_y, 1.0, g_titlebar_cell_height, text_active);
+                            renderQuad(rename_cursor_x, text_y, 1.0, font.g_titlebar_cell_height, text_active);
                         }
                     }
                 }
@@ -2904,7 +1850,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                     const trunc_width = text_x - text_x_start;
                     if (tab.g_tab_rename_select_all and trunc_width > 0) {
                         // Highlight behind the text — use cursor color
-                        renderQuad(text_x_start, text_y, trunc_width, g_titlebar_cell_height, g_theme.cursor_color);
+                        renderQuad(text_x_start, text_y, trunc_width, font.g_titlebar_cell_height, g_theme.cursor_color);
                         // Re-render text on top in contrasting color
                         const sel_text_color = g_theme.cursor_text orelse g_theme.background;
                         var sel_x = text_x_start;
@@ -2922,7 +1868,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                         // Blink cursor at end (cursor position tracking in truncated
                         // text is approximate — place at end for simplicity)
                         if (g_cursor_blink_visible) {
-                            renderQuad(text_x, text_y, 1.0, g_titlebar_cell_height, text_active);
+                            renderQuad(text_x, text_y, 1.0, font.g_titlebar_cell_height, text_active);
                         }
                     }
                 }
@@ -2992,8 +1938,8 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
                     renderQuadAlpha(bx, by, btn_size, btn_size, hover_bg, close_opacity);
                 }
 
-                if (icon_face != null) {
-                    if (loadIconGlyph(0xE8BB)) |ch| {
+                if (font.icon_face != null) {
+                    if (font.loadIconGlyph(0xE8BB)) |ch| {
                         renderIconGlyph(ch, close_btn_x, tb_top, tab.TAB_CLOSE_BTN_W, titlebar_h, faded_close_color, 1.0);
                     }
                 } else {
@@ -3014,7 +1960,7 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
 
         // Sync close button position for double-click suppression in WndProc
         if (g_window) |w| {
-            if (num_tabs > 1 and tab_idx < 10 and g_titlebar_face != null) {
+            if (num_tabs > 1 and tab_idx < 10 and font.g_titlebar_face != null) {
                 // Close button is centered on shortcut position at right edge of tab
                 const tp: f32 = 12; // tab_pad
                 const digit: u32 = if (tab_idx == 9) '0' else @as(u32, @intCast('1' + tab_idx));
@@ -3055,8 +2001,8 @@ fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
         // + icon — same font/color as caption buttons, scaled up 15% to match stroke weight
         const plus_icon_color = [3]f32{ 0.75, 0.75, 0.75 };
         const plus_scale: f32 = 1.15;
-        if (icon_face != null) {
-            if (loadIconGlyph(0xE948)) |ch| {
+        if (font.icon_face != null) {
+            if (font.loadIconGlyph(0xE948)) |ch| {
                 renderIconGlyph(ch, cursor_x, tb_top, plus_btn_w, titlebar_h, plus_icon_color, plus_scale);
             }
         } else {
@@ -3146,8 +2092,8 @@ fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButtonTy
     };
 
     // Try rendering from Segoe MDL2 Assets icon font
-    if (icon_face != null) {
-        if (loadIconGlyph(icon_codepoint)) |ch| {
+    if (font.icon_face != null) {
+        if (font.loadIconGlyph(icon_codepoint)) |ch| {
             renderIconGlyph(ch, x, y, w, h, icon_color, 1.0);
             return;
         }
@@ -3187,50 +2133,6 @@ fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButtonTy
     }
 }
 
-fn getGlyphInfo(codepoint: u32) ?Character {
-    return glyph_cache.get(codepoint);
-}
-
-/// Load a glyph from the Segoe MDL2 Assets icon font.
-fn loadIconGlyph(codepoint: u32) ?Character {
-    if (icon_cache.get(codepoint)) |ch| return ch;
-
-    const face = icon_face orelse return null;
-    const alloc = g_allocator orelse return null;
-
-    const glyph_index = face.getCharIndex(codepoint) orelse return null;
-    if (glyph_index == 0) return null;
-
-    // Use mono hinting for crisp icon rendering (snaps to pixel grid)
-    face.loadGlyph(@intCast(glyph_index), .{ .target = .normal }) catch return null;
-    face.renderGlyph(.normal) catch return null;
-
-    const glyph = face.handle.*.glyph;
-    const bitmap = glyph.*.bitmap;
-
-    // Pack into icon atlas
-    const region = packBitmapIntoAtlas(
-        &g_icon_atlas,
-        alloc,
-        bitmap.width,
-        bitmap.rows,
-        bitmap.buffer,
-        @intCast(bitmap.pitch),
-    ) orelse return null;
-
-    const ch = Character{
-        .region = region,
-        .size_x = @intCast(bitmap.width),
-        .size_y = @intCast(bitmap.rows),
-        .bearing_x = @intCast(glyph.*.bitmap_left),
-        .bearing_y = @intCast(glyph.*.bitmap_top),
-        .advance = @intCast(glyph.*.advance.x),
-    };
-
-    icon_cache.put(alloc, codepoint, ch) catch return null;
-    return ch;
-}
-
 /// Render placeholder content for tabs that don't have a terminal yet.
 fn renderPlaceholderTab(window_width: f32, window_height: f32, top_pad: f32) void {
     gl.UseProgram.?(shader_program);
@@ -3248,41 +2150,41 @@ fn renderPlaceholderTab(window_width: f32, window_height: f32, top_pad: f32) voi
     // Measure and draw main message
     var msg_width: f32 = 0;
     for (msg) |ch| {
-        if (getGlyphInfo(@intCast(ch))) |g| {
+        if (font.getGlyphInfo(@intCast(ch))) |g| {
             msg_width += @as(f32, @floatFromInt(g.advance >> 6));
         } else {
-            msg_width += cell_width;
+            msg_width += font.cell_width;
         }
     }
     var x = (window_width - msg_width) / 2;
-    var y = center_y + cell_height / 2;
+    var y = center_y + font.cell_height / 2;
     for (msg) |ch| {
         renderChar(@intCast(ch), x, y, text_color);
-        if (getGlyphInfo(@intCast(ch))) |g| {
+        if (font.getGlyphInfo(@intCast(ch))) |g| {
             x += @as(f32, @floatFromInt(g.advance >> 6));
         } else {
-            x += cell_width;
+            x += font.cell_width;
         }
     }
 
     // Measure and draw hint below
     var hint_width: f32 = 0;
     for (hint) |ch| {
-        if (getGlyphInfo(@intCast(ch))) |g| {
+        if (font.getGlyphInfo(@intCast(ch))) |g| {
             hint_width += @as(f32, @floatFromInt(g.advance >> 6));
         } else {
-            hint_width += cell_width;
+            hint_width += font.cell_width;
         }
     }
     x = (window_width - hint_width) / 2;
-    y = center_y - cell_height;
+    y = center_y - font.cell_height;
     const hint_color = [3]f32{ 0.3, 0.3, 0.3 };
     for (hint) |ch| {
         renderChar(@intCast(ch), x, y, hint_color);
-        if (getGlyphInfo(@intCast(ch))) |g| {
+        if (font.getGlyphInfo(@intCast(ch))) |g| {
             x += @as(f32, @floatFromInt(g.advance >> 6));
         } else {
-            x += cell_width;
+            x += font.cell_width;
         }
     }
 }
@@ -3320,7 +2222,7 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
             var bg_color: ?[3]f32 = null;
 
             switch (cell.content_tag) {
-                .bg_color_palette => bg_color = indexToRgb(cell.content.color_palette),
+                .bg_color_palette => bg_color = font.indexToRgb(cell.content.color_palette),
                 .bg_color_rgb => {
                     const rgb = cell.content.color_rgb;
                     bg_color = .{
@@ -3336,7 +2238,7 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
                 const style = p.styles.get(p.memory, cell.style_id);
                 switch (style.fg_color) {
                     .none => {},
-                    .palette => |idx| fg_color = indexToRgb(idx),
+                    .palette => |idx| fg_color = font.indexToRgb(idx),
                     .rgb => |rgb| fg_color = .{
                         @as(f32, @floatFromInt(rgb.r)) / 255.0,
                         @as(f32, @floatFromInt(rgb.g)) / 255.0,
@@ -3345,7 +2247,7 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
                 }
                 switch (style.bg_color) {
                     .none => {},
-                    .palette => |idx| bg_color = indexToRgb(idx),
+                    .palette => |idx| bg_color = font.indexToRgb(idx),
                     .rgb => |rgb| bg_color = .{
                         @as(f32, @floatFromInt(rgb.r)) / 255.0,
                         @as(f32, @floatFromInt(rgb.g)) / 255.0,
@@ -3387,8 +2289,8 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
 fn rebuildCells(rend: *Renderer) void {
     const render_rows = rend.snap_rows;
     const render_cols = rend.snap_cols;
-    const atlas_size = if (g_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
-    const color_atlas_size = if (g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+    const atlas_size = if (font.g_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
+    const color_atlas_size = if (font.g_color_atlas) |a| @as(f32, @floatFromInt(a.size)) else 512.0;
 
     rend.bg_cell_count = 0;
     rend.fg_cell_count = 0;
@@ -3455,8 +2357,8 @@ fn rebuildCells(rend: *Renderer) void {
                 // Use HarfBuzz shaping for grapheme clusters (multi-codepoint emoji),
                 // fall back to single-codepoint lookup for regular characters.
                 const maybe_ch: ?Character = if (sc.grapheme_len > 0)
-                    loadGraphemeGlyph(char, sc.grapheme[0..sc.grapheme_len])
-                else if (isRegionalIndicator(char)) ri: {
+                    font.loadGraphemeGlyph(char, sc.grapheme[0..sc.grapheme_len])
+                else if (font.isRegionalIndicator(char)) ri: {
                     // Regional indicator without grapheme data — check if a following cell
                     // is also an RI and compose them into a flag pair for shaping.
                     // This handles the case where grapheme_cluster mode isn't active.
@@ -3466,9 +2368,9 @@ fn rebuildCells(rend: *Renderer) void {
                         const next_snap_idx = row_base + col_idx + off;
                         if (next_snap_idx < Renderer.MAX_CELLS and col_idx + off < render_cols) {
                             const next_sc = rend.snap[next_snap_idx];
-                            if (isRegionalIndicator(next_sc.codepoint)) {
+                            if (font.isRegionalIndicator(next_sc.codepoint)) {
                                 const extras = [1]u21{next_sc.codepoint};
-                                const result = loadGraphemeGlyph(char, &extras);
+                                const result = font.loadGraphemeGlyph(char, &extras);
                                 if (result != null) {
                                     composed_ri_pair = true;
                                     skip_next_ri = true;
@@ -3477,8 +2379,8 @@ fn rebuildCells(rend: *Renderer) void {
                             }
                         }
                     }
-                    break :ri loadGlyph(char);
-                } else loadGlyph(char);
+                    break :ri font.loadGlyph(char);
+                } else font.loadGlyph(char);
                 if (maybe_ch) |ch| {
                     if (ch.region.width > 0 and ch.region.height > 0) {
                         // Wide characters (emoji) span 2 cells; narrow = 1 cell.
@@ -3489,14 +2391,14 @@ fn rebuildCells(rend: *Renderer) void {
                             // Scale the emoji bitmap to fit within grid_width cells, preserving aspect ratio.
                             const emoji_w = @as(f32, @floatFromInt(ch.size_x));
                             const emoji_h = @as(f32, @floatFromInt(ch.size_y));
-                            const target_w = cell_width * grid_width;
-                            const scale = @min(target_w / emoji_w, cell_height / emoji_h);
+                            const target_w = font.cell_width * grid_width;
+                            const scale = @min(target_w / emoji_w, font.cell_height / emoji_h);
                             const gw = emoji_w * scale;
                             const gh = emoji_h * scale;
                             // Center within the grid_width cells
                             const gx = (target_w - gw) / 2.0;
-                            const gy = (cell_height - gh) / 2.0;
-                            const uv = glyphUV(ch.region, color_atlas_size);
+                            const gy = (font.cell_height - gh) / 2.0;
+                            const uv = font.glyphUV(ch.region, color_atlas_size);
                             if (rend.color_fg_cell_count < Renderer.MAX_CELLS) {
                                 rend.color_fg_cells[rend.color_fg_cell_count] = .{
                                     .grid_col = col_f,
@@ -3517,9 +2419,9 @@ fn rebuildCells(rend: *Renderer) void {
                             }
                         } else {
                             // Grayscale text glyph
-                            const uv = glyphUV(ch.region, atlas_size);
+                            const uv = font.glyphUV(ch.region, atlas_size);
                             const gx = @as(f32, @floatFromInt(ch.bearing_x));
-                            const gy = cell_baseline - @as(f32, @floatFromInt(@as(i32, @intCast(ch.size_y)) - ch.bearing_y));
+                            const gy = font.cell_baseline - @as(f32, @floatFromInt(@as(i32, @intCast(ch.size_y)) - ch.bearing_y));
                             const gw = @as(f32, @floatFromInt(ch.size_x));
                             const gh = @as(f32, @floatFromInt(ch.size_y));
                             if (rend.fg_cell_count < Renderer.MAX_CELLS) {
@@ -3704,7 +2606,7 @@ fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offset_y:
     // --- Draw BG cells ---
     if (rend.bg_cell_count > 0 and bg_shader != 0) {
         gl.UseProgram.?(bg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(bg_shader, "cellSize"), cell_width, cell_height);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(bg_shader, "cellSize"), font.cell_width, font.cell_height);
         gl.Uniform2f.?(gl.GetUniformLocation.?(bg_shader, "gridOffset"), offset_x, offset_y);
         gl.Uniform1f.?(gl.GetUniformLocation.?(bg_shader, "windowHeight"), window_height);
         setProjectionForProgram(bg_shader, window_height);
@@ -3718,13 +2620,13 @@ fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offset_y:
     // --- Draw FG cells ---
     if (rend.fg_cell_count > 0 and fg_shader != 0) {
         gl.UseProgram.?(fg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(fg_shader, "cellSize"), cell_width, cell_height);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(fg_shader, "cellSize"), font.cell_width, font.cell_height);
         gl.Uniform2f.?(gl.GetUniformLocation.?(fg_shader, "gridOffset"), offset_x, offset_y);
         gl.Uniform1f.?(gl.GetUniformLocation.?(fg_shader, "windowHeight"), window_height);
         setProjectionForProgram(fg_shader, window_height);
 
         gl.ActiveTexture.?(c.GL_TEXTURE0);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, g_atlas_texture);
+        gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_atlas_texture);
         gl.Uniform1i.?(gl.GetUniformLocation.?(fg_shader, "atlas"), 0);
 
         gl.BindVertexArray.?(fg_vao);
@@ -3740,13 +2642,13 @@ fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offset_y:
         gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
 
         gl.UseProgram.?(color_fg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(color_fg_shader, "cellSize"), cell_width, cell_height);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(color_fg_shader, "cellSize"), font.cell_width, font.cell_height);
         gl.Uniform2f.?(gl.GetUniformLocation.?(color_fg_shader, "gridOffset"), offset_x, offset_y);
         gl.Uniform1f.?(gl.GetUniformLocation.?(color_fg_shader, "windowHeight"), window_height);
         setProjectionForProgram(color_fg_shader, window_height);
 
         gl.ActiveTexture.?(c.GL_TEXTURE0);
-        gl.BindTexture.?(c.GL_TEXTURE_2D, g_color_atlas_texture);
+        gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
         gl.Uniform1i.?(gl.GetUniformLocation.?(color_fg_shader, "atlas"), 0);
 
         gl.BindVertexArray.?(color_fg_vao);
@@ -3763,8 +2665,8 @@ fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offset_y:
         // Use the pre-computed effective cursor style which already factors in
         // window focus, tab rename, split focus, and blink state.
         if (rend.cached_cursor_effective) |style| {
-            const px = offset_x + @as(f32, @floatFromInt(rend.cached_cursor_x)) * cell_width;
-            const py = window_height - offset_y - ((@as(f32, @floatFromInt(rend.cached_cursor_y)) + 1) * cell_height);
+            const px = offset_x + @as(f32, @floatFromInt(rend.cached_cursor_x)) * font.cell_width;
+            const py = window_height - offset_y - ((@as(f32, @floatFromInt(rend.cached_cursor_y)) + 1) * font.cell_height);
 
             gl.UseProgram.?(shader_program);
             gl.BindVertexArray.?(vao);
@@ -3773,19 +2675,19 @@ fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offset_y:
             const cursor_thickness: f32 = 1.0;
 
             switch (style) {
-                .bar => renderQuad(px, py, cursor_thickness, cell_height, cursor_color),
-                .underline => renderQuad(px, py, cell_width, cursor_thickness, cursor_color),
+                .bar => renderQuad(px, py, cursor_thickness, font.cell_height, cursor_color),
+                .underline => renderQuad(px, py, font.cell_width, cursor_thickness, cursor_color),
                 .block_hollow => {
-                    renderQuad(px, py, cell_width, cell_height, cursor_color);
+                    renderQuad(px, py, font.cell_width, font.cell_height, cursor_color);
                     renderQuad(
                         px + cursor_thickness,
                         py + cursor_thickness,
-                        cell_width - cursor_thickness * 2,
-                        cell_height - cursor_thickness * 2,
+                        font.cell_width - cursor_thickness * 2,
+                        font.cell_height - cursor_thickness * 2,
                         g_theme.background,
                     );
                 },
-                .block => renderQuad(px, py, cell_width, cell_height, cursor_color),
+                .block => renderQuad(px, py, font.cell_width, font.cell_height, cursor_color),
             }
         }
     }
@@ -4635,7 +3537,7 @@ fn renderResizeOverlayText(cols: u16, rows: u16, window_width: f32, window_heigh
     for (text) |ch| {
         text_width += titlebarGlyphAdvance(@intCast(ch));
     }
-    const text_height = g_titlebar_cell_height;
+    const text_height = font.g_titlebar_cell_height;
 
     // Padding around text (compact)
     const pad_x: f32 = 10;
@@ -4730,7 +3632,7 @@ fn renderDebugOverlay(window_width: f32) void {
     const margin: f32 = 8;
     const pad_h: f32 = 4;
     const pad_v: f32 = 2;
-    const line_h = g_titlebar_cell_height + pad_v * 2;
+    const line_h = font.g_titlebar_cell_height + pad_v * 2;
     var overlay_y: f32 = margin;
 
     if (g_debug_fps) {
@@ -4806,103 +3708,6 @@ fn updateCursorBlinkForRenderer(rend: *Renderer) void {
     }
 }
 
-/// Clear all GL textures from the glyph cache and reset it.
-fn clearGlyphCache(allocator: std.mem.Allocator) void {
-    glyph_cache.deinit(allocator);
-    glyph_cache = .empty;
-    grapheme_cache.deinit(allocator);
-    grapheme_cache = .empty;
-
-    // Reset grayscale atlas — destroy GPU texture and CPU data, recreate fresh
-    if (g_atlas) |*a| {
-        a.deinit(allocator);
-        g_atlas = null;
-    }
-    if (g_atlas_texture != 0) {
-        gl.DeleteTextures.?(1, &g_atlas_texture);
-        g_atlas_texture = 0;
-        g_atlas_modified = 0;
-    }
-
-    // Reset color atlas (BGRA emoji)
-    if (g_color_atlas) |*a| {
-        a.deinit(allocator);
-        g_color_atlas = null;
-    }
-    if (g_color_atlas_texture != 0) {
-        gl.DeleteTextures.?(1, &g_color_atlas_texture);
-        g_color_atlas_texture = 0;
-        g_color_atlas_modified = 0;
-    }
-}
-
-/// Clear fallback font faces.
-fn clearFallbackFaces(allocator: std.mem.Allocator) void {
-    var it = g_fallback_faces.iterator();
-    while (it.next()) |entry| {
-        entry.value_ptr.deinit();
-    }
-    g_fallback_faces.deinit(allocator);
-    g_fallback_faces = .empty;
-
-    // Also clear negative cache
-    g_no_fallback.deinit(allocator);
-    g_no_fallback = .empty;
-
-    // Clean up HarfBuzz fallback fonts
-    var hb_it = g_hb_fallback_fonts.iterator();
-    while (hb_it.next()) |entry| {
-        entry.value_ptr.destroy();
-    }
-    g_hb_fallback_fonts.deinit(allocator);
-    g_hb_fallback_fonts = .empty;
-
-    if (g_hb_font) |*hf| {
-        hf.destroy();
-        g_hb_font = null;
-    }
-    if (g_hb_buf) |*hb| {
-        hb.destroy();
-        g_hb_buf = null;
-    }
-}
-
-/// Try to load a font face from config, returning the face or null on failure.
-fn loadFontFromConfig(
-    allocator: std.mem.Allocator,
-    font_family: []const u8,
-    weight: directwrite.DWRITE_FONT_WEIGHT,
-    font_size: u32,
-    ft_lib: freetype.Library,
-) ?freetype.Face {
-    // Try system font via DirectWrite
-    if (font_family.len > 0) {
-        if (g_font_discovery) |dw| {
-            if (dw.findFontFilePath(allocator, font_family, weight, .NORMAL) catch null) |result| {
-                var r = result;
-                defer r.deinit();
-                if (ft_lib.initFace(r.path, @intCast(r.face_index))) |face| {
-                    face.setCharSize(0, @as(i32, @intCast(font_size)) * 64, 96, 96) catch {
-                        face.deinit();
-                        return null;
-                    };
-                    std.debug.print("Reload: loaded system font '{s}'\n", .{font_family});
-                    return face;
-                } else |_| {}
-            }
-        }
-        std.debug.print("Reload: font '{s}' not found, using embedded fallback\n", .{font_family});
-    }
-
-    // Fall back to embedded font
-    const face = ft_lib.initMemoryFace(embedded.regular, 0) catch return null;
-    face.setCharSize(0, @as(i32, @intCast(font_size)) * 64, 96, 96) catch {
-        face.deinit();
-        return null;
-    };
-    return face;
-}
-
 /// Resize the window to fit the current terminal grid and cell dimensions.
 /// Called from WM_SIZE inside the Win32 modal resize loop.
 /// Performs a full render cycle: resize terminal → snapshot → rebuild → draw.
@@ -4930,8 +3735,8 @@ fn onWin32Resize(width: i32, height: i32) void {
     const avail_h = @as(f32, @floatFromInt(height)) - (render_padding * 2 + tb) - padding_top - padding_bottom;
     if (avail_w <= 0 or avail_h <= 0) return;
 
-    const new_cols: u16 = @intFromFloat(@max(1, avail_w / cell_width));
-    const new_rows: u16 = @intFromFloat(@max(1, avail_h / cell_height));
+    const new_cols: u16 = @intFromFloat(@max(1, avail_w / font.cell_width));
+    const new_rows: u16 = @intFromFloat(@max(1, avail_h / font.cell_height));
 
     // Resize terminal + PTY if grid dimensions changed
     if (new_cols != term_cols or new_rows != term_rows) {
@@ -4970,10 +3775,10 @@ fn onWin32Resize(width: i32, height: i32) void {
         if (needs_rebuild) rebuildCells(rend);
 
         // Sync atlas if needed
-        if (g_atlas != null) syncAtlasTexture(&g_atlas, &g_atlas_texture, &g_atlas_modified);
-        if (g_color_atlas != null) syncAtlasTexture(&g_color_atlas, &g_color_atlas_texture, &g_color_atlas_modified);
-        if (g_icon_atlas != null) syncAtlasTexture(&g_icon_atlas, &g_icon_atlas_texture, &g_icon_atlas_modified);
-        if (g_titlebar_atlas != null) syncAtlasTexture(&g_titlebar_atlas, &g_titlebar_atlas_texture, &g_titlebar_atlas_modified);
+        if (font.g_atlas != null) font.syncAtlasTexture(&font.g_atlas, &font.g_atlas_texture, &font.g_atlas_modified);
+        if (font.g_color_atlas != null) font.syncAtlasTexture(&font.g_color_atlas, &font.g_color_atlas_texture, &font.g_color_atlas_modified);
+        if (font.g_icon_atlas != null) font.syncAtlasTexture(&font.g_icon_atlas, &font.g_icon_atlas_texture, &font.g_icon_atlas_modified);
+        if (font.g_titlebar_atlas != null) font.syncAtlasTexture(&font.g_titlebar_atlas, &font.g_titlebar_atlas_texture, &font.g_titlebar_atlas_modified);
 
         gl.Viewport.?(0, 0, width, height);
         setProjection(@floatFromInt(width), @floatFromInt(height));
@@ -4998,8 +3803,8 @@ fn onWin32Resize(width: i32, height: i32) void {
 fn resizeWindowToGrid() void {
     const padding: f32 = 10;
     const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const content_w: f32 = cell_width * @as(f32, @floatFromInt(term_cols));
-    const content_h: f32 = cell_height * @as(f32, @floatFromInt(term_rows));
+    const content_w: f32 = font.cell_width * @as(f32, @floatFromInt(term_cols));
+    const content_h: f32 = font.cell_height * @as(f32, @floatFromInt(term_rows));
     const win_w: i32 = @intFromFloat(content_w + padding * 2);
     const win_h: i32 = @intFromFloat(content_h + padding + (padding + tb));
     if (g_window) |w| w.setSize(win_w, win_h);
@@ -5023,7 +3828,7 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     }
 
     if (g_window == null) return;
-    const ft_lib = g_ft_lib orelse return;
+    const ft_lib = font.g_ft_lib orelse return;
 
     // --- Theme, cursor, debug ---
     g_theme = cfg.resolved_theme;
@@ -5062,38 +3867,38 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     const new_family = cfg.@"font-family";
 
     // Reload font: clear caches, load new face, recalculate metrics
-    if (loadFontFromConfig(allocator, new_family, new_weight, new_font_size, ft_lib)) |new_face| {
+    if (font.loadFontFromConfig(allocator, new_family, new_weight, new_font_size, ft_lib)) |new_face| {
         // Clean up old font state
-        if (glyph_face) |old| old.deinit();
-        clearGlyphCache(allocator);
-        clearFallbackFaces(allocator);
-        g_bell_cache = null;
-        if (g_bell_emoji_face) |f| f.deinit();
-        g_bell_emoji_face = null;
+        if (font.glyph_face) |old| old.deinit();
+        font.clearGlyphCache(allocator);
+        font.clearFallbackFaces(allocator);
+        font.g_bell_cache = null;
+        if (font.g_bell_emoji_face) |f| f.deinit();
+        font.g_bell_emoji_face = null;
 
-        g_font_size = new_font_size;
-        preloadCharacters(new_face);
+        font.g_font_size = new_font_size;
+        font.preloadCharacters(new_face);
         // glyph_face is set inside preloadCharacters
 
         // Rebuild titlebar font at 14pt with the new family
-        if (g_titlebar_face) |old_tb| old_tb.deinit();
-        g_titlebar_face = null;
-        g_titlebar_cache.deinit(allocator);
-        g_titlebar_cache = .empty;
-        if (g_titlebar_atlas) |*a| {
+        if (font.g_titlebar_face) |old_tb| old_tb.deinit();
+        font.g_titlebar_face = null;
+        font.g_titlebar_cache.deinit(allocator);
+        font.g_titlebar_cache = .empty;
+        if (font.g_titlebar_atlas) |*a| {
             a.deinit(allocator);
-            g_titlebar_atlas = null;
+            font.g_titlebar_atlas = null;
         }
-        if (g_titlebar_atlas_texture != 0) {
-            gl.DeleteTextures.?(1, &g_titlebar_atlas_texture);
-            g_titlebar_atlas_texture = 0;
-            g_titlebar_atlas_modified = 0;
+        if (font.g_titlebar_atlas_texture != 0) {
+            gl.DeleteTextures.?(1, &font.g_titlebar_atlas_texture);
+            font.g_titlebar_atlas_texture = 0;
+            font.g_titlebar_atlas_modified = 0;
         }
-        if (loadFontFromConfig(allocator, new_family, new_weight, 10, ft_lib)) |tb_face| {
-            g_titlebar_face = tb_face;
+        if (font.loadFontFromConfig(allocator, new_family, new_weight, 10, ft_lib)) |tb_face| {
+            font.g_titlebar_face = tb_face;
             const sm = tb_face.handle.*.size.*.metrics;
-            g_titlebar_cell_height = @round(@as(f32, @floatFromInt(sm.height)) / 64.0);
-            g_titlebar_baseline = @round(-@as(f32, @floatFromInt(sm.descender)) / 64.0);
+            font.g_titlebar_cell_height = @round(@as(f32, @floatFromInt(sm.height)) / 64.0);
+            font.g_titlebar_baseline = @round(-@as(f32, @floatFromInt(sm.descender)) / 64.0);
         }
 
         // --- Window size ---
@@ -5159,8 +3964,8 @@ fn viewportOffset() usize {
 fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
     const padding_d: f64 = 10;
     const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const col_f = (xpos - padding_d) / @as(f64, cell_width);
-    const row_f = (ypos - padding_d - tb_d) / @as(f64, cell_height);
+    const col_f = (xpos - padding_d) / @as(f64, font.cell_width);
+    const row_f = (ypos - padding_d - tb_d) / @as(f64, font.cell_height);
 
     const col = if (col_f < 0) 0 else if (col_f >= @as(f64, @floatFromInt(term_cols))) term_cols - 1 else @as(usize, @intFromFloat(col_f));
     const row = if (row_f < 0) 0 else if (row_f >= @as(f64, @floatFromInt(term_rows))) term_rows - 1 else @as(usize, @intFromFloat(row_f));
@@ -5277,8 +4082,8 @@ const win32_input = struct {
         const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
         const avail_height = @as(f32, @floatFromInt(height)) - total_height_padding;
 
-        const new_cols: u16 = @intFromFloat(@max(1, avail_width / cell_width));
-        const new_rows: u16 = @intFromFloat(@max(1, avail_height / cell_height));
+        const new_cols: u16 = @intFromFloat(@max(1, avail_width / font.cell_width));
+        const new_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
 
         if (new_cols != term_cols or new_rows != term_rows) {
             g_pending_resize = true;
@@ -5939,10 +4744,10 @@ const win32_input = struct {
         activeSelection().end_col = cell_pos.col;
         activeSelection().end_row = abs_row;
 
-        const threshold = cell_width * 0.6;
+        const threshold = font.cell_width * 0.6;
         const padding_d: f64 = 10;
-        const click_cell_x = g_click_x - padding_d - @as(f64, @floatFromInt(activeSelection().start_col)) * @as(f64, cell_width);
-        const drag_cell_x = xpos - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, cell_width);
+        const click_cell_x = g_click_x - padding_d - @as(f64, @floatFromInt(activeSelection().start_col)) * @as(f64, font.cell_width);
+        const drag_cell_x = xpos - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, font.cell_width);
 
         const same_cell = (activeSelection().start_col == cell_pos.col and activeSelection().start_row == abs_row);
         if (same_cell) {
@@ -6154,7 +4959,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     // Use stored config values from init()
     const requested_font = g_requested_font;
     const requested_weight = g_requested_weight;
-    const font_size = g_font_size;
+    const font_size = font.g_font_size;
     const shader_path = g_shader_path;
 
     // NOTE: Initial tab is spawned AFTER window sizing (see below),
@@ -6223,8 +5028,8 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     defer ft_lib.deinit();
 
     // Store globally for fallback font loading
-    g_ft_lib = ft_lib;
-    defer g_ft_lib = null;
+    font.g_ft_lib = ft_lib;
+    defer font.g_ft_lib = null;
 
     std.debug.print("Requested font: {s} (weight: {})\n", .{ requested_font, @intFromEnum(requested_weight) });
     std.debug.print("Cursor style: {s}, blink: {}\n", .{ @tagName(g_cursor_style), g_cursor_blink });
@@ -6237,10 +5042,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     defer if (dw_discovery) |*dw| dw.deinit();
 
     // Store globally for fallback font lookups
-    g_font_discovery = if (dw_discovery) |*dw| dw else null;
-    defer g_font_discovery = null;
+    font.g_font_discovery = if (dw_discovery) |*dw| dw else null;
+    defer font.g_font_discovery = null;
 
-    // Fallback faces are cleaned up in the main defer block (with glyph_face)
+    // Fallback faces are cleaned up in the main defer block (with font.glyph_face)
 
     // Try to find the requested font via DirectWrite
     var font_result: ?directwrite.FontDiscovery.FontResult = null;
@@ -6287,7 +5092,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     };
 
     // Store font size globally for fallback fonts
-    g_font_size = font_size;
+    font.g_font_size = font_size;
 
     if (!initShaders()) {
         std.debug.print("Failed to initialize shaders\n", .{});
@@ -6295,14 +5100,14 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     }
     initBuffers();
     initInstancedBuffers();
-    preloadCharacters(face);
+    font.preloadCharacters(face);
 
     // Initialize titlebar font — same family at fixed 14pt for crisp tab titles
     {
         const titlebar_pt: u32 = 10;
-        const tb_face = loadFontFromConfig(allocator, requested_font, requested_weight, titlebar_pt, ft_lib);
+        const tb_face = font.loadFontFromConfig(allocator, requested_font, requested_weight, titlebar_pt, ft_lib);
         if (tb_face) |tf| {
-            g_titlebar_face = tf;
+            font.g_titlebar_face = tf;
 
             // Calculate titlebar cell metrics from the 14pt face
             const sm = tf.handle.*.size.*.metrics;
@@ -6310,20 +5115,20 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             const tb_ascent = @as(f32, @floatFromInt(sm.ascender)) / 64.0;
             const tb_descent = @as(f32, @floatFromInt(sm.descender)) / 64.0;
             const tb_height = @as(f32, @floatFromInt(sm.height)) / 64.0;
-            g_titlebar_cell_height = @round(tb_height);
-            g_titlebar_baseline = @round(-tb_descent);
+            font.g_titlebar_cell_height = @round(tb_height);
+            font.g_titlebar_baseline = @round(-tb_descent);
             // Measure max advance across ASCII
             var max_adv: f32 = 0;
             for (32..127) |cp| {
-                if (loadTitlebarGlyph(@intCast(cp))) |g| {
+                if (font.loadTitlebarGlyph(@intCast(cp))) |g| {
                     const adv = @as(f32, @floatFromInt(g.advance >> 6));
                     max_adv = @max(max_adv, adv);
                 }
             }
-            if (max_adv > 0) g_titlebar_cell_width = max_adv;
+            if (max_adv > 0) font.g_titlebar_cell_width = max_adv;
 
             std.debug.print("Titlebar font: {d:.0}x{d:.0} (ascent={d:.1}, descent={d:.1}, baseline={d:.0})\n", .{
-                g_titlebar_cell_width, g_titlebar_cell_height, tb_ascent, tb_descent, g_titlebar_baseline,
+                font.g_titlebar_cell_width, font.g_titlebar_cell_height, tb_ascent, tb_descent, font.g_titlebar_baseline,
             });
         } else {
             std.debug.print("Titlebar font init failed, will fall back to scaled terminal font\n", .{});
@@ -6337,7 +5142,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         // 10px at 96 DPI = 10pt at 72 DPI. Scale for actual DPI.
         const icon_size_26_6: i32 = @intCast(10 * 64 * dpi / 96);
         iface.setCharSize(0, icon_size_26_6, 72, 72) catch {};
-        icon_face = iface;
+        font.icon_face = iface;
         std.debug.print("Loaded Segoe MDL2 Assets for caption icons (dpi={})\n", .{dpi});
     } else |_| {
         std.debug.print("Segoe MDL2 Assets not found, using quad-based caption icons\n", .{});
@@ -6345,39 +5150,39 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
     defer {
         // Clean up icon font
-        if (icon_face) |f| {
+        if (font.icon_face) |f| {
             f.deinit();
-            icon_face = null;
+            font.icon_face = null;
         }
 
         // Clean up the current font face (may have been replaced by hot-reload)
-        if (glyph_face) |f| f.deinit();
-        glyph_face = null;
+        if (font.glyph_face) |f| f.deinit();
+        font.glyph_face = null;
         // Clean up glyph cache and atlas
-        clearGlyphCache(allocator);
-        clearFallbackFaces(allocator);
+        font.clearGlyphCache(allocator);
+        font.clearFallbackFaces(allocator);
         // Clean up icon cache and icon atlas
-        icon_cache.deinit(allocator);
-        if (g_icon_atlas) |*a| {
+        font.icon_cache.deinit(allocator);
+        if (font.g_icon_atlas) |*a| {
             a.deinit(allocator);
-            g_icon_atlas = null;
+            font.g_icon_atlas = null;
         }
-        if (g_icon_atlas_texture != 0) {
-            gl.DeleteTextures.?(1, &g_icon_atlas_texture);
-            g_icon_atlas_texture = 0;
+        if (font.g_icon_atlas_texture != 0) {
+            gl.DeleteTextures.?(1, &font.g_icon_atlas_texture);
+            font.g_icon_atlas_texture = 0;
         }
 
         // Clean up titlebar font
-        if (g_titlebar_face) |f| f.deinit();
-        g_titlebar_face = null;
-        g_titlebar_cache.deinit(allocator);
-        if (g_titlebar_atlas) |*a| {
+        if (font.g_titlebar_face) |f| f.deinit();
+        font.g_titlebar_face = null;
+        font.g_titlebar_cache.deinit(allocator);
+        if (font.g_titlebar_atlas) |*a| {
             a.deinit(allocator);
-            g_titlebar_atlas = null;
+            font.g_titlebar_atlas = null;
         }
-        if (g_titlebar_atlas_texture != 0) {
-            gl.DeleteTextures.?(1, &g_titlebar_atlas_texture);
-            g_titlebar_atlas_texture = 0;
+        if (font.g_titlebar_atlas_texture != 0) {
+            gl.DeleteTextures.?(1, &font.g_titlebar_atlas_texture);
+            font.g_titlebar_atlas_texture = 0;
         }
     }
     initSolidTexture();
@@ -6461,8 +5266,8 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     // term_cols/term_rows were set from config at init.
     if (term_cols > 0 and term_rows > 0) {
         // Calculate window size needed for desired grid
-        const desired_grid_width = cell_width * @as(f32, @floatFromInt(term_cols));
-        const desired_grid_height = cell_height * @as(f32, @floatFromInt(term_rows));
+        const desired_grid_width = font.cell_width * @as(f32, @floatFromInt(term_cols));
+        const desired_grid_height = font.cell_height * @as(f32, @floatFromInt(term_rows));
         
         // Work backwards: fb_width = grid_width + total_width_padding
         //                 fb_height = grid_height + total_height_padding
@@ -6481,8 +5286,8 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     const avail_width = actual_width - total_width_padding;
     const avail_height = actual_height - total_height_padding;
     
-    const computed_cols: u16 = @intFromFloat(@max(1, avail_width / cell_width));
-    const computed_rows: u16 = @intFromFloat(@max(1, avail_height / cell_height));
+    const computed_cols: u16 = @intFromFloat(@max(1, avail_width / font.cell_width));
+    const computed_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
     
     // Update term_cols/term_rows to match what the window can actually display
     term_cols = computed_cols;
@@ -6511,7 +5316,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     // our main loop, so we must render from inside WM_SIZE).
     win32_window.on_resize = &onWin32Resize;
 
-    std.debug.print("Ready! Cell size: {d:.1}x{d:.1}\n", .{ cell_width, cell_height });
+    std.debug.print("Ready! Cell size: {d:.1}x{d:.1}\n", .{ font.cell_width, font.cell_height });
 
     // Ensure config directory + file exist so the watcher can observe from startup
     Config.ensureConfigExists(allocator);
@@ -6609,10 +5414,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         updateFps();
 
         // Sync atlas textures to GPU if modified
-        if (g_atlas != null) syncAtlasTexture(&g_atlas, &g_atlas_texture, &g_atlas_modified);
-        if (g_color_atlas != null) syncAtlasTexture(&g_color_atlas, &g_color_atlas_texture, &g_color_atlas_modified);
-        if (g_icon_atlas != null) syncAtlasTexture(&g_icon_atlas, &g_icon_atlas_texture, &g_icon_atlas_modified);
-        if (g_titlebar_atlas != null) syncAtlasTexture(&g_titlebar_atlas, &g_titlebar_atlas_texture, &g_titlebar_atlas_modified);
+        if (font.g_atlas != null) font.syncAtlasTexture(&font.g_atlas, &font.g_atlas_texture, &font.g_atlas_modified);
+        if (font.g_color_atlas != null) font.syncAtlasTexture(&font.g_color_atlas, &font.g_color_atlas_texture, &font.g_color_atlas_modified);
+        if (font.g_icon_atlas != null) font.syncAtlasTexture(&font.g_icon_atlas, &font.g_icon_atlas_texture, &font.g_icon_atlas_modified);
+        if (font.g_titlebar_atlas != null) font.syncAtlasTexture(&font.g_titlebar_atlas, &font.g_titlebar_atlas_texture, &font.g_titlebar_atlas_modified);
 
         // Check all tabs for pending bell notifications (set by IO thread)
         for (0..tab.g_tab_count) |ti| {
@@ -6638,7 +5443,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             const content_y: i32 = @intFromFloat(top_padding);
             const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - padding * 2);
             const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_height)) - top_padding - padding);
-            const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, cell_width, cell_height);
+            const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
 
             // Debug: print split count on first few frames
             // GL rendering
