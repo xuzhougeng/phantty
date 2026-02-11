@@ -20,6 +20,7 @@ pub const tab = @import("appwindow/tab.zig");
 pub const font = @import("appwindow/font.zig");
 pub const cell_renderer = @import("appwindow/cell_renderer.zig");
 pub const titlebar = @import("appwindow/titlebar.zig");
+pub const input = @import("appwindow/input.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -122,7 +123,7 @@ pub fn deinit(self: *AppWindow) void {
 // ============================================================================
 
 // App pointer for requestNewWindow
-threadlocal var g_app: ?*App = null;
+pub threadlocal var g_app: ?*App = null;
 
 // Initial CWD for this window (used when spawning the first tab)
 threadlocal var g_initial_cwd_buf: [260]u16 = undefined;
@@ -143,7 +144,7 @@ pub threadlocal var g_theme: Theme = Theme.default();
 ///   /mnt/c/Users/... -> C:\Users\...
 ///   /home/user/...   -> \\wsl.localhost\<distro>\home\user\...
 /// Returns the length of the converted path, or null if conversion failed.
-fn unixPathToWindows(unix_path: []const u8, out: *[260]u16) ?usize {
+pub fn unixPathToWindows(unix_path: []const u8, out: *[260]u16) ?usize {
     // Handle WSL /mnt/X/... paths (Windows drives mounted in WSL)
     if (unix_path.len >= 7 and std.mem.startsWith(u8, unix_path, "/mnt/")) {
         const drive_letter = unix_path[5];
@@ -281,16 +282,16 @@ pub threadlocal var g_allocator: ?std.mem.Allocator = null;
 // Selection is defined in Surface.zig
 const Selection = Surface.Selection;
 
-threadlocal var g_should_close: bool = false; // Set by Ctrl+W with 1 tab
+pub threadlocal var g_should_close: bool = false; // Set by Ctrl+W with 1 tab
 pub threadlocal var g_selecting: bool = false; // True while mouse button is held
-threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
-threadlocal var g_click_y: f64 = 0; // Y position of initial click
+pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
+pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
 
 // ============================================================================
 // Scrollbar — macOS-style overlay scrollbar with fade
 // ============================================================================
 
-const SCROLLBAR_WIDTH: f32 = 12; // Width of the scrollbar track
+pub const SCROLLBAR_WIDTH: f32 = 12; // Width of the scrollbar track
 const SCROLLBAR_MARGIN: f32 = 2; // Margin from right edge
 const SCROLLBAR_MIN_THUMB: f32 = 20; // Minimum thumb height in pixels
 const SCROLLBAR_FADE_DELAY_MS: i64 = 800; // ms to wait before fading
@@ -299,9 +300,9 @@ const SCROLLBAR_HOVER_WIDTH: f32 = 12; // Wider hit area for hover/drag
 
 // Per-surface scrollbar opacity/timing lives in Surface.zig.
 // These are global interaction state (only one mouse):
-threadlocal var g_scrollbar_hover: bool = false; // Mouse is over scrollbar area
-threadlocal var g_scrollbar_dragging: bool = false; // Currently dragging the thumb
-threadlocal var g_scrollbar_drag_offset: f32 = 0; // Offset within thumb where drag started
+pub threadlocal var g_scrollbar_hover: bool = false; // Mouse is over scrollbar area
+pub threadlocal var g_scrollbar_dragging: bool = false; // Currently dragging the thumb
+pub threadlocal var g_scrollbar_drag_offset: f32 = 0; // Offset within thumb where drag started
 
 // ============================================================================
 // Split divider dragging — resize splits by dragging the divider
@@ -309,10 +310,10 @@ threadlocal var g_scrollbar_drag_offset: f32 = 0; // Offset within thumb where d
 
 const SPLIT_DIVIDER_HIT_WIDTH: f32 = 8; // Larger hit area for easier grabbing
 
-threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
-threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
-threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
-threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
+pub threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
+pub threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
+pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
+pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
 
 // Split resize overlay (for equalize/keyboard resize - shows overlay on all splits temporarily)
 threadlocal var g_split_resize_overlay_until: i64 = 0; // Timestamp when overlay should hide
@@ -365,15 +366,15 @@ pub const SplitRect = struct {
 
 const MAX_SPLITS_PER_TAB = tab.MAX_SPLITS_PER_TAB;
 const SPLIT_DIVIDER_WIDTH = tab.SPLIT_DIVIDER_WIDTH;
-const DEFAULT_PADDING = tab.DEFAULT_PADDING;
+pub const DEFAULT_PADDING = tab.DEFAULT_PADDING;
 
 /// Computed split rects for the active tab (updated each frame)
-threadlocal var g_split_rects: [MAX_SPLITS_PER_TAB]SplitRect = undefined;
-threadlocal var g_split_rect_count: usize = 0;
+pub threadlocal var g_split_rects: [MAX_SPLITS_PER_TAB]SplitRect = undefined;
+pub threadlocal var g_split_rect_count: usize = 0;
 
 /// Find the surface under a given point (window coordinates).
 /// Returns null if no surface is found at that position.
-fn surfaceAtPoint(x: i32, y: i32) ?*Surface {
+pub fn surfaceAtPoint(x: i32, y: i32) ?*Surface {
     for (0..g_split_rect_count) |i| {
         const rect = g_split_rects[i];
         if (x >= rect.x and x < rect.x + rect.width and
@@ -386,14 +387,14 @@ fn surfaceAtPoint(x: i32, y: i32) ?*Surface {
 }
 
 /// Hit test result for split dividers
-const DividerHit = struct {
+pub const DividerHit = struct {
     handle: SplitTree.Node.Handle,
     layout: SplitTree.Split.Layout,
 };
 
 /// Check if a point is over a split divider.
 /// Returns the split node handle and layout if found, null otherwise.
-fn hitTestDivider(x: i32, y: i32) ?DividerHit {
+pub fn hitTestDivider(x: i32, y: i32) ?DividerHit {
     const active_tab = activeTab() orelse return null;
     if (active_tab.tree.isEmpty() or !active_tab.tree.isSplit()) return null;
 
@@ -580,25 +581,25 @@ fn computeSplitLayout(
     return count;
 }
 
-const MAX_TABS = tab.MAX_TABS;
+pub const MAX_TABS = tab.MAX_TABS;
 
 // ============================================================================
 // Tab/split operation wrappers — delegate to tab module, handle UI side effects
 // ============================================================================
 
-fn activeTab() ?*TabState {
+pub fn activeTab() ?*TabState {
     return tab.activeTab();
 }
 
-fn activeSurface() ?*Surface {
+pub fn activeSurface() ?*Surface {
     return tab.activeSurface();
 }
 
-fn activeSelection() *Selection {
+pub fn activeSelection() *Selection {
     return tab.activeSelection();
 }
 
-fn isActiveTabTerminal() bool {
+pub fn isActiveTabTerminal() bool {
     return tab.isActiveTabTerminal();
 }
 
@@ -634,13 +635,13 @@ fn spawnTabWithCwd(allocator: std.mem.Allocator, cwd: ?[*:0]const u16) bool {
     return true;
 }
 
-fn spawnTab(allocator: std.mem.Allocator) bool {
+pub fn spawnTab(allocator: std.mem.Allocator) bool {
     var cwd_buf: [260]u16 = undefined;
     const cwd = getActiveCwd(&cwd_buf);
     return spawnTabWithCwd(allocator, cwd);
 }
 
-fn closeTab(idx: usize) void {
+pub fn closeTab(idx: usize) void {
     const allocator = g_allocator orelse return;
     tab.closeTab(idx, allocator);
     g_selecting = false;
@@ -648,12 +649,12 @@ fn closeTab(idx: usize) void {
     g_cells_valid = false;
 }
 
-fn switchTab(idx: usize) void {
+pub fn switchTab(idx: usize) void {
     tab.switchTab(idx);
     clearUiStateOnTabChange();
 }
 
-fn splitFocused(direction: SplitTree.Split.Direction) void {
+pub fn splitFocused(direction: SplitTree.Split.Direction) void {
     const allocator = g_allocator orelse return;
     var cwd_buf: [260]u16 = undefined;
     var cwd: ?[*:0]const u16 = null;
@@ -672,7 +673,7 @@ fn splitFocused(direction: SplitTree.Split.Direction) void {
     }
 }
 
-fn closeFocusedSplit() void {
+pub fn closeFocusedSplit() void {
     const allocator = g_allocator orelse return;
     switch (tab.closeFocusedSplit(allocator)) {
         .closed_split => {
@@ -691,7 +692,7 @@ fn closeFocusedSplit() void {
     }
 }
 
-fn gotoSplit(direction: SplitTree.Goto) void {
+pub fn gotoSplit(direction: SplitTree.Goto) void {
     const allocator = g_allocator orelse return;
     if (tab.gotoSplit(allocator, direction)) {
         g_force_rebuild = true;
@@ -699,7 +700,7 @@ fn gotoSplit(direction: SplitTree.Goto) void {
     }
 }
 
-fn equalizeSplits() void {
+pub fn equalizeSplits() void {
     const allocator = g_allocator orelse return;
     if (tab.equalizeSplits(allocator)) {
         g_split_resize_overlay_until = std.time.milliTimestamp() + RESIZE_OVERLAY_DURATION_MS;
@@ -708,7 +709,7 @@ fn equalizeSplits() void {
     }
 }
 
-fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
+pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
     const t = tab.activeTab() orelse return;
     for (0..g_split_rect_count) |i| {
         const rect = g_split_rects[i];
@@ -732,8 +733,8 @@ const embedded = @import("font/embedded.zig");
 // Terminal dimensions (initial, will be updated on resize)
 // Defaults match Ghostty's default of 0 (auto-size), but we set
 // reasonable defaults since we don't auto-detect screen size.
-threadlocal var term_cols: u16 = 80;
-threadlocal var term_rows: u16 = 24;
+pub threadlocal var term_cols: u16 = 80;
+pub threadlocal var term_rows: u16 = 24;
 // OpenGL context from glad
 pub threadlocal var gl: c.GladGLContext = undefined;
 
@@ -801,8 +802,8 @@ threadlocal var g_snap_rows: usize = 0;
 threadlocal var g_snap_cols: usize = 0;
 
 // Dirty tracking — skip rebuildCells when nothing changed
-threadlocal var g_cells_valid: bool = false; // true if bg_cells/fg_cells have valid data from a previous rebuild
-threadlocal var g_force_rebuild: bool = true; // set on resize, scroll, selection, theme change
+pub threadlocal var g_cells_valid: bool = false; // true if bg_cells/fg_cells have valid data from a previous rebuild
+pub threadlocal var g_force_rebuild: bool = true; // set on resize, scroll, selection, theme change
 threadlocal var g_last_cursor_blink_visible: bool = true; // track cursor blink transitions
 
 // Cached cursor state for lock-free rendering (used when tryLock fails)
@@ -1062,17 +1063,17 @@ threadlocal var g_start_time: i64 = 0; // Start time for iTime
 
 // Pending resize state (resize is deferred to main loop to avoid PageList integrity issues)
 // Ghostty coalesces resize events with a 25ms timer to batch rapid resizes
-threadlocal var g_pending_resize: bool = false;
-threadlocal var g_pending_cols: u16 = 0;
-threadlocal var g_pending_rows: u16 = 0;
-threadlocal var g_last_resize_time: i64 = 0;
+pub threadlocal var g_pending_resize: bool = false;
+pub threadlocal var g_pending_cols: u16 = 0;
+pub threadlocal var g_pending_rows: u16 = 0;
+pub threadlocal var g_last_resize_time: i64 = 0;
 threadlocal var g_resize_in_progress: bool = false; // Prevent rendering during resize
 const RESIZE_COALESCE_MS: i64 = 25; // Same as Ghostty
 
-threadlocal var g_cursor_style: CursorStyle = .block; // Default cursor style
+pub threadlocal var g_cursor_style: CursorStyle = .block; // Default cursor style
 pub threadlocal var g_cursor_blink: bool = true; // Whether cursor should blink (default: true like Ghostty)
 pub threadlocal var g_cursor_blink_visible: bool = true; // Current blink state (toggled by timer)
-threadlocal var g_last_blink_time: i64 = 0; // Timestamp of last blink toggle
+pub threadlocal var g_last_blink_time: i64 = 0; // Timestamp of last blink toggle
 const CURSOR_BLINK_INTERVAL_MS: i64 = 600; // Blink interval in ms (same as Ghostty)
 
 const ConfigWatcher = @import("config_watcher.zig");
@@ -1473,7 +1474,7 @@ threadlocal var g_unfocused_split_opacity: f32 = 0.7;
 threadlocal var g_split_divider_color: ?[3]f32 = null;
 
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
-threadlocal var g_focus_follows_mouse: bool = false;
+pub threadlocal var g_focus_follows_mouse: bool = false;
 
 // ============================================================================
 // Post-Processing Custom Shader System (Ghostty-compatible)
@@ -1892,7 +1893,7 @@ fn updateFps() void {
 // ============================================================================
 
 /// Scrollbar geometry result.
-const ScrollbarGeometry = struct {
+pub const ScrollbarGeometry = struct {
     track_x: f32,
     track_y: f32, // bottom of track (GL coords, y=0 is bottom)
     track_h: f32,
@@ -1937,13 +1938,13 @@ fn scrollbarGeometryForSurface(surface: *Surface, view_height: f32, top_padding:
 
 /// Compute scrollbar geometry from terminal state (uses active surface).
 /// Returns null if there's no scrollback (nothing to scroll).
-fn scrollbarGeometry(window_height: f32, top_padding: f32) ?ScrollbarGeometry {
+pub fn scrollbarGeometry(window_height: f32, top_padding: f32) ?ScrollbarGeometry {
     const surface = activeSurface() orelse return null;
     return scrollbarGeometryForSurface(surface, window_height, top_padding);
 }
 
 /// Show the scrollbar on the active surface (reset fade timer).
-fn scrollbarShow() void {
+pub fn scrollbarShow() void {
     const surface = activeSurface() orelse return;
     surface.scrollbar_opacity = 1.0;
     surface.scrollbar_show_time = std.time.milliTimestamp();
@@ -2202,7 +2203,7 @@ fn renderResizeOverlayText(cols: u16, rows: u16, window_width: f32, window_heigh
 }
 
 /// Check if a point (in client pixel coords, origin top-left) is over the scrollbar.
-fn scrollbarHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_padding: f32) bool {
+pub fn scrollbarHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_padding: f32) bool {
     const bar_right = window_width;
     const bar_left = window_width - SCROLLBAR_HOVER_WIDTH;
     const track_top_px = top_padding; // in pixel coords (top-left origin)
@@ -2215,7 +2216,7 @@ fn scrollbarHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32,
 }
 
 /// Check if a point is over the scrollbar thumb specifically.
-fn scrollbarThumbHitTest(ypos: f64, window_height: f32, top_padding: f32) bool {
+pub fn scrollbarThumbHitTest(ypos: f64, window_height: f32, top_padding: f32) bool {
     const geo = scrollbarGeometry(window_height, top_padding) orelse return false;
     // Convert ypos (top-left origin) to GL coords (bottom-left origin)
     const gl_y = window_height - @as(f32, @floatCast(ypos));
@@ -2223,7 +2224,7 @@ fn scrollbarThumbHitTest(ypos: f64, window_height: f32, top_padding: f32) bool {
 }
 
 /// Handle scrollbar drag: convert pixel y to scroll position.
-fn scrollbarDrag(ypos: f64, window_height: f32, top_padding: f32) void {
+pub fn scrollbarDrag(ypos: f64, window_height: f32, top_padding: f32) void {
     const surface = activeSurface() orelse return;
     const sb = surface.terminal.screens.active.pages.scrollbar();
     if (sb.total <= sb.len) return;
@@ -2556,7 +2557,7 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
 }
 
 /// Reset cursor blink to visible state (call on keypress like Ghostty)
-fn resetCursorBlink() void {
+pub fn resetCursorBlink() void {
     g_cursor_blink_visible = true;
     g_last_blink_time = std.time.milliTimestamp();
 }
@@ -2589,7 +2590,7 @@ pub fn viewportOffset() usize {
     return surface.terminal.screens.active.pages.scrollbar().offset;
 }
 
-fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
+pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
     const padding_d: f64 = 10;
     const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const col_f = (xpos - padding_d) / @as(f64, font.cell_width);
@@ -2603,925 +2604,7 @@ fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
 
 // Cell rendering functions moved to appwindow/cell_renderer.zig
 
-
-// ============================================================================
-// Win32-specific input processing (only compiled for Win32 backend)
-// ============================================================================
-
-const win32_input = struct {
-
-    /// Process all queued Win32 input events. Called once per frame from the main loop.
-    pub fn processEvents(win: *win32_backend.Window) void {
-        processKeyEvents(win);
-        processCharEvents(win);
-        processMouseButtonEvents(win);
-        processMouseMoveEvents(win);
-        processMouseWheelEvents(win);
-        processSizeChange(win);
-    }
-
-    fn processKeyEvents(win: *win32_backend.Window) void {
-        while (win.key_events.pop()) |ev| {
-            handleKey(ev);
-        }
-    }
-
-    fn processCharEvents(win: *win32_backend.Window) void {
-        while (win.char_events.pop()) |ev| {
-            handleChar(ev);
-        }
-    }
-
-    fn processMouseButtonEvents(win: *win32_backend.Window) void {
-        while (win.mouse_button_events.pop()) |ev| {
-            handleMouseButton(ev);
-        }
-    }
-
-    fn processMouseMoveEvents(win: *win32_backend.Window) void {
-        // Only process the latest move event (coalesce)
-        var latest: ?win32_backend.MouseMoveEvent = null;
-        while (win.mouse_move_events.pop()) |ev| {
-            latest = ev;
-        }
-        if (latest) |ev| {
-            handleMouseMove(ev);
-        }
-    }
-
-    fn processMouseWheelEvents(win: *win32_backend.Window) void {
-        while (win.mouse_wheel_events.pop()) |ev| {
-            handleMouseWheel(ev);
-        }
-    }
-
-    fn processSizeChange(win: *win32_backend.Window) void {
-        if (!win.size_changed) return;
-        win.size_changed = false;
-
-        const width = win.width;
-        const height = win.height;
-        // Match exactly what computeSplitLayout → setScreenSize computes for a
-        // root (full-window) surface.
-        //
-        // Width: render-loop subtracts 2*render_padding, but edge extensions
-        //        add it back for the root surface → only explicit L+R matter.
-        // Height: render-loop subtracts (render_padding+TB) top + render_padding
-        //         bottom, then setScreenSize subtracts explicit T+B.
-        const render_padding: f32 = 10;
-        const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-        const explicit_left: f32 = @floatFromInt(DEFAULT_PADDING);
-        const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
-        const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
-        const explicit_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
-
-        const total_width_padding = explicit_left + explicit_right;
-        const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
-        
-        const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
-        const avail_height = @as(f32, @floatFromInt(height)) - total_height_padding;
-
-        const new_cols: u16 = @intFromFloat(@max(1, avail_width / font.cell_width));
-        const new_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
-
-        if (new_cols != term_cols or new_rows != term_rows) {
-            g_pending_resize = true;
-            g_pending_cols = new_cols;
-            g_pending_rows = new_rows;
-            g_last_resize_time = std.time.milliTimestamp();
-        }
-    }
-
-    fn handleChar(ev: win32_backend.CharEvent) void {
-        // When tab rename is active, route chars to the rename buffer
-        if (tab.g_tab_rename_active) {
-            g_cursor_blink_visible = true;
-            g_last_blink_time = std.time.milliTimestamp();
-            tab.handleRenameChar(ev.codepoint);
-            return;
-        }
-        if (!isActiveTabTerminal()) return;
-        // Skip chars when Alt is held without Ctrl — those are part of Alt+key
-        // combos (e.g. Shift+Alt+4) and shouldn't produce text input.
-        // However, AltGr on international keyboards reports as Ctrl+Alt, so
-        // we must allow chars when both Ctrl and Alt are held (AltGr chars).
-        // This matches Ghostty's consumed_mods / effectiveMods approach.
-        if (ev.alt and !ev.ctrl) return;
-        const surface = activeSurface() orelse return;
-        resetCursorBlink();
-        {
-            surface.render_state.mutex.lock();
-            defer surface.render_state.mutex.unlock();
-            surface.terminal.scrollViewport(.bottom) catch {};
-        }
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(ev.codepoint, &buf) catch return;
-        _ = surface.pty.write(buf[0..len]) catch {};
-    }
-
-    fn handleKey(ev: win32_backend.KeyEvent) void {
-        // Ctrl+Shift+N = new window (even during tab rename)
-        if (ev.ctrl and ev.shift and ev.vk == 0x4E) { // 'N'
-            if (tab.g_tab_rename_active) tab.commitTabRename();
-            if (g_app) |app| {
-                const hwnd = if (g_window) |w| w.hwnd else null;
-                // Get CWD from active tab for working directory inheritance
-                var cwd_buf: [260]u16 = undefined;
-                var cwd: ?[]const u16 = null;
-                if (activeSurface()) |surface| {
-                    if (surface.getCwd()) |unix_path| {
-                        std.debug.print("CWD from OSC 7: {s}\n", .{unix_path});
-                        if (unixPathToWindows(unix_path, &cwd_buf)) |len| {
-                            cwd = cwd_buf[0..len];
-                            var path_u8: [260]u8 = undefined;
-                            for (cwd_buf[0..len], 0..) |wc, i| {
-                                path_u8[i] = @truncate(wc);
-                            }
-                            std.debug.print("Converted to Windows path: {s}\n", .{path_u8[0..len]});
-                        } else {
-                            std.debug.print("Failed to convert Unix path to Windows\n", .{});
-                        }
-                    } else {
-                        std.debug.print("No CWD from active surface (OSC 7 not received)\n", .{});
-                    }
-                }
-                app.requestNewWindow(hwnd, cwd);
-            }
-            return;
-        }
-        // Ctrl+Shift+T = new tab (even during tab rename)
-        if (ev.ctrl and ev.shift and ev.vk == 0x54) { // 'T'
-            if (tab.g_tab_rename_active) tab.commitTabRename();
-            _ = spawnTab(g_allocator orelse return);
-            return;
-        }
-        // Ctrl+Shift+O = new split right (vertical divider)
-        if (ev.ctrl and ev.shift and ev.vk == 0x4F) { // 'O'
-            if (tab.g_tab_rename_active) tab.commitTabRename();
-            splitFocused(.right);
-            return;
-        }
-        // Ctrl+Shift+E = new split down (horizontal divider)
-        if (ev.ctrl and ev.shift and ev.vk == 0x45) { // 'E'
-            if (tab.g_tab_rename_active) tab.commitTabRename();
-            splitFocused(.down);
-            return;
-        }
-        // When tab rename is active, handle special keys
-        if (tab.g_tab_rename_active) {
-            g_cursor_blink_visible = true;
-            g_last_blink_time = std.time.milliTimestamp();
-            tab.handleRenameKey(ev);
-            return;
-        }
-        // Ctrl+Shift+C = copy
-        if (ev.ctrl and ev.shift and ev.vk == 0x43) { // 'C'
-            copySelectionToClipboard();
-            return;
-        }
-        // Ctrl+Shift+V = paste
-        if (ev.ctrl and ev.shift and ev.vk == 0x56) { // 'V'
-            pasteFromClipboard();
-            return;
-        }
-        // Ctrl+Shift+T and Ctrl+Shift+N are handled above (before rename guard)
-        // Ctrl+W = close focused split (or tab if no splits, or app if last tab)
-        if (ev.ctrl and ev.vk == 0x57) { // 'W'
-            closeFocusedSplit();
-            return;
-        }
-        // Ctrl+Alt+Arrows = goto split (spatial navigation)
-        if (ev.ctrl and ev.alt and !ev.shift) {
-            const dir: ?SplitTree.Spatial.Direction = switch (ev.vk) {
-                win32_backend.VK_LEFT => .left,
-                win32_backend.VK_RIGHT => .right,
-                win32_backend.VK_UP => .up,
-                win32_backend.VK_DOWN => .down,
-                else => null,
-            };
-            if (dir) |d| {
-                gotoSplit(.{ .spatial = d });
-                return;
-            }
-        }
-        // Ctrl+Shift+[ = goto previous split
-        if (ev.ctrl and ev.shift and ev.vk == win32_backend.VK_OEM_4) { // '['
-            gotoSplit(.previous_wrapped);
-            return;
-        }
-        // Ctrl+Shift+] = goto next split
-        if (ev.ctrl and ev.shift and ev.vk == win32_backend.VK_OEM_6) { // ']'
-            gotoSplit(.next_wrapped);
-            return;
-        }
-        // Ctrl+Shift+Z = equalize splits
-        if (ev.ctrl and ev.shift and ev.vk == 0x5A) { // 'Z'
-            equalizeSplits();
-            return;
-        }
-        // Ctrl+Tab = next tab
-        if (ev.ctrl and ev.vk == win32_backend.VK_TAB) {
-            if (ev.shift) {
-                // Ctrl+Shift+Tab = previous tab
-                if (tab.g_active_tab > 0) switchTab(tab.g_active_tab - 1) else switchTab(tab.g_tab_count - 1);
-            } else {
-                switchTab((tab.g_active_tab + 1) % tab.g_tab_count);
-            }
-            return;
-        }
-        // Ctrl+1-9 = switch to tab N
-        if (ev.ctrl and !ev.shift and ev.vk >= 0x31 and ev.vk <= 0x39) { // '1'-'9'
-            const tab_idx = @as(usize, @intCast(ev.vk - 0x31));
-            if (tab_idx < tab.g_tab_count) switchTab(tab_idx);
-            return;
-        }
-        // Ctrl+, = open config
-        if (ev.ctrl and ev.vk == win32_backend.VK_OEM_COMMA) {
-            std.debug.print("[keybind] Ctrl+, pressed\n", .{});
-            if (g_allocator) |alloc| Config.openConfigInEditor(alloc);
-            return;
-        }
-        // Alt+Enter = toggle fullscreen
-        if (ev.alt and ev.vk == win32_backend.VK_RETURN) {
-            toggleFullscreen();
-            return;
-        }
-
-        // Don't send input to PTY if active tab isn't the terminal
-        if (!isActiveTabTerminal()) return;
-
-        const surface = activeSurface() orelse return;
-        const pty = &surface.pty;
-
-        // Track whether this keypress actually sends data to the PTY.
-        // Like Ghostty, we only scroll-to-bottom when input is actually generated,
-        // not for modifier-only keys or key combos that don't produce PTY output.
-        var wrote_to_pty = false;
-
-        const seq: ?[]const u8 = switch (ev.vk) {
-            win32_backend.VK_RETURN => "\r",
-            win32_backend.VK_BACK => "\x7f",
-            win32_backend.VK_TAB => "\t",
-            win32_backend.VK_ESCAPE => "\x1b",
-            win32_backend.VK_UP => "\x1b[A",
-            win32_backend.VK_DOWN => "\x1b[B",
-            win32_backend.VK_RIGHT => "\x1b[C",
-            win32_backend.VK_LEFT => "\x1b[D",
-            win32_backend.VK_HOME => "\x1b[H",
-            win32_backend.VK_END => "\x1b[F",
-            win32_backend.VK_PRIOR => blk: { // Page Up
-                if (ev.shift) {
-                    surface.render_state.mutex.lock();
-                    surface.terminal.scrollViewport(.{ .delta = -@as(isize, term_rows / 2) }) catch {};
-                    surface.render_state.mutex.unlock();
-                    scrollbarShow();
-                    break :blk null;
-                }
-                break :blk "\x1b[5~";
-            },
-            win32_backend.VK_NEXT => blk: { // Page Down
-                if (ev.shift) {
-                    surface.render_state.mutex.lock();
-                    surface.terminal.scrollViewport(.{ .delta = @as(isize, term_rows / 2) }) catch {};
-                    surface.render_state.mutex.unlock();
-                    scrollbarShow();
-                    break :blk null;
-                }
-                break :blk "\x1b[6~";
-            },
-            win32_backend.VK_INSERT => "\x1b[2~",
-            win32_backend.VK_DELETE => "\x1b[3~",
-            win32_backend.VK_F11 => blk: {
-                toggleFullscreen();
-                break :blk null;
-            },
-            else => blk: {
-                // Ctrl+A through Ctrl+Z
-                if (ev.ctrl and ev.vk >= 0x41 and ev.vk <= 0x5A) {
-                    // Don't send Ctrl+C/V when shift is held (those are copy/paste)
-                    if (!ev.shift) {
-                        const ctrl_char: u8 = @intCast(ev.vk - 0x41 + 1);
-                        _ = pty.write(&[_]u8{ctrl_char}) catch {};
-                        wrote_to_pty = true;
-                    }
-                }
-                break :blk null;
-            },
-        };
-
-        if (seq) |s| {
-            _ = pty.write(s) catch {};
-            wrote_to_pty = true;
-        }
-
-        // Only scroll to bottom and reset cursor blink when we actually sent
-        // data to the PTY. This matches Ghostty's behavior: modifier-only keys,
-        // unbound key combos (like Shift+Alt+4), and scroll keys don't snap
-        // the viewport to the bottom.
-        if (wrote_to_pty) {
-            resetCursorBlink();
-            surface.render_state.mutex.lock();
-            surface.terminal.scrollViewport(.bottom) catch {};
-            surface.render_state.mutex.unlock();
-        }
-    }
-
-    var plus_btn_pressed: bool = false;
-
-    fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
-        // Double-click on tab text to rename, elsewhere to maximize
-        if (ev.button == .left and ev.action == .double_click) {
-            const xpos: f64 = @floatFromInt(ev.x);
-            const xf: f32 = @floatFromInt(ev.x);
-            const titlebar_h: f64 = if (g_window) |w| @floatFromInt(w.titlebar_height) else 40;
-            const ypos: f64 = @floatFromInt(ev.y);
-            if (ypos < titlebar_h) {
-                if (hitTestTab(xpos)) |tab_idx| {
-                    // Only rename if clicking on the text itself
-                    if (tab_idx < MAX_TABS and xf >= tab.g_tab_text_x_start[tab_idx] and xf <= tab.g_tab_text_x_end[tab_idx]) {
-                        tab.startTabRename(tab_idx);
-                    } else {
-                        // Double-click on tab but not on text — maximize/restore
-                        if (g_window) |w| {
-                            if (win32_backend.IsZoomed(w.hwnd) != 0) {
-                                _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_RESTORE);
-                            } else {
-                                _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_MAXIMIZE);
-                            }
-                        }
-                    }
-                } else {
-                    // Double-click on empty titlebar area — maximize/restore
-                    if (g_window) |w| {
-                        if (win32_backend.IsZoomed(w.hwnd) != 0) {
-                            _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_RESTORE);
-                        } else {
-                            _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_MAXIMIZE);
-                        }
-                    }
-                }
-            }
-            return;
-        }
-
-        // Middle-click on tab to close it
-        if (ev.button == .middle and ev.action == .release) {
-            const xpos: f64 = @floatFromInt(ev.x);
-            const ypos: f64 = @floatFromInt(ev.y);
-            const titlebar_h: f64 = if (g_window) |w| @floatFromInt(w.titlebar_height) else 40;
-            if (ypos < titlebar_h) {
-                if (hitTestTab(xpos)) |tab_idx| {
-                    if (tab.g_tab_count <= 1) {
-                        g_should_close = true;
-                    } else {
-                        closeTab(tab_idx);
-                    }
-                }
-            }
-            return;
-        }
-
-        if (ev.button == .left) {
-            const xpos: f64 = @floatFromInt(ev.x);
-            const ypos: f64 = @floatFromInt(ev.y);
-            const titlebar_h: f64 = if (g_window) |w| @floatFromInt(w.titlebar_height) else 40;
-
-            if (ev.action == .press) {
-                // Commit rename on any click
-                if (tab.g_tab_rename_active) tab.commitTabRename();
-
-                // Check if click is in the titlebar (tab bar area)
-                if (ypos < titlebar_h) {
-                    handleTabBarPress(xpos);
-                    return;
-                }
-
-                // Click in terminal content area: update split focus
-                updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
-
-                // Check if click is on the scrollbar
-                const win = g_window orelse return;
-                const fb = win.getFramebufferSize();
-                const w_f: f32 = @floatFromInt(fb.width);
-                const h_f: f32 = @floatFromInt(fb.height);
-                const tb_f: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-                const top_pad: f32 = 10 + tb_f;
-                const sb_opacity = if (activeSurface()) |s| s.scrollbar_opacity else 0;
-                if (sb_opacity > 0 and scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad)) {
-                    g_scrollbar_dragging = true;
-                    scrollbarShow();
-                    // Calculate drag offset within thumb
-                    if (scrollbarThumbHitTest(ypos, h_f, top_pad)) {
-                        // Clicked on thumb — offset from top of thumb
-                        const geo = scrollbarGeometry(h_f, top_pad) orelse return;
-                        const thumb_top_px = h_f - (geo.thumb_y + geo.thumb_h); // convert GL→pixel
-                        g_scrollbar_drag_offset = @as(f32, @floatCast(ypos)) - thumb_top_px;
-                    } else {
-                        // Clicked on track — jump thumb center to click position
-                        const geo = scrollbarGeometry(h_f, top_pad) orelse return;
-                        g_scrollbar_drag_offset = geo.thumb_h / 2;
-                        scrollbarDrag(ypos, h_f, top_pad);
-                    }
-                    return;
-                }
-
-                // Check if click is on a split divider
-                if (hitTestDivider(ev.x, ev.y)) |hit| {
-                    g_divider_dragging = true;
-                    g_divider_drag_handle = hit.handle;
-                    g_divider_drag_layout = hit.layout;
-                    // Initialize per-surface resize tracking with current sizes
-                    // so we only show overlays on surfaces that actually change
-                    if (activeTab()) |tb| {
-                        var it = tb.tree.iterator();
-                        while (it.next()) |entry| {
-                            entry.surface.resize_overlay_active = false;
-                            entry.surface.resize_overlay_last_cols = entry.surface.size.grid.cols;
-                            entry.surface.resize_overlay_last_rows = entry.surface.size.grid.rows;
-                        }
-                    }
-                    return;
-                }
-
-                // Find which surface was clicked and focus it
-                const clicked_surface = surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse activeSurface() orelse return;
-
-                // Focus the clicked split if different from current focus
-                if (activeTab()) |tb| {
-                    for (0..g_split_rect_count) |i| {
-                        if (g_split_rects[i].surface == clicked_surface) {
-                            tb.focused = g_split_rects[i].handle;
-                            break;
-                        }
-                    }
-                }
-
-                const cell_pos = mouseToCell(xpos, ypos);
-                const abs_row = viewportOffset() + cell_pos.row;
-                // Start selection on the clicked surface
-                clicked_surface.selection.start_col = cell_pos.col;
-                clicked_surface.selection.start_row = abs_row;
-                clicked_surface.selection.end_col = cell_pos.col;
-                clicked_surface.selection.end_row = abs_row;
-                clicked_surface.selection.active = false;
-                g_selecting = true;
-                g_click_x = xpos;
-                g_click_y = ypos;
-            } else {
-                // Mouse up
-                g_scrollbar_dragging = false;
-
-                // Handle divider drag release
-                if (g_divider_dragging) {
-                    g_divider_dragging = false;
-                    g_divider_drag_handle = null;
-                    g_divider_drag_layout = null;
-                    // Reset per-surface resize overlay state
-                    if (activeTab()) |tb| {
-                        var it = tb.tree.iterator();
-                        while (it.next()) |entry| {
-                            entry.surface.resize_overlay_active = false;
-                        }
-                    }
-                    // Cursor will be reset in handleMouseMove
-                    return;
-                }
-
-                // Handle close button release — close tab if still on the close button
-                if (tab.g_tab_close_pressed) |pressed_idx| {
-                    tab.g_tab_close_pressed = null;
-                    if (ypos < titlebar_h and pressed_idx < tab.g_tab_count) {
-                        if (hitTestTabCloseButton(xpos, pressed_idx)) {
-                            if (tab.g_tab_count <= 1) {
-                                g_should_close = true;
-                            } else {
-                                closeTab(pressed_idx);
-                            }
-                        }
-                    }
-                    return;
-                }
-
-                if (plus_btn_pressed) {
-                    plus_btn_pressed = false;
-                    // Only fire if still in the + button area
-                    if (ypos < titlebar_h and hitTestPlusButton(xpos)) {
-                        _ = spawnTab(g_allocator orelse return);
-                    }
-                    return;
-                }
-                g_selecting = false;
-            }
-        }
-    }
-
-    fn handleTabBarPress(xpos: f64) void {
-        // Commit any active rename when clicking in the tab bar
-        if (tab.g_tab_rename_active) {
-            tab.commitTabRename();
-        }
-        const win = g_window orelse return;
-        const window_width: f64 = blk: {
-            var rect: win32_backend.RECT = undefined;
-            _ = win32_backend.GetClientRect(win.hwnd, &rect);
-            break :blk @floatFromInt(rect.right);
-        };
-
-        const caption_area_w: f64 = 46 * 3;
-        const gap_w: f64 = 42;
-        const plus_btn_w: f64 = 46;
-        const show_plus = tab.g_tab_count > 1;
-        const num_tabs = tab.g_tab_count;
-
-        const plus_total: f64 = if (show_plus) plus_btn_w else 0;
-        const right_reserved: f64 = caption_area_w + gap_w + plus_total;
-        const tab_area_w: f64 = window_width - right_reserved;
-        const tab_w: f64 = if (num_tabs > 0) tab_area_w / @as(f64, @floatFromInt(num_tabs)) else tab_area_w;
-
-        // Check which tab was clicked — also check close button
-        var cursor: f64 = 0;
-        for (0..num_tabs) |tab_idx| {
-            if (xpos >= cursor and xpos < cursor + tab_w) {
-                // Check if the close button was clicked (centered on shortcut position)
-                if (num_tabs > 1 and tab.g_tab_close_opacity[tab_idx] > 0.1) {
-                    const sc_w: f64 = @floatCast(titlebar.titlebarGlyphAdvance('^') + titlebar.titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
-                    const sc_center = cursor + tab_w - 12 - sc_w / 2;
-                    const close_btn_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
-                    if (xpos >= close_btn_x and xpos < close_btn_x + tab.TAB_CLOSE_BTN_W) {
-                        tab.g_tab_close_pressed = tab_idx;
-                        return;
-                    }
-                }
-                switchTab(tab_idx);
-                return;
-            }
-            cursor += tab_w;
-        }
-
-        // Check if + button was pressed
-        if (show_plus and xpos >= cursor and xpos < cursor + plus_btn_w) {
-            plus_btn_pressed = true;
-        }
-    }
-
-    fn hitTestTab(xpos: f64) ?usize {
-        const win = g_window orelse return null;
-        const window_width: f64 = blk: {
-            var rect: win32_backend.RECT = undefined;
-            _ = win32_backend.GetClientRect(win.hwnd, &rect);
-            break :blk @floatFromInt(rect.right);
-        };
-
-        const caption_area_w: f64 = 46 * 3;
-        const gap_w: f64 = 42;
-        const plus_btn_w: f64 = 46;
-        const show_plus = tab.g_tab_count > 1;
-        const num_tabs = tab.g_tab_count;
-
-        const plus_total: f64 = if (show_plus) plus_btn_w else 0;
-        const right_reserved: f64 = caption_area_w + gap_w + plus_total;
-        const tab_area_w: f64 = window_width - right_reserved;
-        const tab_w: f64 = if (num_tabs > 0) tab_area_w / @as(f64, @floatFromInt(num_tabs)) else tab_area_w;
-
-        var cursor: f64 = 0;
-        for (0..num_tabs) |tab_idx| {
-            if (xpos >= cursor and xpos < cursor + tab_w) {
-                return tab_idx;
-            }
-            cursor += tab_w;
-        }
-        return null;
-    }
-
-    fn hitTestTabCloseButton(xpos: f64, tab_idx: usize) bool {
-        const window_width: f64 = blk: {
-            const win = g_window orelse break :blk 800.0;
-            var rect: win32_backend.RECT = undefined;
-            _ = win32_backend.GetClientRect(win.hwnd, &rect);
-            break :blk @floatFromInt(rect.right);
-        };
-
-        const caption_area_w: f64 = 46 * 3;
-        const gap_w: f64 = 42;
-        const plus_btn_w: f64 = 46;
-        const show_plus = tab.g_tab_count > 1;
-        const num_tabs = tab.g_tab_count;
-
-        const plus_total: f64 = if (show_plus) plus_btn_w else 0;
-        const right_reserved: f64 = caption_area_w + gap_w + plus_total;
-        const tab_area_w: f64 = window_width - right_reserved;
-        const tab_w: f64 = if (num_tabs > 0) tab_area_w / @as(f64, @floatFromInt(num_tabs)) else tab_area_w;
-
-        const tab_x = tab_w * @as(f64, @floatFromInt(tab_idx));
-        const sc_w: f64 = @floatCast(titlebar.titlebarGlyphAdvance('^') + titlebar.titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
-        const sc_center = tab_x + tab_w - 12 - sc_w / 2;
-        const close_btn_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
-        return xpos >= close_btn_x and xpos < close_btn_x + tab.TAB_CLOSE_BTN_W;
-    }
-
-    fn hitTestPlusButton(xpos: f64) bool {
-        const win = g_window orelse return false;
-        const window_width: f64 = blk: {
-            var rect: win32_backend.RECT = undefined;
-            _ = win32_backend.GetClientRect(win.hwnd, &rect);
-            break :blk @floatFromInt(rect.right);
-        };
-
-        const caption_area_w: f64 = 46 * 3;
-        const gap_w: f64 = 42;
-        const plus_btn_w: f64 = 46;
-        if (tab.g_tab_count <= 1) return false;
-
-        const right_reserved: f64 = caption_area_w + gap_w + plus_btn_w;
-        const tab_area_w: f64 = window_width - right_reserved;
-        const tab_w: f64 = tab_area_w / @as(f64, @floatFromInt(tab.g_tab_count));
-        const plus_x = tab_w * @as(f64, @floatFromInt(tab.g_tab_count));
-
-        return xpos >= plus_x and xpos < plus_x + plus_btn_w;
-    }
-
-    fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
-        const xpos: f64 = @floatFromInt(ev.x);
-        const ypos: f64 = @floatFromInt(ev.y);
-
-        // Handle divider dragging
-        if (g_divider_dragging) {
-            if (g_divider_drag_handle) |handle| {
-                const active_tab = activeTab() orelse return;
-                const allocator = g_allocator orelse return;
-
-                // Get spatial info for this split
-                var spatial = active_tab.tree.spatial(allocator) catch return;
-                defer spatial.deinit(allocator);
-
-                // Get content area dimensions
-                const win = g_window orelse return;
-                const fb = win.getFramebufferSize();
-                const content_x: f32 = @floatFromInt(DEFAULT_PADDING);
-                const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-                const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * DEFAULT_PADDING)));
-                const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(DEFAULT_PADDING)));
-
-                const slot = spatial.slots[handle.idx()];
-                const layout = g_divider_drag_layout orelse return;
-
-                // Calculate new ratio based on mouse position
-                const new_ratio: f16 = switch (layout) {
-                    .horizontal => blk: {
-                        const slot_x = content_x + @as(f32, @floatCast(slot.x)) * content_w;
-                        const slot_w = @as(f32, @floatCast(slot.width)) * content_w;
-                        const mouse_x: f32 = @floatCast(xpos);
-                        // Clamp ratio to 0.1-0.9 to prevent splits from becoming too small
-                        break :blk @floatCast(@max(0.1, @min(0.9, (mouse_x - slot_x) / slot_w)));
-                    },
-                    .vertical => blk: {
-                        const slot_y = content_y + @as(f32, @floatCast(slot.y)) * content_h;
-                        const slot_h = @as(f32, @floatCast(slot.height)) * content_h;
-                        const mouse_y: f32 = @floatCast(ypos);
-                        break :blk @floatCast(@max(0.1, @min(0.9, (mouse_y - slot_y) / slot_h)));
-                    },
-                };
-
-                // Update the ratio in place
-                active_tab.tree.resizeInPlace(handle, new_ratio);
-
-                // Force layout recalculation and redraw
-                g_force_rebuild = true;
-                g_cells_valid = false;
-            }
-            return;
-        }
-
-        // Focus follows mouse: check if mouse is over a different split
-        if (g_focus_follows_mouse) {
-            updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
-        }
-
-        // Update scrollbar hover state
-        const win = g_window orelse return;
-        const fb = win.getFramebufferSize();
-        const w_f: f32 = @floatFromInt(fb.width);
-        const h_f: f32 = @floatFromInt(fb.height);
-        const tb_f: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-        const top_pad: f32 = 10 + tb_f;
-
-        const was_hover = g_scrollbar_hover;
-        g_scrollbar_hover = scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad);
-        const sb_opacity2 = if (activeSurface()) |s| s.scrollbar_opacity else 0;
-        if (g_scrollbar_hover and !was_hover and sb_opacity2 > 0) {
-            scrollbarShow(); // Reset fade timer when entering scrollbar area
-        }
-
-        // Handle scrollbar drag
-        if (g_scrollbar_dragging) {
-            scrollbarDrag(ypos, h_f, top_pad);
-            return;
-        }
-
-        // Check for divider hover and update cursor
-        if (!g_scrollbar_hover and !g_selecting) {
-            if (hitTestDivider(ev.x, ev.y)) |hit| {
-                // Set resize cursor based on layout
-                const cursor_id = switch (hit.layout) {
-                    .horizontal => win32_backend.IDC_SIZEWE, // left-right resize
-                    .vertical => win32_backend.IDC_SIZENS, // up-down resize
-                };
-                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
-                g_divider_hover = true;
-            } else if (g_divider_hover) {
-                // Reset to default cursor when leaving divider
-                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
-                g_divider_hover = false;
-            }
-        }
-
-        // Normal selection handling
-        if (!g_selecting) return;
-
-        const cell_pos = mouseToCell(xpos, ypos);
-        const abs_row = viewportOffset() + cell_pos.row;
-        activeSelection().end_col = cell_pos.col;
-        activeSelection().end_row = abs_row;
-
-        const threshold = font.cell_width * 0.6;
-        const padding_d: f64 = 10;
-        const click_cell_x = g_click_x - padding_d - @as(f64, @floatFromInt(activeSelection().start_col)) * @as(f64, font.cell_width);
-        const drag_cell_x = xpos - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, font.cell_width);
-
-        const same_cell = (activeSelection().start_col == cell_pos.col and activeSelection().start_row == abs_row);
-        if (same_cell) {
-            const moved_right = drag_cell_x >= threshold and click_cell_x < threshold;
-            const moved_left = drag_cell_x < threshold and click_cell_x >= threshold;
-            activeSelection().active = moved_right or moved_left;
-        } else {
-            activeSelection().active = true;
-        }
-    }
-
-    fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
-        // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
-        // Fall back to focused surface if mouse is not over any split.
-        const surface = surfaceAtPoint(ev.xpos, ev.ypos) orelse activeSurface() orelse return;
-
-        surface.render_state.mutex.lock();
-        defer surface.render_state.mutex.unlock();
-        // WHEEL_DELTA is 120 per notch. Convert to lines (3 lines per notch, like GLFW).
-        const notches = @as(f64, @floatFromInt(ev.delta)) / 120.0;
-        const delta: isize = @intFromFloat(-notches * 3);
-        surface.terminal.scrollViewport(.{ .delta = delta }) catch {};
-
-        // Show scrollbar for the scrolled surface
-        surface.scrollbar_opacity = 1.0;
-        surface.scrollbar_show_time = std.time.milliTimestamp();
-    }
-
-    // --- Clipboard (Win32 native) ---
-
-    fn copySelectionToClipboard() void {
-        const surface = activeSurface() orelse return;
-        const allocator = g_allocator orelse return;
-        const win = g_window orelse return;
-
-        if (!activeSelection().active) return;
-
-        var start_row = activeSelection().start_row;
-        var start_col = activeSelection().start_col;
-        var end_row = activeSelection().end_row;
-        var end_col = activeSelection().end_col;
-
-        if (start_row > end_row or (start_row == end_row and start_col > end_col)) {
-            std.mem.swap(usize, &start_row, &end_row);
-            std.mem.swap(usize, &start_col, &end_col);
-        }
-
-        var text: std.ArrayListUnmanaged(u8) = .empty;
-        defer text.deinit(allocator);
-
-        // Lock while reading terminal cells
-        surface.render_state.mutex.lock();
-        const screen = surface.terminal.screens.active;
-        const vp_off = surface.terminal.screens.active.pages.scrollbar().offset;
-        var row: usize = start_row;
-        while (row <= end_row) : (row += 1) {
-            // Convert absolute row to viewport-relative for getCell
-            const vp_row = if (row >= vp_off) row - vp_off else continue;
-            if (vp_row >= term_rows) continue;
-
-            const row_start_col = if (row == start_row) start_col else 0;
-            const row_end_col = if (row == end_row) end_col else term_cols - 1;
-
-            var col: usize = row_start_col;
-            while (col <= row_end_col) : (col += 1) {
-                const cell_data = screen.pages.getCell(.{ .viewport = .{
-                    .x = @intCast(col),
-                    .y = @intCast(vp_row),
-                } }) orelse continue;
-
-                const cp = cell_data.cell.codepoint();
-                if (cp == 0 or cp == ' ') {
-                    text.append(allocator, ' ') catch continue;
-                } else {
-                    var buf: [4]u8 = undefined;
-                    const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch continue;
-                    text.appendSlice(allocator, buf[0..len]) catch continue;
-                }
-            }
-            if (row < end_row) {
-                text.append(allocator, '\n') catch {};
-            }
-        }
-        surface.render_state.mutex.unlock();
-
-        if (text.items.len == 0) return;
-
-        // Win32 clipboard: OpenClipboard → EmptyClipboard → SetClipboardData → CloseClipboard
-        if (win32_backend.OpenClipboard(win.hwnd) == 0) return;
-        defer _ = win32_backend.CloseClipboard();
-        _ = win32_backend.EmptyClipboard();
-
-        // Clipboard wants a GlobalAlloc'd GMEM_MOVEABLE buffer with null-terminated data
-        const size = text.items.len + 1;
-        const hmem = win32_backend.GlobalAlloc(0x0002, size) orelse return; // GMEM_MOVEABLE
-        const ptr = win32_backend.GlobalLock(hmem) orelse return;
-        const dest: [*]u8 = @ptrCast(ptr);
-        @memcpy(dest[0..text.items.len], text.items);
-        dest[text.items.len] = 0;
-        _ = win32_backend.GlobalUnlock(hmem);
-
-        _ = win32_backend.SetClipboardData(1, hmem); // CF_TEXT = 1
-        std.debug.print("Copied {} bytes to clipboard\n", .{text.items.len});
-    }
-
-    fn pasteFromClipboard() void {
-        const surface = activeSurface() orelse return;
-        const win = g_window orelse return;
-
-        if (win32_backend.OpenClipboard(win.hwnd) == 0) return;
-        defer _ = win32_backend.CloseClipboard();
-
-        const hmem = win32_backend.GetClipboardData(1) orelse return; // CF_TEXT
-        const ptr = win32_backend.GlobalLock(hmem) orelse return;
-        defer _ = win32_backend.GlobalUnlock(hmem);
-
-        const data: [*]const u8 = @ptrCast(ptr);
-        var len: usize = 0;
-        while (data[len] != 0) : (len += 1) {}
-
-        if (len > 0) {
-            std.debug.print("Pasting {} bytes from clipboard\n", .{len});
-            _ = surface.pty.write(data[0..len]) catch {};
-        }
-    }
-
-    // --- Fullscreen toggle (Win32 native) ---
-
-    var saved_style: win32_backend.DWORD = 0;
-    var saved_rect: win32_backend.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
-    var is_fullscreen: bool = false;
-
-    fn toggleFullscreen() void {
-        const win = g_window orelse return;
-
-        if (is_fullscreen) {
-            // Restore windowed mode
-            _ = win32_backend.SetWindowLongW(win.hwnd, -16, @bitCast(saved_style)); // GWL_STYLE
-            _ = win32_backend.SetWindowPos(
-                win.hwnd, null,
-                saved_rect.left, saved_rect.top,
-                saved_rect.right - saved_rect.left,
-                saved_rect.bottom - saved_rect.top,
-                0x0020 | 0x0040, // SWP_FRAMECHANGED | SWP_SHOWWINDOW
-            );
-            is_fullscreen = false;
-            if (g_window) |w| w.is_fullscreen = false;
-            std.debug.print("Exited fullscreen\n", .{});
-        } else {
-            // Save current state
-            _ = win32_backend.GetWindowRect(win.hwnd, &saved_rect);
-            saved_style = @bitCast(win32_backend.GetWindowLongW(win.hwnd, -16));
-
-            // Set borderless style
-            const new_style = saved_style & ~@as(u32, 0x00CF0000); // remove WS_OVERLAPPEDWINDOW
-            _ = win32_backend.SetWindowLongW(win.hwnd, -16, @bitCast(new_style));
-
-            // Get monitor info for the monitor containing this window
-            const monitor = win32_backend.MonitorFromWindow(win.hwnd, 0x00000002) orelse return; // MONITOR_DEFAULTTONEAREST
-            var mi = win32_backend.MONITORINFO{ .cbSize = @sizeOf(win32_backend.MONITORINFO) };
-            if (win32_backend.GetMonitorInfoW(monitor, &mi) != 0) {
-                _ = win32_backend.SetWindowPos(
-                    win.hwnd, null,
-                    mi.rcMonitor.left, mi.rcMonitor.top,
-                    mi.rcMonitor.right - mi.rcMonitor.left,
-                    mi.rcMonitor.bottom - mi.rcMonitor.top,
-                    0x0020 | 0x0040, // SWP_FRAMECHANGED | SWP_SHOWWINDOW
-                );
-            }
-            is_fullscreen = true;
-            if (g_window) |w| w.is_fullscreen = true;
-            std.debug.print("Entered fullscreen\n", .{});
-        }
-    }
-};
+// Input handling moved to appwindow/input.zig
 
 fn setProjection(width: f32, height: f32) void {
     const projection = [16]f32{
@@ -3934,7 +3017,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     std.debug.print("g_start_fullscreen = {}\n", .{g_start_fullscreen});
     if (g_start_fullscreen) {
         std.debug.print("Entering fullscreen at startup...\n", .{});
-        win32_input.toggleFullscreen();
+        input.toggleFullscreen();
     }
 
     // Main loop — shared logic with backend-specific window management
@@ -3999,7 +3082,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         win.tab_count = tab.g_tab_count;
 
         // Process all queued input events (keyboard, mouse, resize)
-        win32_input.processEvents(win);
+        input.processEvents(win);
 
         // Update focus state
         if (window_focused != win.focused) g_force_rebuild = true;
