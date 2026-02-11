@@ -10,7 +10,7 @@ const font = AppWindow.font;
 const tab = AppWindow.tab;
 const cell_renderer = AppWindow.cell_renderer;
 const gl_init = AppWindow.gl_init;
-const win32_backend = @import("../win32.zig");
+const win32_backend = @import("../apprt/win32.zig");
 const c = @cImport({
     @cInclude("glad/gl.h");
 });

@@ -13,7 +13,7 @@ const gl_init = AppWindow.gl_init;
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const renderer = @import("../renderer.zig");
-const win32_backend = @import("../win32.zig");
+const win32_backend = @import("../apprt/win32.zig");
 
 const TabState = tab.TabState;
 pub const MAX_SPLITS_PER_TAB = tab.MAX_SPLITS_PER_TAB;

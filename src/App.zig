@@ -8,7 +8,7 @@ const std = @import("std");
 const Config = @import("config.zig");
 const AppWindow = @import("AppWindow.zig");
 const directwrite = @import("directwrite.zig");
-const win32_backend = @import("win32.zig");
+const win32_backend = @import("apprt/win32.zig");
 
 extern "user32" fn MonitorFromPoint(pt: win32_backend.POINT, dwFlags: u32) callconv(.winapi) ?win32_backend.HMONITOR;
 

@@ -8,7 +8,7 @@ const std = @import("std");
 const Config = @import("../config.zig");
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
-const win32_backend = @import("../win32.zig");
+const win32_backend = @import("../apprt/win32.zig");
 
 const CursorStyle = Config.CursorStyle;
 const Selection = Surface.Selection;

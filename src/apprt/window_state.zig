@@ -5,7 +5,7 @@
 //! on a visible monitor before applying.
 
 const std = @import("std");
-const win32_backend = @import("../win32.zig");
+const win32_backend = @import("win32.zig");
 
 /// Saved window position state.
 pub const WindowState = struct {

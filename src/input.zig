@@ -5,17 +5,17 @@
 //! split divider dragging, and fullscreen toggle.
 
 const std = @import("std");
-const AppWindow = @import("../AppWindow.zig");
+const AppWindow = @import("AppWindow.zig");
 const tab = AppWindow.tab;
 const titlebar = AppWindow.titlebar;
 const font = AppWindow.font;
 const overlays = AppWindow.overlays;
 const split_layout = AppWindow.split_layout;
 const window_state = AppWindow.window_state;
-const win32_backend = @import("../win32.zig");
-const Config = @import("../config.zig");
-const Surface = @import("../Surface.zig");
-const SplitTree = @import("../split_tree.zig");
+const win32_backend = @import("apprt/win32.zig");
+const Config = @import("config.zig");
+const Surface = @import("Surface.zig");
+const SplitTree = @import("split_tree.zig");
 const Selection = Surface.Selection;
 
 // Selection + divider drag state (moved from AppWindow.zig)

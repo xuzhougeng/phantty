@@ -7,9 +7,9 @@
 const std = @import("std");
 const freetype = @import("freetype");
 const harfbuzz = @import("harfbuzz");
-const sprite = @import("../font/sprite.zig");
+const sprite = @import("sprite.zig");
 const directwrite = @import("../directwrite.zig");
-const embedded = @import("../font/embedded.zig");
+const embedded = @import("embedded.zig");
 const Config = @import("../config.zig");
 const AppWindow = @import("../AppWindow.zig");
 
@@ -17,7 +17,7 @@ const c = @cImport({
     @cInclude("glad/gl.h");
 });
 
-pub const FontAtlas = @import("../font/Atlas.zig");
+pub const FontAtlas = @import("Atlas.zig");
 
 const Theme = Config.Theme;
 
