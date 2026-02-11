@@ -397,7 +397,7 @@ pub fn renderResizeOverlayWithOffset(window_width: f32, window_height: f32, top_
 pub fn renderResizeOverlayForSurface(surface: *Surface, window_width: f32, window_height: f32) void {
     // Show during divider dragging OR during timed split resize overlay (equalize, keyboard resize)
     const show_timed = std.time.milliTimestamp() < g_split_resize_overlay_until;
-    if (!AppWindow.g_divider_dragging and !show_timed) return;
+    if (!AppWindow.input.g_divider_dragging and !show_timed) return;
     if (!surface.resize_overlay_active) return;
 
     const cols = surface.size.grid.cols;

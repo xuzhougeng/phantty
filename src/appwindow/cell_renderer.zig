@@ -112,7 +112,7 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         if (viewport_active != rend.last_viewport_active) break :blk true;
         if (terminal.rows != rend.last_rows or terminal.cols != rend.last_cols) break :blk true;
         if (selection_active != rend.last_selection_active) break :blk true;
-        if (AppWindow.g_selecting) break :blk true;
+        if (AppWindow.input.g_selecting) break :blk true;
         // Cursor position changed — need to rebuild so cursor bg is at the right cell
         if (screen.cursor.x != rend.last_cursor_x or
             @as(?*anyopaque, screen.cursor.page_pin.node) != rend.last_cursor_node or
@@ -471,7 +471,7 @@ pub fn isCellSelected(col: usize, row: usize) bool {
     if (!selection.active) return false;
 
     // Convert screen row to absolute
-    const vp_off = AppWindow.viewportOffset();
+    const vp_off = AppWindow.input.viewportOffset();
     const abs_row = vp_off + row;
 
     var start_row = selection.start_row;

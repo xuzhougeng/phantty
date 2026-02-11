@@ -285,22 +285,6 @@ pub threadlocal var g_allocator: ?std.mem.Allocator = null;
 const Selection = Surface.Selection;
 
 pub threadlocal var g_should_close: bool = false; // Set by Ctrl+W with 1 tab
-pub threadlocal var g_selecting: bool = false; // True while mouse button is held
-pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
-pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
-
-// Scrollbar, resize overlay, debug overlays, split rendering — moved to appwindow/overlays.zig
-
-// ============================================================================
-// Split divider dragging — resize splits by dragging the divider
-// ============================================================================
-
-const SPLIT_DIVIDER_HIT_WIDTH: f32 = 8; // Larger hit area for easier grabbing
-
-pub threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
-pub threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
-pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
-pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
 
 // Tab model — see appwindow/tab.zig
 const TabState = tab.TabState;
@@ -369,7 +353,7 @@ pub fn hitTestDivider(x: i32, y: i32) ?DividerHit {
 
     const xf: f32 = @floatFromInt(x);
     const yf: f32 = @floatFromInt(y);
-    const half_hit = SPLIT_DIVIDER_HIT_WIDTH / 2;
+    const half_hit = input.SPLIT_DIVIDER_HIT_WIDTH / 2;
 
     // Check each split node for divider hit
     for (active_tab.tree.nodes, 0..) |node, i| {
@@ -505,13 +489,13 @@ fn computeSplitLayout(
             g_force_rebuild = true;
             // Show resize overlay with new dimensions (but not during divider drag,
             // which has its own per-surface overlay logic)
-            if (!g_divider_dragging) {
+            if (!input.g_divider_dragging) {
                 overlays.resizeOverlayShow(surface.size.grid.cols, surface.size.grid.rows);
             }
         }
 
         // Track per-surface size changes for divider drag overlay
-        if (g_divider_dragging) {
+        if (input.g_divider_dragging) {
             const cols = surface.size.grid.cols;
             const rows = surface.size.grid.rows;
             if (cols != surface.resize_overlay_last_cols or rows != surface.resize_overlay_last_rows) {
@@ -562,10 +546,10 @@ pub fn isActiveTabTerminal() bool {
 
 /// Clear UI state after tab creation or switch.
 fn clearUiStateOnTabChange() void {
-    g_selecting = false;
-    g_divider_dragging = false;
-    g_divider_drag_handle = null;
-    g_divider_drag_layout = null;
+    input.g_selecting = false;
+    input.g_divider_dragging = false;
+    input.g_divider_drag_handle = null;
+    input.g_divider_drag_layout = null;
     overlays.g_resize_overlay_visible = false;
     overlays.g_resize_overlay_opacity = 0;
     overlays.g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
@@ -601,7 +585,7 @@ pub fn spawnTab(allocator: std.mem.Allocator) bool {
 pub fn closeTab(idx: usize) void {
     const allocator = g_allocator orelse return;
     tab.closeTab(idx, allocator);
-    g_selecting = false;
+    input.g_selecting = false;
     g_force_rebuild = true;
     g_cells_valid = false;
 }
@@ -638,7 +622,7 @@ pub fn closeFocusedSplit() void {
             g_cells_valid = false;
         },
         .closed_tab => {
-            g_selecting = false;
+            input.g_selecting = false;
             g_force_rebuild = true;
             g_cells_valid = false;
         },
@@ -666,22 +650,6 @@ pub fn equalizeSplits() void {
     }
 }
 
-pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
-    const t = tab.activeTab() orelse return;
-    for (0..g_split_rect_count) |i| {
-        const rect = g_split_rects[i];
-        if (mouse_x >= rect.x and mouse_x < rect.x + rect.width and
-            mouse_y >= rect.y and mouse_y < rect.y + rect.height)
-        {
-            if (rect.handle != t.focused) {
-                t.focused = rect.handle;
-                g_force_rebuild = true;
-                g_cells_valid = false;
-            }
-            return;
-        }
-    }
-}
 
 // Embed the font
 // Embedded fallback font (JetBrains Mono, like Ghostty)
@@ -695,94 +663,13 @@ pub threadlocal var term_rows: u16 = 24;
 // OpenGL context from glad
 pub threadlocal var gl: c.GladGLContext = undefined;
 
-// Convenience aliases for font types used throughout this file
-const Character = font.Character;
-const FontAtlas = font.FontAtlas;
-const GlyphUV = font.GlyphUV;
-
 pub threadlocal var vao: c.GLuint = 0;
 pub threadlocal var vbo: c.GLuint = 0;
 pub threadlocal var shader_program: c.GLuint = 0;
 
-// ============================================================================
-// Instanced rendering — BG + FG cell buffers
-// ============================================================================
-
-/// Per-instance data for background cells (one per grid cell with non-default bg).
-const CellBg = extern struct {
-    grid_col: f32,
-    grid_row: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-};
-
-/// Per-instance data for foreground cells (one per visible glyph).
-const CellFg = extern struct {
-    grid_col: f32,
-    grid_row: f32,
-    glyph_x: f32, // offset from cell left to glyph left
-    glyph_y: f32, // offset from cell bottom to glyph bottom
-    glyph_w: f32, // glyph width in pixels
-    glyph_h: f32, // glyph height in pixels
-    uv_left: f32,
-    uv_top: f32,
-    uv_right: f32,
-    uv_bottom: f32,
-    r: f32,
-    g: f32,
-    b: f32,
-};
-
-// Max cells = 300 cols x 100 rows = 30000 (generous)
-const MAX_CELLS = 30000;
-threadlocal var bg_cells: [MAX_CELLS]CellBg = undefined;
-threadlocal var fg_cells: [MAX_CELLS]CellFg = undefined;
-threadlocal var color_fg_cells: [MAX_CELLS]CellFg = undefined; // Color emoji cells (separate draw pass)
-threadlocal var bg_cell_count: usize = 0;
-threadlocal var fg_cell_count: usize = 0;
-threadlocal var color_fg_cell_count: usize = 0;
-
-// Snapshot buffer: resolved cell data copied under the lock so that
-// rebuildCells can run outside the lock (like Ghostty's RenderState).
-const SnapCell = struct {
-    codepoint: u21,
-    fg: [3]f32,
-    bg: ?[3]f32,
-    wide: enum(u2) { narrow = 0, wide = 1, spacer_tail = 2, spacer_head = 3 } = .narrow,
-    grapheme: [font.MAX_GRAPHEME]u21 = .{0} ** font.MAX_GRAPHEME,
-    grapheme_len: u4 = 0, // 0 = single codepoint, >0 = multi-codepoint cluster
-};
-const MAX_SNAP = MAX_CELLS;
-threadlocal var g_snap: [MAX_SNAP]SnapCell = undefined;
-threadlocal var g_snap_rows: usize = 0;
-threadlocal var g_snap_cols: usize = 0;
-
 // Dirty tracking — skip rebuildCells when nothing changed
-pub threadlocal var g_cells_valid: bool = false; // true if bg_cells/fg_cells have valid data from a previous rebuild
-pub threadlocal var g_force_rebuild: bool = true; // set on resize, scroll, selection, theme change
-threadlocal var g_last_cursor_blink_visible: bool = true; // track cursor blink transitions
-
-// Cached cursor state for lock-free rendering (used when tryLock fails)
-threadlocal var g_cached_cursor_x: usize = 0;
-threadlocal var g_cached_cursor_y: usize = 0;
-threadlocal var g_cached_cursor_style: CursorStyle = .block;
-threadlocal var g_cached_cursor_effective: ?CursorStyle = .block;
-threadlocal var g_cached_cursor_visible: bool = true;
-threadlocal var g_cached_cursor_in_viewport: bool = true; // cursor is within visible viewport
-threadlocal var g_cached_viewport_at_bottom: bool = true;
-
-threadlocal var g_last_viewport_active: bool = true; // track viewport position changes (scroll)
-// Viewport pin tracking — detects scroll position changes (like Ghostty's RenderState.viewport_pin)
-threadlocal var g_last_viewport_node: ?*anyopaque = null;
-threadlocal var g_last_viewport_y: usize = 0;
-// Cursor pin tracking — detects cursor position changes
-threadlocal var g_last_cursor_node: ?*anyopaque = null;
-threadlocal var g_last_cursor_pin_y: usize = 0;
-threadlocal var g_last_cursor_x: usize = 0;
-threadlocal var g_last_cols: usize = 0; // detect resize
-threadlocal var g_last_rows: usize = 0; // detect resize
-threadlocal var g_last_selection_active: bool = false; // detect selection changes
+pub threadlocal var g_cells_valid: bool = false;
+pub threadlocal var g_force_rebuild: bool = true;
 
 // GL objects for instanced rendering
 pub threadlocal var bg_shader: c.GLuint = 0;
@@ -908,12 +795,9 @@ const overlay_fragment_source: [*c]const u8 =
 pub threadlocal var overlay_shader: c.GLuint = 0;
 pub threadlocal var window_focused: bool = true; // Track window focus state
 
-// Fullscreen state (Alt+Enter to toggle)
-threadlocal var g_is_fullscreen: bool = false;
-threadlocal var g_windowed_x: c_int = 0; // Saved windowed position/size for restore
+// Saved windowed position for restore (used by window state persistence)
+threadlocal var g_windowed_x: c_int = 0;
 threadlocal var g_windowed_y: c_int = 0;
-threadlocal var g_windowed_width: c_int = 800;
-threadlocal var g_windowed_height: c_int = 600;
 
 // ============================================================================
 // Window state persistence — save/restore position across sessions
@@ -1023,7 +907,6 @@ const CURSOR_BLINK_INTERVAL_MS: i64 = 600; // Blink interval in ms (same as Ghos
 
 const ConfigWatcher = @import("config_watcher.zig");
 
-// FPS debug overlay state — moved to appwindow/overlays.zig
 pub threadlocal var g_draw_call_count: u32 = 0; // Reset each frame, incremented on each glDraw* call
 
 const vertex_shader_source: [*c]const u8 =
@@ -1165,8 +1048,8 @@ fn initInstancedBuffers() void {
 
     // Attrs 1-2: per-instance BG data
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, bg_instance_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(CellBg) * MAX_CELLS, null, c.GL_STREAM_DRAW);
-    const bg_stride: c.GLsizei = @sizeOf(CellBg);
+    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellBg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
+    const bg_stride: c.GLsizei = @sizeOf(Renderer.CellBg);
     // Attr 1: grid_col, grid_row
     gl.EnableVertexAttribArray.?(1);
     gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, bg_stride, @ptrFromInt(0));
@@ -1190,8 +1073,8 @@ fn initInstancedBuffers() void {
 
     // Attrs 1-4: per-instance FG data
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, fg_instance_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(CellFg) * MAX_CELLS, null, c.GL_STREAM_DRAW);
-    const fg_stride: c.GLsizei = @sizeOf(CellFg);
+    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellFg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
+    const fg_stride: c.GLsizei = @sizeOf(Renderer.CellFg);
     // Attr 1: grid_col, grid_row
     gl.EnableVertexAttribArray.?(1);
     gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(0));
@@ -1221,7 +1104,7 @@ fn initInstancedBuffers() void {
     gl.VertexAttribPointer.?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
 
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, color_fg_instance_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(CellFg) * MAX_CELLS, null, c.GL_STREAM_DRAW);
+    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellFg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
     gl.EnableVertexAttribArray.?(1);
     gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(0));
     gl.VertexAttribDivisor.?(1, 1);
@@ -1254,17 +1137,6 @@ fn initInstancedBuffers() void {
     if (overlay_shader == 0) std.debug.print("Overlay shader failed\n", .{});
 }
 
-// Font functions moved to appwindow/font.zig
-
-// Titlebar functions moved to appwindow/titlebar.zig
-// (renderTitlebarChar, titlebarGlyphAdvance, renderBellEmoji, renderIconGlyph,
-//  renderTitlebar, CaptionButtonType, renderCaptionButton, renderPlaceholderTab)
-
-// renderChar moved to appwindow/cell_renderer.zig
-// Cell rendering functions (snapshotCells, rebuildCells, updateTerminalCells,
-// drawCells, cursorEffectiveStyleForRenderer, currentRenderSelection,
-// updateTerminalCellsForSurface) moved to appwindow/cell_renderer.zig
-
 // Solid white texture for drawing filled quads
 threadlocal var solid_texture: c.GLuint = 0;
 
@@ -1277,13 +1149,8 @@ fn initSolidTexture() void {
     gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
 }
 
-// Split rendering helpers (renderUnfocusedOverlay, renderUnfocusedOverlaySimple,
-// renderSplitDividers) moved to appwindow/overlays.zig
-
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
 pub threadlocal var g_focus_follows_mouse: bool = false;
-
-// Post-processing custom shader system moved to appwindow/post_process.zig
 
 pub fn renderQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
     renderQuadAlpha(x, y, w, h, color, 1.0);
@@ -1448,8 +1315,6 @@ fn drawRendererFBOToScreen(rend: *Renderer, x: f32, y: f32, w: f32, h: f32, wind
     gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
     g_draw_call_count += 1;
 }
-
-// Scrollbar, resize overlay, debug overlays, FPS counter — moved to appwindow/overlays.zig
 
 /// Update cursor blink state based on time (call once per frame)
 fn updateCursorBlink() void {
@@ -1724,29 +1589,6 @@ fn handleBell(surface: *Surface, win: *win32_backend.Window, is_active_tab: bool
 // Shared helpers (used by both backends)
 // ============================================================================
 
-// Convert mouse position to terminal cell coordinates
-/// Get the viewport's absolute row offset into the scrollback.
-/// Row 0 on screen corresponds to absolute row `viewportOffset()`.
-pub fn viewportOffset() usize {
-    const surface = activeSurface() orelse return 0;
-    return surface.terminal.screens.active.pages.scrollbar().offset;
-}
-
-pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
-    const padding_d: f64 = 10;
-    const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const col_f = (xpos - padding_d) / @as(f64, font.cell_width);
-    const row_f = (ypos - padding_d - tb_d) / @as(f64, font.cell_height);
-
-    const col = if (col_f < 0) 0 else if (col_f >= @as(f64, @floatFromInt(term_cols))) term_cols - 1 else @as(usize, @intFromFloat(col_f));
-    const row = if (row_f < 0) 0 else if (row_f >= @as(f64, @floatFromInt(term_rows))) term_rows - 1 else @as(usize, @intFromFloat(row_f));
-
-    return .{ .col = col, .row = row };
-}
-
-// Cell rendering functions moved to appwindow/cell_renderer.zig
-
-// Input handling moved to appwindow/input.zig
 
 pub fn setProjection(width: f32, height: f32) void {
     const projection = [16]f32{
@@ -2354,7 +2196,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                         // - During divider dragging or timed overlay (equalize): show on ALL splits
                         // - Otherwise: show only on focused split (for window resize)
                         const show_timed_overlay = std.time.milliTimestamp() < overlays.g_split_resize_overlay_until;
-                        if (g_divider_dragging or show_timed_overlay) {
+                        if (input.g_divider_dragging or show_timed_overlay) {
                             overlays.renderResizeOverlayForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height));
                         } else if (is_focused) {
                             overlays.renderResizeOverlay(@floatFromInt(rect.width), @floatFromInt(rect.height));

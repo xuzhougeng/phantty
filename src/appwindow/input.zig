@@ -16,11 +16,65 @@ const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const Selection = Surface.Selection;
 
+// Selection + divider drag state (moved from AppWindow.zig)
+pub threadlocal var g_selecting: bool = false; // True while mouse button is held
+pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
+pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
+
+pub const SPLIT_DIVIDER_HIT_WIDTH: f32 = 8; // Larger hit area for easier grabbing
+
+pub threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
+pub threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
+pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
+pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
+
 // Internal state (moved from win32_input struct)
 threadlocal var plus_btn_pressed: bool = false;
 threadlocal var saved_style: win32_backend.DWORD = 0;
 threadlocal var saved_rect: win32_backend.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
 threadlocal var is_fullscreen: bool = false;
+
+// ============================================================================
+// Shared helpers (used by input + cell_renderer)
+// ============================================================================
+
+/// Get the viewport's absolute row offset into the scrollback.
+/// Row 0 on screen corresponds to absolute row `viewportOffset()`.
+pub fn viewportOffset() usize {
+    const surface = AppWindow.activeSurface() orelse return 0;
+    return surface.terminal.screens.active.pages.scrollbar().offset;
+}
+
+/// Convert mouse position to terminal cell coordinates.
+pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
+    const padding_d: f64 = 10;
+    const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const col_f = (xpos - padding_d) / @as(f64, font.cell_width);
+    const row_f = (ypos - padding_d - tb_d) / @as(f64, font.cell_height);
+
+    const col = if (col_f < 0) 0 else if (col_f >= @as(f64, @floatFromInt(AppWindow.term_cols))) AppWindow.term_cols - 1 else @as(usize, @intFromFloat(col_f));
+    const row = if (row_f < 0) 0 else if (row_f >= @as(f64, @floatFromInt(AppWindow.term_rows))) AppWindow.term_rows - 1 else @as(usize, @intFromFloat(row_f));
+
+    return .{ .col = col, .row = row };
+}
+
+/// Update split focus based on mouse position (focus follows mouse).
+pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
+    const t = tab.activeTab() orelse return;
+    for (0..AppWindow.g_split_rect_count) |i| {
+        const rect = AppWindow.g_split_rects[i];
+        if (mouse_x >= rect.x and mouse_x < rect.x + rect.width and
+            mouse_y >= rect.y and mouse_y < rect.y + rect.height)
+        {
+            if (rect.handle != t.focused) {
+                t.focused = rect.handle;
+                AppWindow.g_force_rebuild = true;
+                AppWindow.g_cells_valid = false;
+            }
+            return;
+        }
+    }
+}
 
 /// Process all queued Win32 input events. Called once per frame from the main loop.
 pub fn processEvents(win: *win32_backend.Window) void {
@@ -407,7 +461,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             }
 
             // Click in terminal content area: update split focus
-            AppWindow.updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
+            updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
 
             // Check if click is on the scrollbar
             const win = AppWindow.g_window orelse return;
@@ -437,9 +491,9 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
 
             // Check if click is on a split divider
             if (AppWindow.hitTestDivider(ev.x, ev.y)) |hit| {
-                AppWindow.g_divider_dragging = true;
-                AppWindow.g_divider_drag_handle = hit.handle;
-                AppWindow.g_divider_drag_layout = hit.layout;
+                g_divider_dragging = true;
+                g_divider_drag_handle = hit.handle;
+                g_divider_drag_layout = hit.layout;
                 // Initialize per-surface resize tracking with current sizes
                 // so we only show overlays on surfaces that actually change
                 if (AppWindow.activeTab()) |tb| {
@@ -466,26 +520,26 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 }
             }
 
-            const cell_pos = AppWindow.mouseToCell(xpos, ypos);
-            const abs_row = AppWindow.viewportOffset() + cell_pos.row;
+            const cell_pos = mouseToCell(xpos, ypos);
+            const abs_row = viewportOffset() + cell_pos.row;
             // Start selection on the clicked surface
             clicked_surface.selection.start_col = cell_pos.col;
             clicked_surface.selection.start_row = abs_row;
             clicked_surface.selection.end_col = cell_pos.col;
             clicked_surface.selection.end_row = abs_row;
             clicked_surface.selection.active = false;
-            AppWindow.g_selecting = true;
-            AppWindow.g_click_x = xpos;
-            AppWindow.g_click_y = ypos;
+            g_selecting = true;
+            g_click_x = xpos;
+            g_click_y = ypos;
         } else {
             // Mouse up
             overlays.g_scrollbar_dragging = false;
 
             // Handle divider drag release
-            if (AppWindow.g_divider_dragging) {
-                AppWindow.g_divider_dragging = false;
-                AppWindow.g_divider_drag_handle = null;
-                AppWindow.g_divider_drag_layout = null;
+            if (g_divider_dragging) {
+                g_divider_dragging = false;
+                g_divider_drag_handle = null;
+                g_divider_drag_layout = null;
                 // Reset per-surface resize overlay state
                 if (AppWindow.activeTab()) |tb| {
                     var it = tb.tree.iterator();
@@ -520,7 +574,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 }
                 return;
             }
-            AppWindow.g_selecting = false;
+            g_selecting = false;
         }
     }
 }
@@ -655,8 +709,8 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     const ypos: f64 = @floatFromInt(ev.y);
 
     // Handle divider dragging
-    if (AppWindow.g_divider_dragging) {
-        if (AppWindow.g_divider_drag_handle) |handle| {
+    if (g_divider_dragging) {
+        if (g_divider_drag_handle) |handle| {
             const active_tab = AppWindow.activeTab() orelse return;
             const allocator = AppWindow.g_allocator orelse return;
 
@@ -673,7 +727,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(AppWindow.DEFAULT_PADDING)));
 
             const slot = spatial.slots[handle.idx()];
-            const layout = AppWindow.g_divider_drag_layout orelse return;
+            const layout = g_divider_drag_layout orelse return;
 
             // Calculate new ratio based on mouse position
             const new_ratio: f16 = switch (layout) {
@@ -704,7 +758,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 
     // Focus follows mouse: check if mouse is over a different split
     if (AppWindow.g_focus_follows_mouse) {
-        AppWindow.updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
+        updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
     }
 
     // Update scrollbar hover state
@@ -729,7 +783,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     }
 
     // Check for divider hover and update cursor
-    if (!overlays.g_scrollbar_hover and !AppWindow.g_selecting) {
+    if (!overlays.g_scrollbar_hover and !g_selecting) {
         if (AppWindow.hitTestDivider(ev.x, ev.y)) |hit| {
             // Set resize cursor based on layout
             const cursor_id = switch (hit.layout) {
@@ -737,25 +791,25 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
                 .vertical => win32_backend.IDC_SIZENS, // up-down resize
             };
             _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
-            AppWindow.g_divider_hover = true;
-        } else if (AppWindow.g_divider_hover) {
+            g_divider_hover = true;
+        } else if (g_divider_hover) {
             // Reset to default cursor when leaving divider
             _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
-            AppWindow.g_divider_hover = false;
+            g_divider_hover = false;
         }
     }
 
     // Normal selection handling
-    if (!AppWindow.g_selecting) return;
+    if (!g_selecting) return;
 
-    const cell_pos = AppWindow.mouseToCell(xpos, ypos);
-    const abs_row = AppWindow.viewportOffset() + cell_pos.row;
+    const cell_pos = mouseToCell(xpos, ypos);
+    const abs_row = viewportOffset() + cell_pos.row;
     AppWindow.activeSelection().end_col = cell_pos.col;
     AppWindow.activeSelection().end_row = abs_row;
 
     const threshold = font.cell_width * 0.6;
     const padding_d: f64 = 10;
-    const click_cell_x = AppWindow.g_click_x - padding_d - @as(f64, @floatFromInt(AppWindow.activeSelection().start_col)) * @as(f64, font.cell_width);
+    const click_cell_x = g_click_x - padding_d - @as(f64, @floatFromInt(AppWindow.activeSelection().start_col)) * @as(f64, font.cell_width);
     const drag_cell_x = xpos - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, font.cell_width);
 
     const same_cell = (AppWindow.activeSelection().start_col == cell_pos.col and AppWindow.activeSelection().start_row == abs_row);
