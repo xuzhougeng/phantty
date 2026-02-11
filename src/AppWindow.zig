@@ -7,7 +7,6 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const freetype = @import("freetype");
-const Pty = @import("pty.zig").Pty;
 const directwrite = @import("directwrite.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
@@ -418,7 +417,7 @@ fn onWin32Resize(width: i32, height: i32) void {
                     entry.surface.render_state.mutex.lock();
                     entry.surface.terminal.resize(allocator, term_cols, term_rows) catch {};
                     entry.surface.render_state.mutex.unlock();
-                    entry.surface.pty.resize(term_cols, term_rows);
+                    entry.surface.pty.setSize(.{ .ws_col = term_cols, .ws_row = term_rows }) catch {};
                 }
             }
         }
@@ -578,7 +577,7 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
                     entry.surface.render_state.mutex.lock();
                     entry.surface.terminal.resize(allocator, term_cols, term_rows) catch {};
                     entry.surface.render_state.mutex.unlock();
-                    entry.surface.pty.resize(term_cols, term_rows);
+                    entry.surface.pty.setSize(.{ .ws_col = term_cols, .ws_row = term_rows }) catch {};
                 }
             }
         }
@@ -1003,7 +1002,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                                 };
                                 entry.surface.render_state.mutex.unlock();
                                 // PTY resize doesn't need the mutex (independent Win32 call)
-                                entry.surface.pty.resize(term_cols, term_rows);
+                                entry.surface.pty.setSize(.{ .ws_col = term_cols, .ws_row = term_rows }) catch {};
                             }
                         }
                     }

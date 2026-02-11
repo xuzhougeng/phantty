@@ -16,7 +16,20 @@ const win32_backend = @import("apprt/win32.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
 const SplitTree = @import("split_tree.zig");
+const windows = @import("std").os.windows;
 const Selection = Surface.Selection;
+
+/// Write data to the PTY's input pipe (us -> child stdin).
+fn writeToPty(surface: *Surface, data: []const u8) void {
+    var bytes_written: windows.DWORD = 0;
+    _ = windows.kernel32.WriteFile(
+        surface.pty.in_pipe,
+        data.ptr,
+        @intCast(data.len),
+        &bytes_written,
+        null,
+    );
+}
 
 // Selection + divider drag state (moved from AppWindow.zig)
 pub threadlocal var g_selecting: bool = false; // True while mouse button is held
@@ -184,7 +197,7 @@ fn handleChar(ev: win32_backend.CharEvent) void {
     }
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(ev.codepoint, &buf) catch return;
-    _ = surface.pty.write(buf[0..len]) catch {};
+    writeToPty(surface, buf[0..len]);
 }
 
 fn handleKey(ev: win32_backend.KeyEvent) void {
@@ -319,7 +332,6 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (!AppWindow.isActiveTabTerminal()) return;
 
     const surface = AppWindow.activeSurface() orelse return;
-    const pty = &surface.pty;
 
     // Track whether this keypress actually sends data to the PTY.
     // Like Ghostty, we only scroll-to-bottom when input is actually generated,
@@ -369,7 +381,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
                 // Don't send Ctrl+C/V when shift is held (those are copy/paste)
                 if (!ev.shift) {
                     const ctrl_char: u8 = @intCast(ev.vk - 0x41 + 1);
-                    _ = pty.write(&[_]u8{ctrl_char}) catch {};
+                    writeToPty(surface, &[_]u8{ctrl_char});
                     wrote_to_pty = true;
                 }
             }
@@ -378,7 +390,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     };
 
     if (seq) |s| {
-        _ = pty.write(s) catch {};
+        writeToPty(surface, s);
         wrote_to_pty = true;
     }
 
@@ -935,7 +947,7 @@ pub fn pasteFromClipboard() void {
 
     if (len > 0) {
         std.debug.print("Pasting {} bytes from clipboard\n", .{len});
-        _ = surface.pty.write(data[0..len]) catch {};
+        writeToPty(surface, data[0..len]);
     }
 }
 

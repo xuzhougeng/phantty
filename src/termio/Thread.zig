@@ -18,19 +18,11 @@
 const std = @import("std");
 const windows = std.os.windows;
 const Surface = @import("../Surface.zig");
+const win32 = @import("../apprt/win32.zig");
 
 const Thread = @This();
 
 const READ_BUF_SIZE = 1024;
-
-extern "kernel32" fn PeekNamedPipe(
-    hNamedPipe: windows.HANDLE,
-    lpBuffer: ?*anyopaque,
-    nBufferSize: windows.DWORD,
-    lpBytesRead: ?*windows.DWORD,
-    lpTotalBytesAvail: ?*windows.DWORD,
-    lpBytesLeftThisMessage: ?*windows.DWORD,
-) callconv(.winapi) windows.BOOL;
 
 /// The thread entry point. Runs a blocking read loop on the Surface's PTY.
 pub fn threadMain(surface: *Surface) void {
@@ -40,10 +32,11 @@ pub fn threadMain(surface: *Surface) void {
         if (surface.exited.load(.acquire)) return;
 
         // First read — blocks until data is available.
-        const bytes_read = surface.pty.read(&buf) catch {
+        var bytes_read: windows.DWORD = 0;
+        if (windows.kernel32.ReadFile(surface.pty.out_pipe, &buf, READ_BUF_SIZE, &bytes_read, null) == 0) {
             surface.exited.store(true, .release);
             return;
-        };
+        }
 
         if (bytes_read == 0) {
             surface.exited.store(true, .release);
@@ -59,7 +52,7 @@ pub fn threadMain(surface: *Surface) void {
             var stream = surface.vtStream();
 
             // Process the first chunk.
-            const data = buf[0..bytes_read];
+            const data = buf[0..@intCast(bytes_read)];
             stream.nextSlice(data) catch {};
             surface.scanForOscTitle(data);
 
@@ -71,14 +64,16 @@ pub fn threadMain(surface: *Surface) void {
             var coalesce_count: usize = 0;
             while (coalesce_count < MAX_COALESCE) : (coalesce_count += 1) {
                 var avail: windows.DWORD = 0;
-                if (PeekNamedPipe(surface.pty.pipe_in_read, null, 0, null, &avail, null) == 0)
+                if (win32.PeekNamedPipe(surface.pty.out_pipe, null, 0, null, &avail, null) == 0)
                     break;
                 if (avail == 0) break;
 
-                const extra = surface.pty.read(&buf) catch break;
-                if (extra == 0) break;
+                var extra_bytes: windows.DWORD = 0;
+                if (windows.kernel32.ReadFile(surface.pty.out_pipe, &buf, READ_BUF_SIZE, &extra_bytes, null) == 0)
+                    break;
+                if (extra_bytes == 0) break;
 
-                const extra_data = buf[0..extra];
+                const extra_data = buf[0..@intCast(extra_bytes)];
                 stream.nextSlice(extra_data) catch {};
                 surface.scanForOscTitle(extra_data);
             }

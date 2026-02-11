@@ -326,6 +326,142 @@ pub extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.win
 pub extern "kernel32" fn GlobalLock(hMem: *anyopaque) callconv(.winapi) ?*anyopaque;
 pub extern "kernel32" fn GlobalUnlock(hMem: *anyopaque) callconv(.winapi) BOOL;
 
+// ============================================================================
+// ConPTY, pipes, and process management
+// ============================================================================
+
+pub const HPCON = windows.HANDLE;
+pub const COORD = extern struct {
+    X: i16,
+    Y: i16,
+};
+pub const HRESULT = i32;
+pub const S_OK: HRESULT = 0;
+
+pub const SECURITY_ATTRIBUTES = extern struct {
+    nLength: DWORD,
+    lpSecurityDescriptor: ?*anyopaque,
+    bInheritHandle: BOOL,
+};
+
+pub const STARTUPINFOEXW = extern struct {
+    StartupInfo: windows.STARTUPINFOW,
+    lpAttributeList: ?*anyopaque,
+};
+
+// Process creation flags
+pub const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x00080000;
+pub const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x00000400;
+pub const PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE: usize = 0x00020016;
+pub const HANDLE_FLAG_INHERIT: DWORD = 0x00000001;
+
+// Named pipe constants
+pub const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
+pub const PIPE_ACCESS_OUTBOUND: DWORD = 0x00000002;
+pub const PIPE_TYPE_BYTE: DWORD = 0x00000000;
+pub const FILE_FLAG_FIRST_PIPE_INSTANCE: DWORD = 0x00080000;
+pub const GENERIC_READ: DWORD = 0x80000000;
+pub const OPEN_EXISTING: DWORD = 3;
+pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
+
+// Wait constants
+pub const WAIT_OBJECT_0: DWORD = 0x00000000;
+pub const WAIT_TIMEOUT: DWORD = 0x00000102;
+pub const INFINITE: DWORD = 0xFFFFFFFF;
+
+pub extern "kernel32" fn GetCurrentProcessId() callconv(.winapi) DWORD;
+pub extern "kernel32" fn SetHandleInformation(hObject: windows.HANDLE, dwMask: DWORD, dwFlags: DWORD) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn CreatePipe(
+    hReadPipe: *windows.HANDLE,
+    hWritePipe: *windows.HANDLE,
+    lpPipeAttributes: ?*const SECURITY_ATTRIBUTES,
+    nSize: DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn CreateNamedPipeW(
+    lpName: [*:0]const u16,
+    dwOpenMode: DWORD,
+    dwPipeMode: DWORD,
+    nMaxInstances: DWORD,
+    nOutBufferSize: DWORD,
+    nInBufferSize: DWORD,
+    nDefaultTimeOut: DWORD,
+    lpSecurityAttributes: ?*const SECURITY_ATTRIBUTES,
+) callconv(.winapi) windows.HANDLE;
+
+pub extern "kernel32" fn CreateFileW(
+    lpFileName: [*:0]const u16,
+    dwDesiredAccess: DWORD,
+    dwShareMode: DWORD,
+    lpSecurityAttributes: ?*const SECURITY_ATTRIBUTES,
+    dwCreationDisposition: DWORD,
+    dwFlagsAndAttributes: DWORD,
+    hTemplateFile: ?windows.HANDLE,
+) callconv(.winapi) windows.HANDLE;
+
+pub extern "kernel32" fn CreatePseudoConsole(
+    size: COORD,
+    hInput: windows.HANDLE,
+    hOutput: windows.HANDLE,
+    dwFlags: DWORD,
+    phPC: *HPCON,
+) callconv(.winapi) HRESULT;
+
+pub extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.winapi) void;
+
+pub extern "kernel32" fn ResizePseudoConsole(hPC: HPCON, size: COORD) callconv(.winapi) HRESULT;
+
+pub extern "kernel32" fn InitializeProcThreadAttributeList(
+    lpAttributeList: ?*anyopaque,
+    dwAttributeCount: DWORD,
+    dwFlags: DWORD,
+    lpSize: *usize,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn UpdateProcThreadAttribute(
+    lpAttributeList: ?*anyopaque,
+    dwFlags: DWORD,
+    Attribute: usize,
+    lpValue: ?*anyopaque,
+    cbSize: usize,
+    lpPreviousValue: ?*anyopaque,
+    lpReturnSize: ?*usize,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn DeleteProcThreadAttributeList(lpAttributeList: ?*anyopaque) callconv(.winapi) void;
+
+pub extern "kernel32" fn CreateProcessW(
+    lpApplicationName: ?[*:0]const u16,
+    lpCommandLine: ?[*:0]u16,
+    lpProcessAttributes: ?*SECURITY_ATTRIBUTES,
+    lpThreadAttributes: ?*SECURITY_ATTRIBUTES,
+    bInheritHandles: BOOL,
+    dwCreationFlags: DWORD,
+    lpEnvironment: ?*anyopaque,
+    lpCurrentDirectory: ?[*:0]const u16,
+    lpStartupInfo: *STARTUPINFOEXW,
+    lpProcessInformation: *windows.PROCESS_INFORMATION,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn PeekNamedPipe(
+    hNamedPipe: windows.HANDLE,
+    lpBuffer: ?*anyopaque,
+    nBufferSize: DWORD,
+    lpBytesRead: ?*DWORD,
+    lpTotalBytesAvail: ?*DWORD,
+    lpBytesLeftThisMessage: ?*DWORD,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn CancelIoEx(
+    hFile: windows.HANDLE,
+    lpOverlapped: ?*windows.OVERLAPPED,
+) callconv(.winapi) BOOL;
+
+pub extern "kernel32" fn WaitForSingleObject(hHandle: windows.HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn GetExitCodeProcess(hProcess: windows.HANDLE, lpExitCode: *DWORD) callconv(.winapi) BOOL;
+
 // Fullscreen
 pub extern "user32" fn GetWindowLongW(hWnd: HWND, nIndex: INT) callconv(.winapi) LONG;
 pub extern "user32" fn SetWindowLongW(hWnd: HWND, nIndex: INT, dwNewLong: LONG) callconv(.winapi) LONG;

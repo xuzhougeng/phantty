@@ -12,6 +12,8 @@
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const Pty = @import("pty.zig").Pty;
+const Command = @import("Command.zig");
+const win32 = @import("apprt/win32.zig");
 const renderer = @import("renderer.zig");
 const termio = @import("termio.zig");
 const Config = @import("config.zig");
@@ -21,13 +23,6 @@ const RendererThread = @import("RendererThread.zig");
 const windows = std.os.windows;
 
 const Surface = @This();
-
-/// CancelIoEx is not exposed by Zig's std library.
-/// We import it directly from kernel32.
-extern "kernel32" fn CancelIoEx(
-    hFile: windows.HANDLE,
-    lpOverlapped: ?*windows.OVERLAPPED,
-) callconv(.winapi) windows.BOOL;
 
 // ============================================================================
 // Types
@@ -95,6 +90,7 @@ pub const VtStream = ghostty_vt.Stream(VtHandler);
 
 terminal: ghostty_vt.Terminal,
 pty: Pty,
+command: Command,
 selection: Selection,
 render_state: renderer.State,
 
@@ -240,8 +236,17 @@ pub fn init(
     };
     surface.terminal.modes.set(.cursor_blinking, cursor_blink);
 
-    // Spawn PTY
-    surface.pty = Pty.spawn(cols, rows, shell_cmd, cwd) catch |err| {
+    // Open PTY (pipes + pseudo console, no process)
+    surface.pty = Pty.open(.{ .ws_col = cols, .ws_row = rows }) catch |err| {
+        surface.terminal.deinit(allocator);
+        return err;
+    };
+    errdefer surface.pty.deinit();
+
+    // Spawn child process attached to the pseudo console
+    surface.command = .{};
+    surface.command.start(surface.pty.pseudo_console, shell_cmd, cwd) catch |err| {
+        surface.pty.deinit();
         surface.terminal.deinit(allocator);
         return err;
     };
@@ -322,20 +327,23 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
     if (self.io_thread) |thread| {
         // Cancel the blocking ReadFile on the pipe handle.
         // Must happen BEFORE closing the handle (like Ghostty does).
-        const read_handle = self.pty.pipe_in_read;
-        if (read_handle != windows.INVALID_HANDLE_VALUE) {
-            _ = CancelIoEx(read_handle, null);
+        if (self.pty.out_pipe != windows.INVALID_HANDLE_VALUE) {
+            _ = win32.CancelIoEx(self.pty.out_pipe, null);
         }
 
         // Close the read pipe — causes ReadFile to fail with BROKEN_PIPE
         // if CancelIoEx didn't already unblock it.
-        self.pty.closeReadPipe();
+        if (self.pty.out_pipe != windows.INVALID_HANDLE_VALUE) {
+            windows.CloseHandle(self.pty.out_pipe);
+            self.pty.out_pipe = windows.INVALID_HANDLE_VALUE;
+        }
 
         thread.join();
         self.io_thread = null;
     }
 
     // 3. Now safe to tear down everything — no other thread is accessing.
+    self.command.deinit();
     self.pty.deinit();
     self.terminal.deinit(allocator);
     allocator.destroy(self);
@@ -420,8 +428,8 @@ pub fn setScreenSize(
         // Resize PTY first (like Ghostty), then terminal state.
         // This ensures the shell receives SIGWINCH before we reflow,
         // which helps keep the viewport and cursor in sync.
-        self.pty.resize(new_cols, new_rows);
-        
+        self.pty.setSize(.{ .ws_col = new_cols, .ws_row = new_rows }) catch {};
+
         self.render_state.mutex.lock();
         defer self.render_state.mutex.unlock();
 
