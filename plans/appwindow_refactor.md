@@ -83,7 +83,7 @@ Extract:
 
 Implementation approach: Copy `AppWindow.zig` → `font.zig`, delete everything except font code, add `pub` accessors.
 
-### Step 3: Extract `src/appwindow/cell_renderer.zig`
+### Step 3: Extract `src/appwindow/cell_renderer.zig` ✅
 **Why third**: Depends on font module being extracted first.
 
 Extract:
