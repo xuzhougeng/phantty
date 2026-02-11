@@ -12,6 +12,7 @@
 
 const std = @import("std");
 const AppWindow = @import("../AppWindow.zig");
+const gl_init = AppWindow.gl_init;
 const cell_renderer = AppWindow.cell_renderer;
 const Renderer = @import("../Renderer.zig");
 
@@ -103,11 +104,11 @@ fn initPostShader(allocator: std.mem.Allocator, shader_path: []const u8) bool {
     defer allocator.free(frag_source);
 
     // Compile vertex shader
-    const vert = AppWindow.compileShader(c.GL_VERTEX_SHADER, post_vertex_source) orelse return false;
+    const vert = gl_init.compileShader(c.GL_VERTEX_SHADER, post_vertex_source) orelse return false;
     defer gl.DeleteShader.?(vert);
 
     // Compile fragment shader
-    const frag = AppWindow.compileShader(c.GL_FRAGMENT_SHADER, frag_source.ptr) orelse return false;
+    const frag = gl_init.compileShader(c.GL_FRAGMENT_SHADER, frag_source.ptr) orelse return false;
     defer gl.DeleteShader.?(frag);
 
     // Link program
@@ -230,7 +231,7 @@ fn renderPostProcess(width: c_int, height: c_int) void {
     // Draw fullscreen quad
     gl.BindVertexArray.?(g_post_vao);
     gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    AppWindow.g_draw_call_count += 1;
+    gl_init.g_draw_call_count += 1;
     gl.BindVertexArray.?(0);
 
     // Re-enable blending for next terminal render pass
@@ -249,7 +250,7 @@ pub fn renderFrameWithPostFromCells(rend: *const Renderer, width: c_int, height:
     // 1. Render terminal to FBO
     gl.BindFramebuffer.?(c.GL_FRAMEBUFFER, g_post_fbo);
     gl.Viewport.?(0, 0, width, height);
-    AppWindow.setProjection(@floatFromInt(width), @floatFromInt(height));
+    gl_init.setProjection(@floatFromInt(width), @floatFromInt(height));
     gl.ClearColor.?(AppWindow.g_theme.background[0], AppWindow.g_theme.background[1], AppWindow.g_theme.background[2], 1.0);
     gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
     cell_renderer.drawCells(rend, @floatFromInt(height), padding, padding);

@@ -9,6 +9,7 @@ const AppWindow = @import("../AppWindow.zig");
 const font = AppWindow.font;
 const tab = AppWindow.tab;
 const cell_renderer = AppWindow.cell_renderer;
+const gl_init = AppWindow.gl_init;
 const win32_backend = @import("../win32.zig");
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -57,19 +58,19 @@ pub fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
             0.0,        0.0,         -1.0, 0.0,
             -1.0,       -1.0,        0.0,  1.0,
         };
-        gl.UseProgram.?(AppWindow.simple_color_shader);
-        gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(AppWindow.simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(AppWindow.simple_color_shader, "opacity"), 1.0);
+        gl.UseProgram.?(gl_init.simple_color_shader);
+        gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
+        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "opacity"), 1.0);
         // Premultiplied alpha blend for color emoji (BGRA bitmaps from FreeType)
         gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
         gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.vbo);
+        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); AppWindow.g_draw_call_count += 1;
+        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
         // Restore text shader and standard alpha blend
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-        gl.UseProgram.?(AppWindow.shader_program);
+        gl.UseProgram.?(gl_init.shader_program);
     } else {
         // Grayscale glyph — render with text shader from titlebar atlas
         const x0 = x + @as(f32, @floatFromInt(ch.bearing_x));
@@ -89,12 +90,12 @@ pub fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
             .{ x0 + w, y0 + h, uv.u1, uv.v0 },
         };
 
-        gl.Uniform3f.?(gl.GetUniformLocation.?(AppWindow.shader_program, "textColor"), color[0], color[1], color[2]);
+        gl.Uniform3f.?(gl.GetUniformLocation.?(gl_init.shader_program, "textColor"), color[0], color[1], color[2]);
         gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_titlebar_atlas_texture);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.vbo);
+        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); AppWindow.g_draw_call_count += 1;
+        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
     }
 }
 
@@ -150,19 +151,19 @@ pub fn renderBellEmoji(x: f32, y: f32, opacity: f32) void {
     };
 
     // Render with simple color shader (premultiplied alpha + opacity fade)
-    gl.UseProgram.?(AppWindow.simple_color_shader);
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(AppWindow.simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
-    gl.Uniform1f.?(gl.GetUniformLocation.?(AppWindow.simple_color_shader, "opacity"), opacity);
+    gl.UseProgram.?(gl_init.simple_color_shader);
+    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
+    gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "opacity"), opacity);
     gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
     gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.vbo);
+    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); AppWindow.g_draw_call_count += 1;
+    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
 
     // Restore text shader and standard blend
     gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram.?(AppWindow.shader_program);
+    gl.UseProgram.?(gl_init.shader_program);
 }
 
 /// Render an icon glyph centered within a button rect, using the icon atlas.
@@ -187,12 +188,12 @@ pub fn renderIconGlyph(ch: Character, btn_x: f32, btn_y: f32, btn_w: f32, btn_h:
         .{ gx + gw, gy + gh, uv.u1, uv.v0 },
     };
 
-    gl.Uniform3f.?(gl.GetUniformLocation.?(AppWindow.shader_program, "textColor"), color[0], color[1], color[2]);
+    gl.Uniform3f.?(gl.GetUniformLocation.?(gl_init.shader_program, "textColor"), color[0], color[1], color[2]);
     gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_icon_atlas_texture);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.vbo);
+    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); AppWindow.g_draw_call_count += 1;
+    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
 }
 
 /// Render the Ghostty-style tab bar.
@@ -212,9 +213,9 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
     const gl = AppWindow.gl;
     if (titlebar_h <= 0) return;
 
-    gl.UseProgram.?(AppWindow.shader_program);
+    gl.UseProgram.?(gl_init.shader_program);
     gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.BindVertexArray.?(gl_init.vao);
 
     const tb_top = window_height - titlebar_h; // top of titlebar in GL coords
     const bg = AppWindow.g_theme.background;
@@ -250,7 +251,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
     const tab_w: f32 = if (num_tabs > 0) tab_area_w / @as(f32, @floatFromInt(num_tabs)) else tab_area_w;
 
     // --- Tab bar background (same as terminal bg) ---
-    AppWindow.renderQuad(0, tb_top, window_width, titlebar_h, bg);
+    gl_init.renderQuad(0, tb_top, window_width, titlebar_h, bg);
 
     // --- Tabs ---
     var cursor_x: f32 = 0;
@@ -316,12 +317,12 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                 @min(1.0, inactive_tab_bg[1] + 0.04),
                 @min(1.0, inactive_tab_bg[2] + 0.04),
             } else inactive_tab_bg;
-            AppWindow.renderQuad(cursor_x, tb_top, tab_w, titlebar_h, tab_bg);
+            gl_init.renderQuad(cursor_x, tb_top, tab_w, titlebar_h, tab_bg);
 
             // 1px inset border — left border only (skip on first tab), bottom
-            AppWindow.renderQuad(cursor_x, tb_top, tab_w, bdr, border_color); // bottom
+            gl_init.renderQuad(cursor_x, tb_top, tab_w, bdr, border_color); // bottom
             if (tab_idx > 0) {
-                AppWindow.renderQuad(cursor_x, tb_top, bdr, titlebar_h, border_color); // left
+                gl_init.renderQuad(cursor_x, tb_top, bdr, titlebar_h, border_color); // left
             }
         }
 
@@ -445,7 +446,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                 if (is_renaming) {
                     if (tab.g_tab_rename_select_all and text_width > 0) {
                         // Highlight behind the text — use cursor color
-                        AppWindow.renderQuad(text_start_x, text_y, text_width, font.g_titlebar_cell_height, AppWindow.g_theme.cursor_color);
+                        gl_init.renderQuad(text_start_x, text_y, text_width, font.g_titlebar_cell_height, AppWindow.g_theme.cursor_color);
                         // Re-render text on top in contrasting color
                         const sel_text_color = AppWindow.g_theme.cursor_text orelse AppWindow.g_theme.background;
                         var sel_x = text_start_x;
@@ -457,7 +458,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                         if (!found_cursor) rename_cursor_x = text_x;
                         // Blink the cursor using the existing blink timer
                         if (AppWindow.g_cursor_blink_visible) {
-                            AppWindow.renderQuad(rename_cursor_x, text_y, 1.0, font.g_titlebar_cell_height, text_active);
+                            gl_init.renderQuad(rename_cursor_x, text_y, 1.0, font.g_titlebar_cell_height, text_active);
                         }
                     }
                 }
@@ -521,7 +522,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                     const trunc_width = text_x - text_x_start;
                     if (tab.g_tab_rename_select_all and trunc_width > 0) {
                         // Highlight behind the text — use cursor color
-                        AppWindow.renderQuad(text_x_start, text_y, trunc_width, font.g_titlebar_cell_height, AppWindow.g_theme.cursor_color);
+                        gl_init.renderQuad(text_x_start, text_y, trunc_width, font.g_titlebar_cell_height, AppWindow.g_theme.cursor_color);
                         // Re-render text on top in contrasting color
                         const sel_text_color = AppWindow.g_theme.cursor_text orelse AppWindow.g_theme.background;
                         var sel_x = text_x_start;
@@ -539,7 +540,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                         // Blink cursor at end (cursor position tracking in truncated
                         // text is approximate — place at end for simplicity)
                         if (AppWindow.g_cursor_blink_visible) {
-                            AppWindow.renderQuad(text_x, text_y, 1.0, font.g_titlebar_cell_height, text_active);
+                            gl_init.renderQuad(text_x, text_y, 1.0, font.g_titlebar_cell_height, text_active);
                         }
                     }
                 }
@@ -606,7 +607,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                     const btn_size: f32 = 22;
                     const bx = close_btn_x + (tab.TAB_CLOSE_BTN_W - btn_size) / 2;
                     const by = tb_top + (titlebar_h - btn_size) / 2;
-                    AppWindow.renderQuadAlpha(bx, by, btn_size, btn_size, hover_bg, close_opacity);
+                    gl_init.renderQuadAlpha(bx, by, btn_size, btn_size, hover_bg, close_opacity);
                 }
 
                 if (font.icon_face != null) {
@@ -622,8 +623,8 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                     for (0..steps) |si| {
                         const frac = @as(f32, @floatFromInt(si)) / @as(f32, @floatFromInt(steps - 1));
                         const px = cx - arm + frac * arm * 2;
-                        AppWindow.renderQuad(px - t / 2, (cy + arm - frac * arm * 2) - t / 2, t, t, faded_close_color);
-                        AppWindow.renderQuad(px - t / 2, (cy - arm + frac * arm * 2) - t / 2, t, t, faded_close_color);
+                        gl_init.renderQuad(px - t / 2, (cy + arm - frac * arm * 2) - t / 2, t, t, faded_close_color);
+                        gl_init.renderQuad(px - t / 2, (cy - arm + frac * arm * 2) - t / 2, t, t, faded_close_color);
                     }
                 }
             }
@@ -660,13 +661,13 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         };
 
         if (plus_hovered) {
-            AppWindow.renderQuad(cursor_x, tb_top, plus_btn_w, titlebar_h, inactive_tab_bg);
-            AppWindow.renderQuad(cursor_x, tb_top, plus_btn_w, bdr, border_color); // bottom
+            gl_init.renderQuad(cursor_x, tb_top, plus_btn_w, titlebar_h, inactive_tab_bg);
+            gl_init.renderQuad(cursor_x, tb_top, plus_btn_w, bdr, border_color); // bottom
         }
 
         // Left border — skip when last tab is active (no visual break needed)
         if (tab.g_active_tab != num_tabs - 1) {
-            AppWindow.renderQuad(cursor_x, tb_top, bdr, titlebar_h, border_color);
+            gl_init.renderQuad(cursor_x, tb_top, bdr, titlebar_h, border_color);
         }
 
         // + icon — same font/color as caption buttons, scaled up 15% to match stroke weight
@@ -681,8 +682,8 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             const plus_cy = tb_top + titlebar_h / 2;
             const arm: f32 = 5;
             const t: f32 = 1.0;
-            AppWindow.renderQuad(plus_cx - arm, plus_cy - t / 2, arm * 2, t, plus_icon_color);
-            AppWindow.renderQuad(plus_cx - t / 2, plus_cy - arm, t, arm * 2, plus_icon_color);
+            gl_init.renderQuad(plus_cx - arm, plus_cy - t / 2, arm * 2, t, plus_icon_color);
+            gl_init.renderQuad(plus_cx - t / 2, plus_cy - arm, t, arm * 2, plus_icon_color);
         }
         // Sync plus button position for double-click suppression in WndProc
         if (AppWindow.g_window) |w| {
@@ -709,10 +710,10 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             // Same color as active tab (terminal background)
             const accent = bg;
             const b: f32 = 1; // 1px border
-            AppWindow.renderQuad(0, 0, window_width, b, accent); // bottom
-            AppWindow.renderQuad(0, window_height - b, window_width, b, accent); // top
-            AppWindow.renderQuad(0, 0, b, window_height, accent); // left
-            AppWindow.renderQuad(window_width - b, 0, b, window_height, accent); // right
+            gl_init.renderQuad(0, 0, window_width, b, accent); // bottom
+            gl_init.renderQuad(0, window_height - b, window_width, b, accent); // top
+            gl_init.renderQuad(0, 0, b, window_height, accent); // left
+            gl_init.renderQuad(window_width - b, 0, b, window_height, accent); // right
         }
     }
 }
@@ -740,9 +741,9 @@ pub fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButt
             const is_focused = if (AppWindow.g_window) |win| win.focused else false;
             const is_maximized = if (AppWindow.g_window) |win| win32_backend.IsZoomed(win.hwnd) != 0 else false;
             const b: f32 = if (is_focused and !is_maximized) 1 else 0;
-            AppWindow.renderQuad(x, y + b, w - b, h - b, hover_bg);
+            gl_init.renderQuad(x, y + b, w - b, h - b, hover_bg);
         } else {
-            AppWindow.renderQuad(x, y, w, h, hover_bg);
+            gl_init.renderQuad(x, y, w, h, hover_bg);
         }
     }
 
@@ -781,23 +782,23 @@ pub fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButt
                 const frac = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(steps - 1));
                 const px = cx - size + frac * size * 2;
                 const py1 = cy + size - frac * size * 2;
-                AppWindow.renderQuad(px - t / 2, py1 - t / 2, t, t, icon_color);
+                gl_init.renderQuad(px - t / 2, py1 - t / 2, t, t, icon_color);
                 const py2 = cy - size + frac * size * 2;
-                AppWindow.renderQuad(px - t / 2, py2 - t / 2, t, t, icon_color);
+                gl_init.renderQuad(px - t / 2, py2 - t / 2, t, t, icon_color);
             }
         },
         .maximize => {
             const size: f32 = 5;
             const t: f32 = 1;
-            AppWindow.renderQuad(cx - size, cy + size - t, size * 2, t, icon_color); // top
-            AppWindow.renderQuad(cx - size, cy - size, size * 2, t, icon_color); // bottom
-            AppWindow.renderQuad(cx - size, cy - size, t, size * 2, icon_color); // left
-            AppWindow.renderQuad(cx + size - t, cy - size, t, size * 2, icon_color); // right
+            gl_init.renderQuad(cx - size, cy + size - t, size * 2, t, icon_color); // top
+            gl_init.renderQuad(cx - size, cy - size, size * 2, t, icon_color); // bottom
+            gl_init.renderQuad(cx - size, cy - size, t, size * 2, icon_color); // left
+            gl_init.renderQuad(cx + size - t, cy - size, t, size * 2, icon_color); // right
         },
         .minimize => {
             const size: f32 = 5;
             const t: f32 = 1;
-            AppWindow.renderQuad(cx - size, cy - t / 2, size * 2, t, icon_color);
+            gl_init.renderQuad(cx - size, cy - t / 2, size * 2, t, icon_color);
         },
     }
 }
@@ -805,9 +806,9 @@ pub fn renderCaptionButton(x: f32, y: f32, w: f32, h: f32, btn_type: CaptionButt
 /// Render placeholder content for tabs that don't have a terminal yet.
 pub fn renderPlaceholderTab(window_width: f32, window_height: f32, top_pad: f32) void {
     const gl = AppWindow.gl;
-    gl.UseProgram.?(AppWindow.shader_program);
+    gl.UseProgram.?(gl_init.shader_program);
     gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.BindVertexArray.?(gl_init.vao);
 
     const msg = "Tabs not yet implemented";
     const hint = "Press Ctrl+Shift+T to open, Ctrl+W to close";

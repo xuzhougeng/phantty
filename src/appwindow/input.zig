@@ -10,6 +10,8 @@ const tab = AppWindow.tab;
 const titlebar = AppWindow.titlebar;
 const font = AppWindow.font;
 const overlays = AppWindow.overlays;
+const split_layout = AppWindow.split_layout;
+const window_state = AppWindow.window_state;
 const win32_backend = @import("../win32.zig");
 const Config = @import("../config.zig");
 const Surface = @import("../Surface.zig");
@@ -61,8 +63,8 @@ pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
 /// Update split focus based on mouse position (focus follows mouse).
 pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
     const t = tab.activeTab() orelse return;
-    for (0..AppWindow.g_split_rect_count) |i| {
-        const rect = AppWindow.g_split_rects[i];
+    for (0..split_layout.g_split_rect_count) |i| {
+        const rect = split_layout.g_split_rects[i];
         if (mouse_x >= rect.x and mouse_x < rect.x + rect.width and
             mouse_y >= rect.y and mouse_y < rect.y + rect.height)
         {
@@ -136,10 +138,10 @@ fn processSizeChange(win: *win32_backend.Window) void {
     //         bottom, then setScreenSize subtracts explicit T+B.
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const explicit_left: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
-    const explicit_right: f32 = @as(f32, @floatFromInt(AppWindow.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
-    const explicit_top: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
-    const explicit_bottom: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
+    const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
+    const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
+    const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
+    const explicit_bottom: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
 
     const total_width_padding = explicit_left + explicit_right;
     const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
@@ -197,7 +199,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
             if (AppWindow.activeSurface()) |surface| {
                 if (surface.getCwd()) |unix_path| {
                     std.debug.print("CWD from OSC 7: {s}\n", .{unix_path});
-                    if (AppWindow.unixPathToWindows(unix_path, &cwd_buf)) |len| {
+                    if (AppWindow.wsl_paths.unixPathToWindows(unix_path, &cwd_buf)) |len| {
                         cwd = cwd_buf[0..len];
                         var path_u8: [260]u8 = undefined;
                         for (cwd_buf[0..len], 0..) |wc, i| {
@@ -490,7 +492,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             }
 
             // Check if click is on a split divider
-            if (AppWindow.hitTestDivider(ev.x, ev.y)) |hit| {
+            if (split_layout.hitTestDivider(ev.x, ev.y)) |hit| {
                 g_divider_dragging = true;
                 g_divider_drag_handle = hit.handle;
                 g_divider_drag_layout = hit.layout;
@@ -508,13 +510,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             }
 
             // Find which surface was clicked and focus it
-            const clicked_surface = AppWindow.surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse AppWindow.activeSurface() orelse return;
+            const clicked_surface = split_layout.surfaceAtPoint(@intFromFloat(xpos), @intFromFloat(ypos)) orelse AppWindow.activeSurface() orelse return;
 
             // Focus the clicked split if different from current focus
             if (AppWindow.activeTab()) |tb| {
-                for (0..AppWindow.g_split_rect_count) |i| {
-                    if (AppWindow.g_split_rects[i].surface == clicked_surface) {
-                        tb.focused = AppWindow.g_split_rects[i].handle;
+                for (0..split_layout.g_split_rect_count) |i| {
+                    if (split_layout.g_split_rects[i].surface == clicked_surface) {
+                        tb.focused = split_layout.g_split_rects[i].handle;
                         break;
                     }
                 }
@@ -721,10 +723,10 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             // Get content area dimensions
             const win = AppWindow.g_window orelse return;
             const fb = win.getFramebufferSize();
-            const content_x: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
+            const content_x: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
             const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-            const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * AppWindow.DEFAULT_PADDING)));
-            const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(AppWindow.DEFAULT_PADDING)));
+            const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * split_layout.DEFAULT_PADDING)));
+            const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(split_layout.DEFAULT_PADDING)));
 
             const slot = spatial.slots[handle.idx()];
             const layout = g_divider_drag_layout orelse return;
@@ -784,7 +786,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 
     // Check for divider hover and update cursor
     if (!overlays.g_scrollbar_hover and !g_selecting) {
-        if (AppWindow.hitTestDivider(ev.x, ev.y)) |hit| {
+        if (split_layout.hitTestDivider(ev.x, ev.y)) |hit| {
             // Set resize cursor based on layout
             const cursor_id = switch (hit.layout) {
                 .horizontal => win32_backend.IDC_SIZEWE, // left-right resize
@@ -825,7 +827,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
     // Fall back to focused surface if mouse is not over any split.
-    const surface = AppWindow.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;
+    const surface = split_layout.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;
 
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();

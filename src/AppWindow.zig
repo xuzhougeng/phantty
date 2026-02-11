@@ -23,6 +23,11 @@ pub const titlebar = @import("appwindow/titlebar.zig");
 pub const input = @import("appwindow/input.zig");
 pub const overlays = @import("appwindow/overlays.zig");
 pub const post_process = @import("appwindow/post_process.zig");
+pub const gl_init = @import("appwindow/gl_init.zig");
+pub const split_layout = @import("appwindow/split_layout.zig");
+pub const wsl_paths = @import("appwindow/wsl_paths.zig");
+pub const window_state = @import("appwindow/window_state.zig");
+pub const fbo = @import("appwindow/fbo.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -141,141 +146,8 @@ threadlocal var g_start_fullscreen: bool = false;
 // Global theme (set at startup via config)
 pub threadlocal var g_theme: Theme = Theme.default();
 
-/// Convert a Unix-style path to a Windows path (UTF-16).
-/// Handles:
-///   /mnt/c/Users/... -> C:\Users\...
-///   /home/user/...   -> \\wsl.localhost\<distro>\home\user\...
-/// Returns the length of the converted path, or null if conversion failed.
-pub fn unixPathToWindows(unix_path: []const u8, out: *[260]u16) ?usize {
-    // Handle WSL /mnt/X/... paths (Windows drives mounted in WSL)
-    if (unix_path.len >= 7 and std.mem.startsWith(u8, unix_path, "/mnt/")) {
-        const drive_letter = unix_path[5];
-        if (drive_letter >= 'a' and drive_letter <= 'z') {
-            // Convert /mnt/c/foo/bar -> C:\foo\bar
-            out[0] = std.ascii.toUpper(drive_letter);
-            out[1] = ':';
-            var out_idx: usize = 2;
-
-            // Copy the rest of the path, converting / to \
-            const rest = unix_path[6..]; // Skip "/mnt/c"
-            for (rest) |ch| {
-                if (out_idx >= out.len - 1) break;
-                out[out_idx] = if (ch == '/') '\\' else ch;
-                out_idx += 1;
-            }
-            out[out_idx] = 0;
-            return out_idx;
-        }
-    }
-
-    // Handle pure Linux paths (e.g., /home/user) via \\wsl.localhost\<distro>\path
-    if (unix_path.len > 0 and unix_path[0] == '/') {
-        // Try to get distro name from OSC 7 hostname (file://hostname/path)
-        // or fall back to querying WSL for the default distro
-        const distro = getWslDistroName() orelse return null;
-
-        // Build \\wsl.localhost\<distro><path>
-        const prefix = "\\\\wsl.localhost\\";
-        var out_idx: usize = 0;
-
-        // Write prefix
-        for (prefix) |ch| {
-            if (out_idx >= out.len - 1) return null;
-            out[out_idx] = ch;
-            out_idx += 1;
-        }
-
-        // Write distro name
-        for (distro) |ch| {
-            if (out_idx >= out.len - 1) return null;
-            out[out_idx] = ch;
-            out_idx += 1;
-        }
-
-        // Write path, converting / to \
-        for (unix_path) |ch| {
-            if (out_idx >= out.len - 1) break;
-            out[out_idx] = if (ch == '/') '\\' else ch;
-            out_idx += 1;
-        }
-
-        out[out_idx] = 0;
-        return out_idx;
-    }
-
-    return null;
-}
-
-/// Get the WSL distro name by running `wsl.exe --list --quiet` and taking the first line.
-/// Returns a static buffer with the distro name, or null if detection failed.
-fn getWslDistroName() ?[]const u8 {
-    const Static = struct {
-        threadlocal var cached: bool = false;
-        threadlocal var distro_buf: [64]u8 = undefined;
-        threadlocal var distro_len: usize = 0;
-    };
-
-    // Return cached result if available
-    if (Static.cached) {
-        if (Static.distro_len > 0) {
-            return Static.distro_buf[0..Static.distro_len];
-        }
-        return null;
-    }
-    Static.cached = true;
-
-    // Run wsl.exe --list --quiet to get distro names
-    const allocator = g_allocator orelse return null;
-
-    var child = std.process.Child.init(&.{ "wsl.exe", "--list", "--quiet" }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch return null;
-
-    // Read first line of output (default/first distro)
-    const stdout = child.stdout orelse return null;
-    var buf: [256]u8 = undefined;
-    const n = stdout.read(&buf) catch 0;
-
-    _ = child.wait() catch {};
-
-    if (n == 0) return null;
-
-    // WSL outputs UTF-16LE, convert to UTF-8
-    // Find first line (up to \r\n or \n)
-    var i: usize = 0;
-    var out_idx: usize = 0;
-    while (i + 1 < n and out_idx < Static.distro_buf.len) {
-        const lo = buf[i];
-        const hi = buf[i + 1];
-
-        // Skip BOM if present
-        if (i == 0 and lo == 0xFF and hi == 0xFE) {
-            i += 2;
-            continue;
-        }
-
-        // End of line?
-        if (lo == '\r' or lo == '\n' or lo == 0) break;
-
-        // ASCII character (hi should be 0 for ASCII)
-        if (hi == 0 and lo >= 0x20 and lo < 0x7F) {
-            Static.distro_buf[out_idx] = lo;
-            out_idx += 1;
-        }
-
-        i += 2;
-    }
-
-    if (out_idx > 0) {
-        Static.distro_len = out_idx;
-        std.debug.print("Detected WSL distro: {s}\n", .{Static.distro_buf[0..out_idx]});
-        return Static.distro_buf[0..out_idx];
-    }
-
-    return null;
-}
+// WSL path conversion — see appwindow/wsl_paths.zig
+pub const unixPathToWindows = wsl_paths.unixPathToWindows;
 
 // Global pointers for callbacks
 pub threadlocal var g_window: ?*win32_backend.Window = null;
@@ -289,238 +161,13 @@ pub threadlocal var g_should_close: bool = false; // Set by Ctrl+W with 1 tab
 // Tab model — see appwindow/tab.zig
 const TabState = tab.TabState;
 
-// ============================================================================
-// Split layout — computed pixel rects for each surface in a split tree
-// ============================================================================
-
-/// Pixel rectangle for a split surface, including computed terminal dimensions
-pub const SplitRect = struct {
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    cols: u16,
-    rows: u16,
-    surface: *Surface,
-    handle: SplitTree.Node.Handle,
-};
-
-const MAX_SPLITS_PER_TAB = tab.MAX_SPLITS_PER_TAB;
-const SPLIT_DIVIDER_WIDTH = tab.SPLIT_DIVIDER_WIDTH;
-pub const DEFAULT_PADDING = tab.DEFAULT_PADDING;
-
-/// Computed split rects for the active tab (updated each frame)
-pub threadlocal var g_split_rects: [MAX_SPLITS_PER_TAB]SplitRect = undefined;
-pub threadlocal var g_split_rect_count: usize = 0;
-
-/// Find the surface under a given point (window coordinates).
-/// Returns null if no surface is found at that position.
-pub fn surfaceAtPoint(x: i32, y: i32) ?*Surface {
-    for (0..g_split_rect_count) |i| {
-        const rect = g_split_rects[i];
-        if (x >= rect.x and x < rect.x + rect.width and
-            y >= rect.y and y < rect.y + rect.height)
-        {
-            return rect.surface;
-        }
-    }
-    return null;
-}
-
-/// Hit test result for split dividers
-pub const DividerHit = struct {
-    handle: SplitTree.Node.Handle,
-    layout: SplitTree.Split.Layout,
-};
-
-/// Check if a point is over a split divider.
-/// Returns the split node handle and layout if found, null otherwise.
-pub fn hitTestDivider(x: i32, y: i32) ?DividerHit {
-    const active_tab = activeTab() orelse return null;
-    if (active_tab.tree.isEmpty() or !active_tab.tree.isSplit()) return null;
-
-    const allocator = g_allocator orelse return null;
-    var spatial = active_tab.tree.spatial(allocator) catch return null;
-    defer spatial.deinit(allocator);
-
-    // Get content area dimensions
-    const win = g_window orelse return null;
-    const fb = win.getFramebufferSize();
-    const content_x: f32 = @floatFromInt(DEFAULT_PADDING);
-    const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * DEFAULT_PADDING)));
-    const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(DEFAULT_PADDING)));
-
-    const xf: f32 = @floatFromInt(x);
-    const yf: f32 = @floatFromInt(y);
-    const half_hit = input.SPLIT_DIVIDER_HIT_WIDTH / 2;
-
-    // Check each split node for divider hit
-    for (active_tab.tree.nodes, 0..) |node, i| {
-        switch (node) {
-            .split => |s| {
-                const handle: SplitTree.Node.Handle = @enumFromInt(i);
-                const slot = spatial.slots[i];
-
-                // Convert normalized coords to pixels
-                const slot_x = content_x + @as(f32, @floatCast(slot.x)) * content_w;
-                const slot_y = content_y + @as(f32, @floatCast(slot.y)) * content_h;
-                const slot_w = @as(f32, @floatCast(slot.width)) * content_w;
-                const slot_h = @as(f32, @floatCast(slot.height)) * content_h;
-
-                switch (s.layout) {
-                    .horizontal => {
-                        // Vertical divider line at ratio position
-                        const div_x = slot_x + slot_w * @as(f32, @floatCast(s.ratio));
-                        if (xf >= div_x - half_hit and xf <= div_x + half_hit and
-                            yf >= slot_y and yf <= slot_y + slot_h)
-                        {
-                            return .{ .handle = handle, .layout = .horizontal };
-                        }
-                    },
-                    .vertical => {
-                        // Horizontal divider line at ratio position
-                        const div_y = slot_y + slot_h * @as(f32, @floatCast(s.ratio));
-                        if (yf >= div_y - half_hit and yf <= div_y + half_hit and
-                            xf >= slot_x and xf <= slot_x + slot_w)
-                        {
-                            return .{ .handle = handle, .layout = .vertical };
-                        }
-                    },
-                }
-            },
-            .leaf => {},
-        }
-    }
-
-    return null;
-}
-
-/// Compute split layout for a tab, returning pixel rects for each surface.
-/// Each surface is resized to fit its allocated area with proper padding.
-/// Returns the number of surfaces (0 if tree is empty).
-fn computeSplitLayout(
-    active_tab: *const TabState,
-    content_x: i32,
-    content_y: i32,
-    content_w: i32,
-    content_h: i32,
-    cw: f32, // font.cell_width
-    ch: f32, // font.cell_height
-) usize {
-    if (active_tab.tree.isEmpty()) return 0;
-
-    // Get spatial representation (normalized 0-1 coordinates)
-    const allocator = g_allocator orelse return 0;
-    var spatial = active_tab.tree.spatial(allocator) catch return 0;
-    defer spatial.deinit(allocator);
-
-    var count: usize = 0;
-    var it = active_tab.tree.iterator();
-    while (it.next()) |entry| {
-        if (count >= MAX_SPLITS_PER_TAB) break;
-
-        const slot = spatial.slots[entry.handle.idx()];
-
-        // Convert normalized coords to pixels
-        const x_f: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(content_w));
-        const y_f: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(content_h));
-        const w_f: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(content_w));
-        const h_f: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(content_h));
-
-        // Apply divider insets (half-divider on each side adjacent to other splits)
-        var px: i32 = content_x + @as(i32, @intFromFloat(x_f));
-        var py: i32 = content_y + @as(i32, @intFromFloat(y_f));
-        var pw: i32 = @as(i32, @intFromFloat(w_f));
-        var ph: i32 = @as(i32, @intFromFloat(h_f));
-
-        // Inset for dividers (only if not at edge)
-        const half_div = @divTrunc(SPLIT_DIVIDER_WIDTH, 2);
-        const at_left_edge = slot.x < 0.001;
-        const at_right_edge = slot.x + slot.width >= 0.999;
-        if (slot.x > 0.001) {
-            px += half_div;
-            pw -= half_div;
-        }
-        if (slot.x + slot.width < 0.999) {
-            pw -= half_div;
-        }
-        if (slot.y > 0.001) {
-            py += half_div;
-            ph -= half_div;
-        }
-        if (slot.y + slot.height < 0.999) {
-            ph -= half_div;
-        }
-
-        // Extend splits at left edge to window edge (consistent left margin)
-        if (at_left_edge) {
-            px -= @intCast(DEFAULT_PADDING);
-            pw += @intCast(DEFAULT_PADDING);
-        }
-
-        // Extend splits at right edge to window edge (so scrollbar hugs window edge)
-        if (at_right_edge) {
-            pw += @intCast(DEFAULT_PADDING);
-        }
-
-        // Set the surface screen size with padding.
-        // The surface computes grid size and balanced padding internally.
-        // Right padding must account for scrollbar width plus gap.
-        const surface = entry.surface;
-        const scrollbar_padding: u32 = @intFromFloat(overlays.SCROLLBAR_WIDTH + DEFAULT_PADDING);
-        const explicit_padding = renderer.size.Padding{
-            .top = DEFAULT_PADDING,
-            .bottom = DEFAULT_PADDING,
-            .left = DEFAULT_PADDING,
-            .right = scrollbar_padding,
-        };
-
-        const resized = surface.setScreenSize(
-            allocator,
-            if (pw > 0) @intCast(pw) else 1,
-            if (ph > 0) @intCast(ph) else 1,
-            cw,
-            ch,
-            explicit_padding,
-        );
-
-        if (resized) {
-            g_force_rebuild = true;
-            // Show resize overlay with new dimensions (but not during divider drag,
-            // which has its own per-surface overlay logic)
-            if (!input.g_divider_dragging) {
-                overlays.resizeOverlayShow(surface.size.grid.cols, surface.size.grid.rows);
-            }
-        }
-
-        // Track per-surface size changes for divider drag overlay
-        if (input.g_divider_dragging) {
-            const cols = surface.size.grid.cols;
-            const rows = surface.size.grid.rows;
-            if (cols != surface.resize_overlay_last_cols or rows != surface.resize_overlay_last_rows) {
-                surface.resize_overlay_active = true;
-                surface.resize_overlay_last_cols = cols;
-                surface.resize_overlay_last_rows = rows;
-            }
-        }
-
-        g_split_rects[count] = .{
-            .x = px,
-            .y = py,
-            .width = pw,
-            .height = ph,
-            .cols = surface.size.grid.cols,
-            .rows = surface.size.grid.rows,
-            .surface = surface,
-            .handle = entry.handle,
-        };
-        count += 1;
-    }
-
-    g_split_rect_count = count;
-    return count;
-}
+// Split layout — see appwindow/split_layout.zig
+pub const SplitRect = split_layout.SplitRect;
+pub const DividerHit = split_layout.DividerHit;
+pub const DEFAULT_PADDING = split_layout.DEFAULT_PADDING;
+pub const surfaceAtPoint = split_layout.surfaceAtPoint;
+pub const hitTestDivider = split_layout.hitTestDivider;
+const computeSplitLayout = split_layout.computeSplitLayout;
 
 pub const MAX_TABS = tab.MAX_TABS;
 
@@ -663,232 +310,15 @@ pub threadlocal var term_rows: u16 = 24;
 // OpenGL context from glad
 pub threadlocal var gl: c.GladGLContext = undefined;
 
-pub threadlocal var vao: c.GLuint = 0;
-pub threadlocal var vbo: c.GLuint = 0;
-pub threadlocal var shader_program: c.GLuint = 0;
-
 // Dirty tracking — skip rebuildCells when nothing changed
 pub threadlocal var g_cells_valid: bool = false;
 pub threadlocal var g_force_rebuild: bool = true;
 
-// GL objects for instanced rendering
-pub threadlocal var bg_shader: c.GLuint = 0;
-pub threadlocal var fg_shader: c.GLuint = 0;
-pub threadlocal var color_fg_shader: c.GLuint = 0; // Color emoji shader (BGRA sampling)
-pub threadlocal var bg_vao: c.GLuint = 0;
-pub threadlocal var fg_vao: c.GLuint = 0;
-pub threadlocal var color_fg_vao: c.GLuint = 0;
-pub threadlocal var bg_instance_vbo: c.GLuint = 0;
-pub threadlocal var fg_instance_vbo: c.GLuint = 0;
-pub threadlocal var color_fg_instance_vbo: c.GLuint = 0;
-threadlocal var quad_vbo: c.GLuint = 0; // shared unit quad for instanced draws
-
-// --- Instanced shader sources ---
-
-const bg_vertex_source: [*c]const u8 =
-    \\#version 330 core
-    \\// Unit quad (0,0)-(1,1)
-    \\layout (location = 0) in vec2 aQuad;
-    \\// Per-instance
-    \\layout (location = 1) in vec2 aGridPos;
-    \\layout (location = 2) in vec3 aColor;
-    \\uniform mat4 projection;
-    \\uniform vec2 cellSize;
-    \\uniform vec2 gridOffset;
-    \\uniform float windowHeight;
-    \\flat out vec3 vColor;
-    \\void main() {
-    \\    // Cell top-left in screen coords
-    \\    float cx = gridOffset.x + aGridPos.x * cellSize.x;
-    \\    float cy = windowHeight - gridOffset.y - (aGridPos.y + 1.0) * cellSize.y;
-    \\    vec2 pos = vec2(cx, cy) + aQuad * cellSize;
-    \\    gl_Position = projection * vec4(pos, 0.0, 1.0);
-    \\    vColor = aColor;
-    \\}
-;
-
-const bg_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\flat in vec3 vColor;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    fragColor = vec4(vColor, 1.0);
-    \\}
-;
-
-const fg_vertex_source: [*c]const u8 =
-    \\#version 330 core
-    \\layout (location = 0) in vec2 aQuad;
-    \\// Per-instance
-    \\layout (location = 1) in vec2 aGridPos;
-    \\layout (location = 2) in vec4 aGlyphRect;  // x, y, w, h in pixels
-    \\layout (location = 3) in vec4 aUV;          // left, top, right, bottom
-    \\layout (location = 4) in vec3 aColor;
-    \\uniform mat4 projection;
-    \\uniform vec2 cellSize;
-    \\uniform vec2 gridOffset;
-    \\uniform float windowHeight;
-    \\out vec2 vTexCoord;
-    \\flat out vec3 vColor;
-    \\void main() {
-    \\    float cx = gridOffset.x + aGridPos.x * cellSize.x;
-    \\    float cy = windowHeight - gridOffset.y - (aGridPos.y + 1.0) * cellSize.y;
-    \\    // Glyph quad within cell
-    \\    vec2 pos = vec2(cx + aGlyphRect.x, cy + aGlyphRect.y) + aQuad * aGlyphRect.zw;
-    \\    gl_Position = projection * vec4(pos, 0.0, 1.0);
-    \\    // UV interpolation — V is flipped because atlas Y=0 is top but GL quad Y=0 is bottom
-    \\    vTexCoord = vec2(mix(aUV.x, aUV.z, aQuad.x), mix(aUV.w, aUV.y, aQuad.y));
-    \\    vColor = aColor;
-    \\}
-;
-
-const fg_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 vTexCoord;
-    \\flat in vec3 vColor;
-    \\uniform sampler2D atlas;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    float a = texture(atlas, vTexCoord).r;
-    \\    fragColor = vec4(vColor, 1.0) * vec4(1.0, 1.0, 1.0, a);
-    \\}
-;
-
-// Color emoji fragment shader — samples RGBA directly from the color atlas.
-// FreeType's color emoji bitmaps (CBDT/CBLC) use premultiplied alpha,
-// so we output them directly and use premultiplied blend mode (GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
-const color_fg_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 vTexCoord;
-    \\flat in vec3 vColor;
-    \\uniform sampler2D atlas;
-    \\out vec4 fragColor;
-    \\void main() {
-    \\    fragColor = texture(atlas, vTexCoord);
-    \\}
-;
-
-// Simple (non-instanced) color emoji fragment shader for titlebar/overlay use.
-// Uses the same vertex layout as the text shader (vec4: xy=pos, zw=texcoord).
-const simple_color_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 TexCoords;
-    \\out vec4 color;
-    \\uniform sampler2D text;
-    \\uniform float opacity;
-    \\void main() {
-    \\    vec4 texColor = texture(text, TexCoords);
-    \\    color = texColor * opacity;
-    \\}
-;
-pub threadlocal var simple_color_shader: c.GLuint = 0;
-
-// Solid color overlay shader - outputs a solid color with alpha for true blending.
-const overlay_fragment_source: [*c]const u8 =
-    \\#version 330 core
-    \\out vec4 color;
-    \\uniform vec4 overlayColor;
-    \\void main() {
-    \\    color = overlayColor;
-    \\}
-;
-pub threadlocal var overlay_shader: c.GLuint = 0;
 pub threadlocal var window_focused: bool = true; // Track window focus state
 
-// Saved windowed position for restore (used by window state persistence)
-threadlocal var g_windowed_x: c_int = 0;
-threadlocal var g_windowed_y: c_int = 0;
-
-// ============================================================================
-// Window state persistence — save/restore position across sessions
-// ============================================================================
-
-const WindowState = struct {
-    x: i32,
-    y: i32,
-};
-
-/// Return the state file path: %APPDATA%\phantty\state
-fn stateFilePath(allocator: std.mem.Allocator) ?[]const u8 {
-    if (std.process.getEnvVarOwned(allocator, "APPDATA")) |appdata| {
-        defer allocator.free(appdata);
-        return std.fs.path.join(allocator, &.{ appdata, "phantty", "state" }) catch null;
-    } else |_| {}
-    if (std.process.getEnvVarOwned(allocator, "XDG_CONFIG_HOME")) |xdg| {
-        defer allocator.free(xdg);
-        return std.fs.path.join(allocator, &.{ xdg, "phantty", "state" }) catch null;
-    } else |_| {}
-    if (std.process.getEnvVarOwned(allocator, "HOME")) |home| {
-        defer allocator.free(home);
-        return std.fs.path.join(allocator, &.{ home, ".config", "phantty", "state" }) catch null;
-    } else |_| {}
-    return null;
-}
-
-/// Load window state from the state file.
-fn loadWindowState(allocator: std.mem.Allocator) ?WindowState {
-    const path = stateFilePath(allocator) orelse return null;
-    defer allocator.free(path);
-
-    const data = std.fs.cwd().readFileAlloc(allocator, path, 4096) catch return null;
-    defer allocator.free(data);
-
-    var state = WindowState{ .x = 0, .y = 0 };
-    var has_x = false;
-    var has_y = false;
-
-    var it = std.mem.splitScalar(u8, data, '\n');
-    while (it.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, &[_]u8{ ' ', '\t', '\r' });
-        if (trimmed.len == 0) continue;
-        if (std.mem.indexOfScalar(u8, trimmed, '=')) |eq| {
-            const key = std.mem.trim(u8, trimmed[0..eq], &[_]u8{ ' ', '\t' });
-            const val = std.mem.trim(u8, trimmed[eq + 1 ..], &[_]u8{ ' ', '\t' });
-            if (std.mem.eql(u8, key, "window-x")) {
-                state.x = std.fmt.parseInt(i32, val, 10) catch continue;
-                has_x = true;
-            } else if (std.mem.eql(u8, key, "window-y")) {
-                state.y = std.fmt.parseInt(i32, val, 10) catch continue;
-                has_y = true;
-            }
-        }
-    }
-
-    if (!has_x or !has_y) return null;
-
-    // Validate that the position is on a visible monitor
-    // Use MonitorFromPoint with MONITOR_DEFAULTTONULL - returns null if point is off-screen
-    const pt = win32_backend.POINT{ .x = state.x + 50, .y = state.y + 50 }; // Check a point inside the window
-    const monitor = monitorFromPoint(pt, 0); // MONITOR_DEFAULTTONULL = 0
-    if (monitor == null) {
-        std.debug.print("Saved window position ({}, {}) is off-screen, ignoring\n", .{ state.x, state.y });
-        return null;
-    }
-
-    return state;
-}
-
-extern "user32" fn MonitorFromPoint(pt: win32_backend.POINT, dwFlags: u32) callconv(.winapi) ?win32_backend.HMONITOR;
-
-fn monitorFromPoint(pt: win32_backend.POINT, flags: u32) ?win32_backend.HMONITOR {
-    return MonitorFromPoint(pt, flags);
-}
-
-/// Save window state to the state file.
-fn saveWindowState(allocator: std.mem.Allocator, state: WindowState) void {
-    const path = stateFilePath(allocator) orelse return;
-    defer allocator.free(path);
-
-    var buf: [128]u8 = undefined;
-    const content = std.fmt.bufPrint(&buf, "window-x = {d}\nwindow-y = {d}\n", .{
-        state.x, state.y,
-    }) catch return;
-
-    if (std.fs.cwd().createFile(path, .{})) |file| {
-        defer file.close();
-        file.writeAll(content) catch {};
-    } else |_| {}
-}
+// Window state persistence — see appwindow/window_state.zig
+const loadWindowState = window_state.loadWindowState;
+const saveWindowState = window_state.saveWindowState;
 
 // Pending resize state (resize is deferred to main loop to avoid PageList integrity issues)
 // Ghostty coalesces resize events with a 25ms timer to batch rapid resizes
@@ -907,414 +337,10 @@ const CURSOR_BLINK_INTERVAL_MS: i64 = 600; // Blink interval in ms (same as Ghos
 
 const ConfigWatcher = @import("config_watcher.zig");
 
-pub threadlocal var g_draw_call_count: u32 = 0; // Reset each frame, incremented on each glDraw* call
-
-const vertex_shader_source: [*c]const u8 =
-    \\#version 330 core
-    \\layout (location = 0) in vec4 vertex;
-    \\out vec2 TexCoords;
-    \\uniform mat4 projection;
-    \\void main() {
-    \\    gl_Position = projection * vec4(vertex.xy, 0.0, 1.0);
-    \\    TexCoords = vertex.zw;
-    \\}
-;
-
-const fragment_shader_source: [*c]const u8 =
-    \\#version 330 core
-    \\in vec2 TexCoords;
-    \\out vec4 color;
-    \\uniform sampler2D text;
-    \\uniform vec3 textColor;
-    \\void main() {
-    \\    vec4 sampled = vec4(1.0, 1.0, 1.0, texture(text, TexCoords).r);
-    \\    color = vec4(textColor, 1.0) * sampled;
-    \\}
-;
-
-pub fn compileShader(shader_type: c.GLenum, source: [*c]const u8) ?c.GLuint {
-    const shader = gl.CreateShader.?(shader_type);
-    if (shader == 0) {
-        const gl_err = if (gl.GetError) |getErr| getErr() else 0;
-        std.debug.print("Shader error: glCreateShader returned 0, type=0x{X}, glError=0x{X}\n", .{ shader_type, gl_err });
-        return null;
-    }
-
-    gl.ShaderSource.?(shader, 1, &source, null);
-    gl.CompileShader.?(shader);
-
-    var success: c.GLint = 0;
-    gl.GetShaderiv.?(shader, c.GL_COMPILE_STATUS, &success);
-    if (success == 0) {
-        var info_log: [512]u8 = @splat(0);
-        var log_len: c.GLsizei = 0;
-        gl.GetShaderInfoLog.?(shader, 512, &log_len, &info_log);
-        const len: usize = if (log_len > 0) @intCast(log_len) else 0;
-        if (len > 0) {
-            std.debug.print("Shader compilation failed: {s}\n", .{info_log[0..len]});
-        } else {
-            std.debug.print("Shader compilation failed (no error log, shader={})\n", .{shader});
-        }
-        return null;
-    }
-    return shader;
-}
-
-fn initShaders() bool {
-    const vertex_shader = compileShader(c.GL_VERTEX_SHADER, vertex_shader_source) orelse return false;
-    defer gl.DeleteShader.?(vertex_shader);
-
-    const fragment_shader = compileShader(c.GL_FRAGMENT_SHADER, fragment_shader_source) orelse return false;
-    defer gl.DeleteShader.?(fragment_shader);
-
-    shader_program = gl.CreateProgram.?();
-    gl.AttachShader.?(shader_program, vertex_shader);
-    gl.AttachShader.?(shader_program, fragment_shader);
-    gl.LinkProgram.?(shader_program);
-
-    var success: c.GLint = 0;
-    gl.GetProgramiv.?(shader_program, c.GL_LINK_STATUS, &success);
-    if (success == 0) {
-        var info_log: [512]u8 = @splat(0);
-        var log_len: c.GLsizei = 0;
-        gl.GetProgramInfoLog.?(shader_program, 512, &log_len, &info_log);
-        const len: usize = if (log_len > 0) @intCast(log_len) else 0;
-        if (len > 0) {
-            std.debug.print("Shader linking failed: {s}\n", .{info_log[0..len]});
-        } else {
-            std.debug.print("Shader linking failed (no error log available)\n", .{});
-        }
-        return false;
-    }
-
-    return true;
-}
-
-fn initBuffers() void {
-    gl.GenVertexArrays.?(1, &vao);
-    gl.GenBuffers.?(1, &vbo);
-    gl.BindVertexArray.?(vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(f32) * 6 * 4, null, c.GL_DYNAMIC_DRAW);
-    gl.EnableVertexAttribArray.?(0);
-    gl.VertexAttribPointer.?(0, 4, c.GL_FLOAT, c.GL_FALSE, 4 * @sizeOf(f32), null);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.BindVertexArray.?(0);
-}
-
-fn linkProgram(vs_src: [*c]const u8, fs_src: [*c]const u8) c.GLuint {
-    const vs = compileShader(c.GL_VERTEX_SHADER, vs_src) orelse return 0;
-    defer gl.DeleteShader.?(vs);
-    const fs = compileShader(c.GL_FRAGMENT_SHADER, fs_src) orelse return 0;
-    defer gl.DeleteShader.?(fs);
-    const prog = gl.CreateProgram.?();
-    gl.AttachShader.?(prog, vs);
-    gl.AttachShader.?(prog, fs);
-    gl.LinkProgram.?(prog);
-    var success: c.GLint = 0;
-    gl.GetProgramiv.?(prog, c.GL_LINK_STATUS, &success);
-    if (success == 0) {
-        var info_log: [512]u8 = @splat(0);
-        var log_len: c.GLsizei = 0;
-        gl.GetProgramInfoLog.?(prog, 512, &log_len, &info_log);
-        const len: usize = if (log_len > 0) @intCast(log_len) else 0;
-        if (len > 0) std.debug.print("Shader link failed: {s}\n", .{info_log[0..len]});
-        return 0;
-    }
-    return prog;
-}
-
-fn initInstancedBuffers() void {
-    // Shared unit quad (triangle strip: 4 verts)
-    const quad_verts = [4][2]f32{
-        .{ 0.0, 0.0 }, // bottom-left
-        .{ 1.0, 0.0 }, // bottom-right
-        .{ 0.0, 1.0 }, // top-left
-        .{ 1.0, 1.0 }, // top-right
-    };
-    gl.GenBuffers.?(1, &quad_vbo);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, quad_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(@TypeOf(quad_verts)), &quad_verts, c.GL_STATIC_DRAW);
-
-    // --- BG VAO ---
-    gl.GenVertexArrays.?(1, &bg_vao);
-    gl.GenBuffers.?(1, &bg_instance_vbo);
-    gl.BindVertexArray.?(bg_vao);
-
-    // Attr 0: unit quad (per-vertex)
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, quad_vbo);
-    gl.EnableVertexAttribArray.?(0);
-    gl.VertexAttribPointer.?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
-
-    // Attrs 1-2: per-instance BG data
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, bg_instance_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellBg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
-    const bg_stride: c.GLsizei = @sizeOf(Renderer.CellBg);
-    // Attr 1: grid_col, grid_row
-    gl.EnableVertexAttribArray.?(1);
-    gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, bg_stride, @ptrFromInt(0));
-    gl.VertexAttribDivisor.?(1, 1);
-    // Attr 2: r, g, b
-    gl.EnableVertexAttribArray.?(2);
-    gl.VertexAttribPointer.?(2, 3, c.GL_FLOAT, c.GL_FALSE, bg_stride, @ptrFromInt(2 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(2, 1);
-
-    gl.BindVertexArray.?(0);
-
-    // --- FG VAO ---
-    gl.GenVertexArrays.?(1, &fg_vao);
-    gl.GenBuffers.?(1, &fg_instance_vbo);
-    gl.BindVertexArray.?(fg_vao);
-
-    // Attr 0: unit quad (per-vertex)
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, quad_vbo);
-    gl.EnableVertexAttribArray.?(0);
-    gl.VertexAttribPointer.?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
-
-    // Attrs 1-4: per-instance FG data
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, fg_instance_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellFg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
-    const fg_stride: c.GLsizei = @sizeOf(Renderer.CellFg);
-    // Attr 1: grid_col, grid_row
-    gl.EnableVertexAttribArray.?(1);
-    gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(0));
-    gl.VertexAttribDivisor.?(1, 1);
-    // Attr 2: glyph_x, glyph_y, glyph_w, glyph_h
-    gl.EnableVertexAttribArray.?(2);
-    gl.VertexAttribPointer.?(2, 4, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(2 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(2, 1);
-    // Attr 3: uv_left, uv_top, uv_right, uv_bottom
-    gl.EnableVertexAttribArray.?(3);
-    gl.VertexAttribPointer.?(3, 4, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(6 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(3, 1);
-    // Attr 4: r, g, b
-    gl.EnableVertexAttribArray.?(4);
-    gl.VertexAttribPointer.?(4, 3, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(10 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(4, 1);
-
-    gl.BindVertexArray.?(0);
-
-    // --- Color FG VAO (same layout as FG, separate buffer for color emoji) ---
-    gl.GenVertexArrays.?(1, &color_fg_vao);
-    gl.GenBuffers.?(1, &color_fg_instance_vbo);
-    gl.BindVertexArray.?(color_fg_vao);
-
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, quad_vbo);
-    gl.EnableVertexAttribArray.?(0);
-    gl.VertexAttribPointer.?(0, 2, c.GL_FLOAT, c.GL_FALSE, 2 * @sizeOf(f32), null);
-
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, color_fg_instance_vbo);
-    gl.BufferData.?(c.GL_ARRAY_BUFFER, @sizeOf(Renderer.CellFg) * Renderer.MAX_CELLS, null, c.GL_STREAM_DRAW);
-    gl.EnableVertexAttribArray.?(1);
-    gl.VertexAttribPointer.?(1, 2, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(0));
-    gl.VertexAttribDivisor.?(1, 1);
-    gl.EnableVertexAttribArray.?(2);
-    gl.VertexAttribPointer.?(2, 4, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(2 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(2, 1);
-    gl.EnableVertexAttribArray.?(3);
-    gl.VertexAttribPointer.?(3, 4, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(6 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(3, 1);
-    gl.EnableVertexAttribArray.?(4);
-    gl.VertexAttribPointer.?(4, 3, c.GL_FLOAT, c.GL_FALSE, fg_stride, @ptrFromInt(10 * @sizeOf(f32)));
-    gl.VertexAttribDivisor.?(4, 1);
-
-    gl.BindVertexArray.?(0);
-
-    // --- Compile instanced shaders ---
-    bg_shader = linkProgram(bg_vertex_source, bg_fragment_source);
-    fg_shader = linkProgram(fg_vertex_source, fg_fragment_source);
-    color_fg_shader = linkProgram(fg_vertex_source, color_fg_fragment_source);
-    if (bg_shader == 0) std.debug.print("BG instanced shader failed\n", .{});
-    if (fg_shader == 0) std.debug.print("FG instanced shader failed\n", .{});
-    if (color_fg_shader == 0) std.debug.print("Color FG instanced shader failed\n", .{});
-
-    // Simple color shader for titlebar emoji (uses same vertex layout as text shader)
-    simple_color_shader = linkProgram(vertex_shader_source, simple_color_fragment_source);
-    if (simple_color_shader == 0) std.debug.print("Simple color shader failed\n", .{});
-
-    // Overlay shader for unfocused split dimming (solid color with alpha)
-    overlay_shader = linkProgram(vertex_shader_source, overlay_fragment_source);
-    if (overlay_shader == 0) std.debug.print("Overlay shader failed\n", .{});
-}
-
-// Solid white texture for drawing filled quads
-threadlocal var solid_texture: c.GLuint = 0;
-
-fn initSolidTexture() void {
-    const white_pixel = [_]u8{ 255 };
-    gl.GenTextures.?(1, &solid_texture);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, solid_texture);
-    gl.TexImage2D.?(c.GL_TEXTURE_2D, 0, c.GL_RED, 1, 1, 0, c.GL_RED, c.GL_UNSIGNED_BYTE, &white_pixel);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_NEAREST);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
-}
+// GL init, shader sources, render helpers — see appwindow/gl_init.zig
 
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
 pub threadlocal var g_focus_follows_mouse: bool = false;
-
-pub fn renderQuad(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
-    renderQuadAlpha(x, y, w, h, color, 1.0);
-}
-
-pub fn renderQuadAlpha(x: f32, y: f32, w: f32, h: f32, color: [3]f32, alpha: f32) void {
-    const vertices = [6][4]f32{
-        .{ x, y + h, 0.0, 0.0 },
-        .{ x, y, 0.0, 1.0 },
-        .{ x + w, y, 1.0, 1.0 },
-        .{ x, y + h, 0.0, 0.0 },
-        .{ x + w, y, 1.0, 1.0 },
-        .{ x + w, y + h, 1.0, 0.0 },
-    };
-
-    // Pre-multiply alpha into color and use the solid texture (which has alpha=1).
-    // With GL_SRC_ALPHA blending, we set textColor to full RGB and modulate alpha
-    // via the vec4 output. Since our fragment shader does:
-    //   color = vec4(textColor, 1.0) * sampled
-    // and sampled = vec4(1,1,1, texture.r) with solid_texture.r = 1,
-    // the output alpha is always 1. To get transparency we use a small trick:
-    // temporarily blend manually by dimming the color toward the background.
-    // This avoids needing a shader change.
-    const r = color[0] * alpha + g_theme.background[0] * (1 - alpha);
-    const g = color[1] * alpha + g_theme.background[1] * (1 - alpha);
-    const b = color[2] * alpha + g_theme.background[2] * (1 - alpha);
-
-    gl.Uniform3f.?(gl.GetUniformLocation.?(shader_program, "textColor"), r, g, b);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, solid_texture);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
-    gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); g_draw_call_count += 1;
-}
-
-// Terminal cursor style defined in renderer/cursor.zig
-const TerminalCursorStyle = renderer.cursor.TerminalCursorStyle;
-
-// ============================================================================
-// FBO Management for Per-Surface Rendering
-// ============================================================================
-
-/// Create or resize an FBO for a renderer.
-/// Must be called from main thread with GL context current.
-fn ensureRendererFBO(rend: *Renderer, width: u32, height: u32) void {
-    if (!rend.needsFBOUpdate(width, height)) return;
-
-    // Clean up existing FBO if resizing
-    if (rend.isFBOReady()) {
-        cleanupRendererFBO(rend);
-    }
-
-    // Create framebuffer
-    var fbo: c.GLuint = 0;
-    gl.GenFramebuffers.?(1, &fbo);
-    gl.BindFramebuffer.?(c.GL_FRAMEBUFFER, fbo);
-
-    // Create texture for color attachment
-    var texture: c.GLuint = 0;
-    gl.GenTextures.?(1, &texture);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, texture);
-    gl.TexImage2D.?(
-        c.GL_TEXTURE_2D,
-        0,
-        c.GL_RGBA8,
-        @intCast(width),
-        @intCast(height),
-        0,
-        c.GL_RGBA,
-        c.GL_UNSIGNED_BYTE,
-        null,
-    );
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-    gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
-
-    // Attach texture to framebuffer
-    gl.FramebufferTexture2D.?(c.GL_FRAMEBUFFER, c.GL_COLOR_ATTACHMENT0, c.GL_TEXTURE_2D, texture, 0);
-
-    // Check framebuffer completeness
-    const status = gl.CheckFramebufferStatus.?(c.GL_FRAMEBUFFER);
-    if (status != c.GL_FRAMEBUFFER_COMPLETE) {
-        std.debug.print("FBO incomplete: 0x{X}\n", .{status});
-    }
-
-    // Unbind
-    gl.BindFramebuffer.?(c.GL_FRAMEBUFFER, 0);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, 0);
-
-    // Store handles in renderer
-    rend.setFBOHandles(fbo, texture, width, height);
-}
-
-/// Clean up FBO resources for a renderer.
-fn cleanupRendererFBO(rend: *Renderer) void {
-    if (!rend.isFBOReady()) return;
-
-    var texture = rend.getTexture();
-    var fbo = rend.getFBO();
-
-    if (texture != 0) {
-        gl.DeleteTextures.?(1, &texture);
-    }
-    if (fbo != 0) {
-        gl.DeleteFramebuffers.?(1, &fbo);
-    }
-
-    rend.clearFBOHandles();
-}
-
-/// Bind a renderer's FBO for drawing.
-fn bindRendererFBO(rend: *Renderer) void {
-    if (!rend.isFBOReady()) return;
-    gl.BindFramebuffer.?(c.GL_FRAMEBUFFER, rend.getFBO());
-    const size = rend.getFBOSize();
-    gl.Viewport.?(0, 0, @intCast(size.width), @intCast(size.height));
-}
-
-/// Unbind FBO (return to default framebuffer).
-fn unbindFBO() void {
-    gl.BindFramebuffer.?(c.GL_FRAMEBUFFER, 0);
-}
-
-/// Draw a renderer's FBO texture as a quad at the given screen position.
-/// This composites the surface onto the main framebuffer.
-fn drawRendererFBOToScreen(rend: *Renderer, x: f32, y: f32, w: f32, h: f32, window_height: f32, window_width: f32) void {
-    if (!rend.isFBOReady()) return;
-
-    // Convert from top-left screen coords to OpenGL bottom-left coords
-    const gl_y = window_height - y - h;
-
-    // Vertices for textured quad (position + texcoord)
-    const vertices = [6][4]f32{
-        .{ x, gl_y + h, 0.0, 1.0 }, // top-left
-        .{ x, gl_y, 0.0, 0.0 }, // bottom-left
-        .{ x + w, gl_y, 1.0, 0.0 }, // bottom-right
-        .{ x, gl_y + h, 0.0, 1.0 }, // top-left
-        .{ x + w, gl_y, 1.0, 0.0 }, // bottom-right
-        .{ x + w, gl_y + h, 1.0, 1.0 }, // top-right
-    };
-
-    // Set up projection matrix for screen space
-    const projection = [16]f32{
-        2.0 / window_width, 0.0,                 0.0,  0.0,
-        0.0,                2.0 / window_height, 0.0,  0.0,
-        0.0,                0.0,                 -1.0, 0.0,
-        -1.0,               -1.0,                0.0,  1.0,
-    };
-
-    // Use the color texture shader (samples RGBA directly)
-    gl.UseProgram.?(simple_color_shader);
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
-    gl.Uniform1f.?(gl.GetUniformLocation.?(simple_color_shader, "opacity"), 1.0);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindTexture.?(c.GL_TEXTURE_2D, rend.getTexture());
-    gl.Uniform1i.?(gl.GetUniformLocation.?(simple_color_shader, "text"), 0);
-    gl.BindVertexArray.?(vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
-    gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    g_draw_call_count += 1;
-}
 
 /// Update cursor blink state based on time (call once per frame)
 fn updateCursorBlink() void {
@@ -1417,7 +443,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         if (font.g_titlebar_atlas != null) font.syncAtlasTexture(&font.g_titlebar_atlas, &font.g_titlebar_atlas_texture, &font.g_titlebar_atlas_modified);
 
         gl.Viewport.?(0, 0, width, height);
-        setProjection(@floatFromInt(width), @floatFromInt(height));
+        gl_init.setProjection(@floatFromInt(width), @floatFromInt(height));
         gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
         titlebar.renderTitlebar(@floatFromInt(width), @floatFromInt(height), tb);
@@ -1427,7 +453,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         overlays.renderDebugOverlay(@floatFromInt(width));
     } else {
         gl.Viewport.?(0, 0, width, height);
-        setProjection(@floatFromInt(width), @floatFromInt(height));
+        gl_init.setProjection(@floatFromInt(width), @floatFromInt(height));
         gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
         titlebar.renderTitlebar(@floatFromInt(width), @floatFromInt(height), tb);
@@ -1585,41 +611,6 @@ fn handleBell(surface: *Surface, win: *win32_backend.Window, is_active_tab: bool
     win.flashTaskbar();
 }
 
-// ============================================================================
-// Shared helpers (used by both backends)
-// ============================================================================
-
-
-pub fn setProjection(width: f32, height: f32) void {
-    const projection = [16]f32{
-        2.0 / width, 0.0,          0.0,  0.0,
-        0.0,         2.0 / height, 0.0,  0.0,
-        0.0,         0.0,          -1.0, 0.0,
-        -1.0,        -1.0,         0.0,  1.0,
-    };
-
-    gl.UseProgram.?(shader_program);
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(shader_program, "projection"), 1, c.GL_FALSE, &projection);
-}
-
-/// Set the orthographic projection matrix on a specific shader program.
-pub fn setProjectionForProgram(program: c.GLuint, window_height: f32) void {
-    var viewport: [4]c.GLint = undefined;
-    gl.GetIntegerv.?(c.GL_VIEWPORT, &viewport);
-    const width: f32 = @floatFromInt(viewport[2]);
-    const height: f32 = @floatFromInt(viewport[3]);
-    _ = window_height;
-
-    const projection = [16]f32{
-        2.0 / width, 0.0,          0.0,  0.0,
-        0.0,         2.0 / height, 0.0,  0.0,
-        0.0,         0.0,          -1.0, 0.0,
-        -1.0,        -1.0,         0.0,  1.0,
-    };
-
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(program, "projection"), 1, c.GL_FALSE, &projection);
-}
-
 /// Internal main loop - called by AppWindow.run() after init() has set up globals.
 fn runMainLoop(allocator: std.mem.Allocator) !void {
     // Use stored config values from init()
@@ -1760,12 +751,12 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     // Store font size globally for fallback fonts
     font.g_font_size = font_size;
 
-    if (!initShaders()) {
+    if (!gl_init.initShaders()) {
         std.debug.print("Failed to initialize shaders\n", .{});
         return error.ShaderInitFailed;
     }
-    initBuffers();
-    initInstancedBuffers();
+    gl_init.initBuffers();
+    gl_init.initInstancedBuffers();
     font.preloadCharacters(face);
 
     // Initialize titlebar font — same family at fixed 14pt for crisp tab titles
@@ -1851,23 +842,13 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             font.g_titlebar_atlas_texture = 0;
         }
     }
-    initSolidTexture();
+    gl_init.initSolidTexture();
 
     // Initialize custom post-processing shader if requested
     post_process.init(allocator, shader_path);
     defer {
         post_process.deinit();
-        // Clean up instanced rendering resources
-        if (bg_shader != 0) gl.DeleteProgram.?(bg_shader);
-        if (fg_shader != 0) gl.DeleteProgram.?(fg_shader);
-        if (color_fg_shader != 0) gl.DeleteProgram.?(color_fg_shader);
-        if (bg_vao != 0) gl.DeleteVertexArrays.?(1, &bg_vao);
-        if (fg_vao != 0) gl.DeleteVertexArrays.?(1, &fg_vao);
-        if (color_fg_vao != 0) gl.DeleteVertexArrays.?(1, &color_fg_vao);
-        if (bg_instance_vbo != 0) gl.DeleteBuffers.?(1, &bg_instance_vbo);
-        if (fg_instance_vbo != 0) gl.DeleteBuffers.?(1, &fg_instance_vbo);
-        if (color_fg_instance_vbo != 0) gl.DeleteBuffers.?(1, &color_fg_instance_vbo);
-        if (quad_vbo != 0) gl.DeleteBuffers.?(1, &quad_vbo);
+        gl_init.deinitInstancedResources();
     }
 
     // Ghostty approach: calculate grid size from ACTUAL window size.
@@ -2061,7 +1042,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         const fb_width: c_int = fb.width;
         const fb_height: c_int = fb.height;
 
-        g_draw_call_count = 0;
+        gl_init.g_draw_call_count = 0;
         overlays.updateFps();
 
         // Sync atlas textures to GPU if modified
@@ -2131,7 +1112,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     if (needs_rebuild) cell_renderer.rebuildCells(rend);
 
                     gl.Viewport.?(0, 0, fb_width, fb_height);
-                    setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+                    gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
                     gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
                     gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
 
@@ -2148,7 +1129,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             } else {
                 // Multiple splits: render with scissor/viewport per surface
                 gl.Viewport.?(0, 0, fb_width, fb_height);
-                setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+                gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
                 gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
                 gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
 
@@ -2157,7 +1138,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                 // Render each split surface directly to screen using viewport
                 if (split_count > 0) {
                     for (0..split_count) |i| {
-                        const rect = g_split_rects[i];
+                        const rect = split_layout.g_split_rects[i];
                         const is_focused = (rect.handle == active_tab.focused);
                         const rend = &rect.surface.surface_renderer;
 
@@ -2167,7 +1148,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                         gl.Viewport.?(rect.x, viewport_y, rect.width, rect.height);
                         
                         // Set projection for this viewport size
-                        setProjection(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                        gl_init.setProjection(@floatFromInt(rect.width), @floatFromInt(rect.height));
 
                         // Update cells for this surface
                         {
@@ -2205,7 +1186,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
                     // Restore full viewport for dividers
                     gl.Viewport.?(0, 0, fb_width, fb_height);
-                    setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+                    gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
                     // Draw split dividers
                     overlays.renderSplitDividers(active_tab, content_x, content_y, content_w, content_h, @floatFromInt(fb_height));
@@ -2213,7 +1194,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             }
         } else if (!post_process.g_post_enabled) {
             gl.Viewport.?(0, 0, fb_width, fb_height);
-            setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+            gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
             gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
             gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
@@ -2233,7 +1214,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                 saveWindowState(allocator, .{ .x = rect.left, .y = rect.top });
             } else {
                 // Save the last known windowed position before maximize/fullscreen
-                saveWindowState(allocator, .{ .x = g_windowed_x, .y = g_windowed_y });
+                saveWindowState(allocator, .{ .x = window_state.g_windowed_x, .y = window_state.g_windowed_y });
             }
         }
     }

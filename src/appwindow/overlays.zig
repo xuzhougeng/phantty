@@ -8,6 +8,8 @@ const AppWindow = @import("../AppWindow.zig");
 const titlebar = AppWindow.titlebar;
 const font = AppWindow.font;
 const tab = AppWindow.tab;
+const gl_init = AppWindow.gl_init;
+const split_layout = AppWindow.split_layout;
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 
@@ -16,7 +18,7 @@ const c = @cImport({
 });
 
 const TabState = tab.TabState;
-const SplitRect = AppWindow.SplitRect;
+const SplitRect = split_layout.SplitRect;
 
 // ============================================================================
 // Scrollbar — macOS-style overlay scrollbar with fade
@@ -185,18 +187,18 @@ pub fn renderScrollbarForSurface(surface: *Surface, view_width: f32, view_height
     const bar_w = SCROLLBAR_WIDTH;
 
     // Use the shader_program for quad rendering
-    gl.UseProgram.?(AppWindow.shader_program);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.BindVertexArray.?(gl_init.vao);
 
     const fade = surface.scrollbar_opacity;
 
     // Track background: black at low alpha to subtly lift it from the terminal bg
     const track_alpha = fade * 0.08;
-    AppWindow.renderQuadAlpha(bar_x, geo.track_y, bar_w, geo.track_h, .{ 0, 0, 0 }, track_alpha);
+    gl_init.renderQuadAlpha(bar_x, geo.track_y, bar_w, geo.track_h, .{ 0, 0, 0 }, track_alpha);
 
     // Thumb: black at 45% opacity
     const thumb_alpha = fade * 0.45;
-    AppWindow.renderQuadAlpha(bar_x, geo.thumb_y, bar_w, geo.thumb_h, .{ 0, 0, 0 }, thumb_alpha);
+    gl_init.renderQuadAlpha(bar_x, geo.thumb_y, bar_w, geo.thumb_h, .{ 0, 0, 0 }, thumb_alpha);
 }
 
 /// Render the scrollbar overlay (uses active surface at full window size).
@@ -347,35 +349,35 @@ pub fn renderRoundedQuadAlpha(x: f32, y: f32, w: f32, h: f32, radius: f32, color
     const r = @min(radius, @min(w, h) / 2); // Clamp radius to half of smallest dimension
 
     // Main body (center rectangle, full height minus corners)
-    AppWindow.renderQuadAlpha(x + r, y, w - r * 2, h, color, alpha);
+    gl_init.renderQuadAlpha(x + r, y, w - r * 2, h, color, alpha);
 
     // Left strip (between corners)
-    AppWindow.renderQuadAlpha(x, y + r, r, h - r * 2, color, alpha);
+    gl_init.renderQuadAlpha(x, y + r, r, h - r * 2, color, alpha);
 
     // Right strip (between corners)
-    AppWindow.renderQuadAlpha(x + w - r, y + r, r, h - r * 2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r, y + r, r, h - r * 2, color, alpha);
 
     // Approximate corners with small quads (simple 2-step approximation)
     // Bottom-left corner
     const r2 = r * 0.7; // Inner radius approximation
-    AppWindow.renderQuadAlpha(x + r - r2, y + r - r2, r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x, y + r - r2, r - r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x + r - r2, y, r2, r - r2, color, alpha);
+    gl_init.renderQuadAlpha(x + r - r2, y + r - r2, r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x, y + r - r2, r - r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x + r - r2, y, r2, r - r2, color, alpha);
 
     // Bottom-right corner
-    AppWindow.renderQuadAlpha(x + w - r, y + r - r2, r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x + w - r + r2, y + r - r2, r - r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x + w - r, y, r2, r - r2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r, y + r - r2, r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r + r2, y + r - r2, r - r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r, y, r2, r - r2, color, alpha);
 
     // Top-left corner
-    AppWindow.renderQuadAlpha(x + r - r2, y + h - r, r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x, y + h - r, r - r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x + r - r2, y + h - r + r2, r2, r - r2, color, alpha);
+    gl_init.renderQuadAlpha(x + r - r2, y + h - r, r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x, y + h - r, r - r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x + r - r2, y + h - r + r2, r2, r - r2, color, alpha);
 
     // Top-right corner
-    AppWindow.renderQuadAlpha(x + w - r, y + h - r, r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x + w - r + r2, y + h - r, r - r2, r2, color, alpha);
-    AppWindow.renderQuadAlpha(x + w - r, y + h - r + r2, r2, r - r2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r, y + h - r, r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r + r2, y + h - r, r - r2, r2, color, alpha);
+    gl_init.renderQuadAlpha(x + w - r, y + h - r + r2, r2, r - r2, color, alpha);
 }
 
 /// Render the resize overlay centered on screen.
@@ -439,8 +441,8 @@ fn renderResizeOverlayText(cols: u16, rows: u16, window_width: f32, window_heigh
     gl.Enable.?(c.GL_BLEND);
     gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
 
-    gl.UseProgram.?(AppWindow.shader_program);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.BindVertexArray.?(gl_init.vao);
 
     // Draw rounded background box (black with alpha, slightly more transparent than scrollbar)
     const corner_radius: f32 = 6;
@@ -466,8 +468,8 @@ pub fn renderUnfocusedOverlay(rect: SplitRect, window_height: f32) void {
     const opacity = 1.0 - g_unfocused_split_opacity;
     if (opacity < 0.01) return;
 
-    gl.UseProgram.?(AppWindow.shader_program);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.BindVertexArray.?(gl_init.vao);
 
     // Draw semi-transparent background color overlay
     const px: f32 = @floatFromInt(rect.x);
@@ -476,7 +478,7 @@ pub fn renderUnfocusedOverlay(rect: SplitRect, window_height: f32) void {
     const ph: f32 = @floatFromInt(rect.height);
 
     // Use background color with alpha for the overlay
-    AppWindow.renderQuadAlpha(px, py, pw, ph, AppWindow.g_theme.background, opacity);
+    gl_init.renderQuadAlpha(px, py, pw, ph, AppWindow.g_theme.background, opacity);
 }
 
 /// Render unfocused overlay within current viewport (for split rendering).
@@ -497,11 +499,11 @@ pub fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
     };
 
     // Use overlay shader with true alpha blending
-    gl.UseProgram.?(AppWindow.overlay_shader);
+    gl.UseProgram.?(gl_init.overlay_shader);
 
     // Set overlay color (background color with alpha)
     gl.Uniform4f.?(
-        gl.GetUniformLocation.?(AppWindow.overlay_shader, "overlayColor"),
+        gl.GetUniformLocation.?(gl_init.overlay_shader, "overlayColor"),
         AppWindow.g_theme.background[0],
         AppWindow.g_theme.background[1],
         AppWindow.g_theme.background[2],
@@ -519,14 +521,14 @@ pub fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
         0.0,            0.0,            -1.0, 0.0,
         -1.0,           -1.0,           0.0,  1.0,
     };
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(AppWindow.overlay_shader, "projection"), 1, c.GL_FALSE, &projection);
+    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(gl_init.overlay_shader, "projection"), 1, c.GL_FALSE, &projection);
 
-    gl.BindVertexArray.?(AppWindow.vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.vbo);
+    gl.BindVertexArray.?(gl_init.vao);
+    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
     gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    AppWindow.g_draw_call_count += 1;
+    gl_init.g_draw_call_count += 1;
 }
 
 /// Render split dividers between panes in the active tab.
@@ -542,8 +544,8 @@ pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_
     var spatial = active_tab.tree.spatial(allocator) catch return;
     defer spatial.deinit(allocator);
 
-    gl.UseProgram.?(AppWindow.shader_program);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.BindVertexArray.?(gl_init.vao);
 
     // Check if custom color is configured
     const use_custom_color = g_split_divider_color != null;
@@ -568,9 +570,9 @@ pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_
                         const div_x = slot_x + slot_w * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
                         const div_y = window_height - slot_y - slot_h;
                         if (use_custom_color) {
-                            AppWindow.renderQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, custom_color);
+                            gl_init.renderQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, custom_color);
                         } else {
-                            AppWindow.renderQuadAlpha(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, .{ 0, 0, 0 }, default_alpha);
+                            gl_init.renderQuadAlpha(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, .{ 0, 0, 0 }, default_alpha);
                         }
                     },
                     .vertical => {
@@ -578,9 +580,9 @@ pub fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_
                         const div_x = slot_x;
                         const div_y = window_height - slot_y - slot_h * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
                         if (use_custom_color) {
-                            AppWindow.renderQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), custom_color);
+                            gl_init.renderQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), custom_color);
                         } else {
-                            AppWindow.renderQuadAlpha(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), .{ 0, 0, 0 }, default_alpha);
+                            gl_init.renderQuadAlpha(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), .{ 0, 0, 0 }, default_alpha);
                         }
                     },
                 }
@@ -624,7 +626,7 @@ pub fn renderDebugOverlay(window_width: f32) void {
     if (g_debug_draw_calls) {
         renderDebugLine(window_width, &overlay_y, margin, pad_h, pad_v, line_h, blk: {
             var buf: [32]u8 = undefined;
-            break :blk std.fmt.bufPrint(&buf, "{d} draws", .{AppWindow.g_draw_call_count}) catch break :blk "";
+            break :blk std.fmt.bufPrint(&buf, "{d} draws", .{gl_init.g_draw_call_count}) catch break :blk "";
         }, .{ 1.0, 1.0, 0.0 });
     }
 }
@@ -633,9 +635,9 @@ fn renderDebugLine(window_width: f32, y_pos: *f32, margin: f32, pad_h: f32, pad_
     const gl = &AppWindow.gl;
     if (text.len == 0) return;
 
-    gl.UseProgram.?(AppWindow.shader_program);
+    gl.UseProgram.?(gl_init.shader_program);
     gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(AppWindow.vao);
+    gl.BindVertexArray.?(gl_init.vao);
 
     var text_width: f32 = 0;
     for (text) |ch| {
@@ -646,7 +648,7 @@ fn renderDebugLine(window_width: f32, y_pos: *f32, margin: f32, pad_h: f32, pad_
     const bg_x = window_width - bg_w - margin;
     const bg_y = y_pos.*;
 
-    AppWindow.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.0, 0.0, 0.0 });
+    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.0, 0.0, 0.0 });
 
     var x = bg_x + pad_h;
     const y = bg_y + pad_v;

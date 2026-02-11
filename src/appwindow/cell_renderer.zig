@@ -12,6 +12,7 @@ const Renderer = @import("../Renderer.zig");
 const AppWindow = @import("../AppWindow.zig");
 const font = AppWindow.font;
 const tab = AppWindow.tab;
+const gl_init = AppWindow.gl_init;
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -62,12 +63,12 @@ pub fn renderChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
         .{ x0 + w, y0 + h, uv.u1, uv.v0 },
     };
 
-    gl.Uniform3f.?(gl.GetUniformLocation.?(AppWindow.shader_program, "textColor"), color[0], color[1], color[2]);
+    gl.Uniform3f.?(gl.GetUniformLocation.?(gl_init.shader_program, "textColor"), color[0], color[1], color[2]);
     gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_atlas_texture);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.vbo);
+    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); AppWindow.g_draw_call_count += 1;
+    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
 }
 
 /// Update terminal cells for a specific surface in a split tree.
@@ -371,57 +372,57 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
     const g_theme = AppWindow.g_theme;
 
     // --- Draw BG cells ---
-    if (rend.bg_cell_count > 0 and AppWindow.bg_shader != 0) {
-        gl.UseProgram.?(AppWindow.bg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(AppWindow.bg_shader, "cellSize"), font.cell_width, font.cell_height);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(AppWindow.bg_shader, "gridOffset"), offset_x, offset_y);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(AppWindow.bg_shader, "windowHeight"), window_height);
-        AppWindow.setProjectionForProgram(AppWindow.bg_shader, window_height);
+    if (rend.bg_cell_count > 0 and gl_init.bg_shader != 0) {
+        gl.UseProgram.?(gl_init.bg_shader);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "cellSize"), font.cell_width, font.cell_height);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "gridOffset"), offset_x, offset_y);
+        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.bg_shader, "windowHeight"), window_height);
+        gl_init.setProjectionForProgram(gl_init.bg_shader, window_height);
 
-        gl.BindVertexArray.?(AppWindow.bg_vao);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.bg_instance_vbo);
+        gl.BindVertexArray.?(gl_init.bg_vao);
+        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.bg_instance_vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), &rend.bg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count)); AppWindow.g_draw_call_count += 1;
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count)); gl_init.g_draw_call_count += 1;
     }
 
     // --- Draw FG cells ---
-    if (rend.fg_cell_count > 0 and AppWindow.fg_shader != 0) {
-        gl.UseProgram.?(AppWindow.fg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(AppWindow.fg_shader, "cellSize"), font.cell_width, font.cell_height);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(AppWindow.fg_shader, "gridOffset"), offset_x, offset_y);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(AppWindow.fg_shader, "windowHeight"), window_height);
-        AppWindow.setProjectionForProgram(AppWindow.fg_shader, window_height);
+    if (rend.fg_cell_count > 0 and gl_init.fg_shader != 0) {
+        gl.UseProgram.?(gl_init.fg_shader);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.fg_shader, "cellSize"), font.cell_width, font.cell_height);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.fg_shader, "gridOffset"), offset_x, offset_y);
+        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.fg_shader, "windowHeight"), window_height);
+        gl_init.setProjectionForProgram(gl_init.fg_shader, window_height);
 
         gl.ActiveTexture.?(c.GL_TEXTURE0);
         gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_atlas_texture);
-        gl.Uniform1i.?(gl.GetUniformLocation.?(AppWindow.fg_shader, "atlas"), 0);
+        gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.fg_shader, "atlas"), 0);
 
-        gl.BindVertexArray.?(AppWindow.fg_vao);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.fg_instance_vbo);
+        gl.BindVertexArray.?(gl_init.fg_vao);
+        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.fg_instance_vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.fg_cell_count), &rend.fg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count)); AppWindow.g_draw_call_count += 1;
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count)); gl_init.g_draw_call_count += 1;
     }
 
     // --- Draw color emoji cells ---
     // Color emoji use premultiplied alpha, so we switch blend mode to (ONE, ONE_MINUS_SRC_ALPHA)
     // for this pass, then restore the normal blend mode afterwards.
-    if (rend.color_fg_cell_count > 0 and AppWindow.color_fg_shader != 0) {
+    if (rend.color_fg_cell_count > 0 and gl_init.color_fg_shader != 0) {
         gl.BlendFunc.?(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
 
-        gl.UseProgram.?(AppWindow.color_fg_shader);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(AppWindow.color_fg_shader, "cellSize"), font.cell_width, font.cell_height);
-        gl.Uniform2f.?(gl.GetUniformLocation.?(AppWindow.color_fg_shader, "gridOffset"), offset_x, offset_y);
-        gl.Uniform1f.?(gl.GetUniformLocation.?(AppWindow.color_fg_shader, "windowHeight"), window_height);
-        AppWindow.setProjectionForProgram(AppWindow.color_fg_shader, window_height);
+        gl.UseProgram.?(gl_init.color_fg_shader);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "cellSize"), font.cell_width, font.cell_height);
+        gl.Uniform2f.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "gridOffset"), offset_x, offset_y);
+        gl.Uniform1f.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "windowHeight"), window_height);
+        gl_init.setProjectionForProgram(gl_init.color_fg_shader, window_height);
 
         gl.ActiveTexture.?(c.GL_TEXTURE0);
         gl.BindTexture.?(c.GL_TEXTURE_2D, font.g_color_atlas_texture);
-        gl.Uniform1i.?(gl.GetUniformLocation.?(AppWindow.color_fg_shader, "atlas"), 0);
+        gl.Uniform1i.?(gl.GetUniformLocation.?(gl_init.color_fg_shader, "atlas"), 0);
 
-        gl.BindVertexArray.?(AppWindow.color_fg_vao);
-        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, AppWindow.color_fg_instance_vbo);
+        gl.BindVertexArray.?(gl_init.color_fg_vao);
+        gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.color_fg_instance_vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.color_fg_cell_count), &rend.color_fg_cells);
-        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count)); AppWindow.g_draw_call_count += 1;
+        gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count)); gl_init.g_draw_call_count += 1;
 
         // Restore normal blend mode for subsequent draws (cursor, titlebar, etc.)
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
@@ -435,18 +436,18 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
             const px = offset_x + @as(f32, @floatFromInt(rend.cached_cursor_x)) * font.cell_width;
             const py = window_height - offset_y - ((@as(f32, @floatFromInt(rend.cached_cursor_y)) + 1) * font.cell_height);
 
-            gl.UseProgram.?(AppWindow.shader_program);
-            gl.BindVertexArray.?(AppWindow.vao);
+            gl.UseProgram.?(gl_init.shader_program);
+            gl.BindVertexArray.?(gl_init.vao);
 
             const cursor_color = g_theme.cursor_color;
             const cursor_thickness: f32 = 1.0;
 
             switch (style) {
-                .bar => AppWindow.renderQuad(px, py, cursor_thickness, font.cell_height, cursor_color),
-                .underline => AppWindow.renderQuad(px, py, font.cell_width, cursor_thickness, cursor_color),
+                .bar => gl_init.renderQuad(px, py, cursor_thickness, font.cell_height, cursor_color),
+                .underline => gl_init.renderQuad(px, py, font.cell_width, cursor_thickness, cursor_color),
                 .block_hollow => {
-                    AppWindow.renderQuad(px, py, font.cell_width, font.cell_height, cursor_color);
-                    AppWindow.renderQuad(
+                    gl_init.renderQuad(px, py, font.cell_width, font.cell_height, cursor_color);
+                    gl_init.renderQuad(
                         px + cursor_thickness,
                         py + cursor_thickness,
                         font.cell_width - cursor_thickness * 2,
@@ -454,7 +455,7 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
                         g_theme.background,
                     );
                 },
-                .block => AppWindow.renderQuad(px, py, font.cell_width, font.cell_height, cursor_color),
+                .block => gl_init.renderQuad(px, py, font.cell_width, font.cell_height, cursor_color),
             }
         }
     }
