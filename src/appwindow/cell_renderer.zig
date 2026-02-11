@@ -503,7 +503,7 @@ pub fn isCellSelected(col: usize, row: usize) bool {
 /// This version uses per-surface renderer state.
 fn cursorEffectiveStyleForRenderer(rend: *const Renderer, terminal_style: Renderer.CursorStyle, terminal_blink: bool) ?Renderer.CursorStyle {
     // Hide cursor during active resize to avoid flicker artifacts
-    if (AppWindow.g_resize_active) return null;
+    if (AppWindow.overlays.g_resize_active) return null;
     // Unfocused window or tab rename: show hollow block
     if (!AppWindow.window_focused or tab.g_tab_rename_active) return .block_hollow;
     // Unfocused split: show hollow block (no blinking)

@@ -9,6 +9,7 @@ const AppWindow = @import("../AppWindow.zig");
 const tab = AppWindow.tab;
 const titlebar = AppWindow.titlebar;
 const font = AppWindow.font;
+const overlays = AppWindow.overlays;
 const win32_backend = @import("../win32.zig");
 const Config = @import("../config.zig");
 const Surface = @import("../Surface.zig");
@@ -82,7 +83,7 @@ fn processSizeChange(win: *win32_backend.Window) void {
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const explicit_left: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
-    const explicit_right: f32 = @as(f32, @floatFromInt(AppWindow.DEFAULT_PADDING)) + AppWindow.SCROLLBAR_WIDTH;
+    const explicit_right: f32 = @as(f32, @floatFromInt(AppWindow.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
     const explicit_bottom: f32 = @floatFromInt(AppWindow.DEFAULT_PADDING);
 
@@ -285,7 +286,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
                 surface.render_state.mutex.lock();
                 surface.terminal.scrollViewport(.{ .delta = -@as(isize, AppWindow.term_rows / 2) }) catch {};
                 surface.render_state.mutex.unlock();
-                AppWindow.scrollbarShow();
+                overlays.scrollbarShow();
                 break :blk null;
             }
             break :blk "\x1b[5~";
@@ -295,7 +296,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
                 surface.render_state.mutex.lock();
                 surface.terminal.scrollViewport(.{ .delta = @as(isize, AppWindow.term_rows / 2) }) catch {};
                 surface.render_state.mutex.unlock();
-                AppWindow.scrollbarShow();
+                overlays.scrollbarShow();
                 break :blk null;
             }
             break :blk "\x1b[6~";
@@ -416,20 +417,20 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             const tb_f: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
             const top_pad: f32 = 10 + tb_f;
             const sb_opacity = if (AppWindow.activeSurface()) |s| s.scrollbar_opacity else 0;
-            if (sb_opacity > 0 and AppWindow.scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad)) {
-                AppWindow.g_scrollbar_dragging = true;
-                AppWindow.scrollbarShow();
+            if (sb_opacity > 0 and overlays.scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad)) {
+                overlays.g_scrollbar_dragging = true;
+                overlays.scrollbarShow();
                 // Calculate drag offset within thumb
-                if (AppWindow.scrollbarThumbHitTest(ypos, h_f, top_pad)) {
+                if (overlays.scrollbarThumbHitTest(ypos, h_f, top_pad)) {
                     // Clicked on thumb — offset from top of thumb
-                    const geo = AppWindow.scrollbarGeometry(h_f, top_pad) orelse return;
+                    const geo = overlays.scrollbarGeometry(h_f, top_pad) orelse return;
                     const thumb_top_px = h_f - (geo.thumb_y + geo.thumb_h); // convert GL→pixel
-                    AppWindow.g_scrollbar_drag_offset = @as(f32, @floatCast(ypos)) - thumb_top_px;
+                    overlays.g_scrollbar_drag_offset = @as(f32, @floatCast(ypos)) - thumb_top_px;
                 } else {
                     // Clicked on track — jump thumb center to click position
-                    const geo = AppWindow.scrollbarGeometry(h_f, top_pad) orelse return;
-                    AppWindow.g_scrollbar_drag_offset = geo.thumb_h / 2;
-                    AppWindow.scrollbarDrag(ypos, h_f, top_pad);
+                    const geo = overlays.scrollbarGeometry(h_f, top_pad) orelse return;
+                    overlays.g_scrollbar_drag_offset = geo.thumb_h / 2;
+                    overlays.scrollbarDrag(ypos, h_f, top_pad);
                 }
                 return;
             }
@@ -478,7 +479,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             AppWindow.g_click_y = ypos;
         } else {
             // Mouse up
-            AppWindow.g_scrollbar_dragging = false;
+            overlays.g_scrollbar_dragging = false;
 
             // Handle divider drag release
             if (AppWindow.g_divider_dragging) {
@@ -714,21 +715,21 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     const tb_f: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const top_pad: f32 = 10 + tb_f;
 
-    const was_hover = AppWindow.g_scrollbar_hover;
-    AppWindow.g_scrollbar_hover = AppWindow.scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad);
+    const was_hover = overlays.g_scrollbar_hover;
+    overlays.g_scrollbar_hover = overlays.scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad);
     const sb_opacity2 = if (AppWindow.activeSurface()) |s| s.scrollbar_opacity else 0;
-    if (AppWindow.g_scrollbar_hover and !was_hover and sb_opacity2 > 0) {
-        AppWindow.scrollbarShow(); // Reset fade timer when entering scrollbar area
+    if (overlays.g_scrollbar_hover and !was_hover and sb_opacity2 > 0) {
+        overlays.scrollbarShow(); // Reset fade timer when entering scrollbar area
     }
 
     // Handle scrollbar drag
-    if (AppWindow.g_scrollbar_dragging) {
-        AppWindow.scrollbarDrag(ypos, h_f, top_pad);
+    if (overlays.g_scrollbar_dragging) {
+        overlays.scrollbarDrag(ypos, h_f, top_pad);
         return;
     }
 
     // Check for divider hover and update cursor
-    if (!AppWindow.g_scrollbar_hover and !AppWindow.g_selecting) {
+    if (!overlays.g_scrollbar_hover and !AppWindow.g_selecting) {
         if (AppWindow.hitTestDivider(ev.x, ev.y)) |hit| {
             // Set resize cursor based on layout
             const cursor_id = switch (hit.layout) {

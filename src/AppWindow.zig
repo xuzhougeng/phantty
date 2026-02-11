@@ -21,6 +21,7 @@ pub const font = @import("appwindow/font.zig");
 pub const cell_renderer = @import("appwindow/cell_renderer.zig");
 pub const titlebar = @import("appwindow/titlebar.zig");
 pub const input = @import("appwindow/input.zig");
+pub const overlays = @import("appwindow/overlays.zig");
 pub const post_process = @import("appwindow/post_process.zig");
 
 const c = @cImport({
@@ -55,13 +56,13 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     g_force_rebuild = true;
     g_cursor_style = app.cursor_style;
     g_cursor_blink = app.cursor_blink;
-    g_debug_fps = app.debug_fps;
-    g_debug_draw_calls = app.debug_draw_calls;
+    overlays.g_debug_fps = app.debug_fps;
+    overlays.g_debug_draw_calls = app.debug_draw_calls;
 
     // Split config
-    g_unfocused_split_opacity = app.unfocused_split_opacity;
+    overlays.g_unfocused_split_opacity = app.unfocused_split_opacity;
     g_focus_follows_mouse = app.focus_follows_mouse;
-    g_split_divider_color = app.split_divider_color;
+    overlays.g_split_divider_color = app.split_divider_color;
 
     // Apply window size from config
     term_cols = app.initial_cols;
@@ -288,22 +289,7 @@ pub threadlocal var g_selecting: bool = false; // True while mouse button is hel
 pub threadlocal var g_click_x: f64 = 0; // X position of initial click (for threshold calculation)
 pub threadlocal var g_click_y: f64 = 0; // Y position of initial click
 
-// ============================================================================
-// Scrollbar — macOS-style overlay scrollbar with fade
-// ============================================================================
-
-pub const SCROLLBAR_WIDTH: f32 = 12; // Width of the scrollbar track
-const SCROLLBAR_MARGIN: f32 = 2; // Margin from right edge
-const SCROLLBAR_MIN_THUMB: f32 = 20; // Minimum thumb height in pixels
-const SCROLLBAR_FADE_DELAY_MS: i64 = 800; // ms to wait before fading
-const SCROLLBAR_FADE_DURATION_MS: i64 = 400; // ms for fade-out animation
-const SCROLLBAR_HOVER_WIDTH: f32 = 12; // Wider hit area for hover/drag
-
-// Per-surface scrollbar opacity/timing lives in Surface.zig.
-// These are global interaction state (only one mouse):
-pub threadlocal var g_scrollbar_hover: bool = false; // Mouse is over scrollbar area
-pub threadlocal var g_scrollbar_dragging: bool = false; // Currently dragging the thumb
-pub threadlocal var g_scrollbar_drag_offset: f32 = 0; // Offset within thumb where drag started
+// Scrollbar, resize overlay, debug overlays, split rendering — moved to appwindow/overlays.zig
 
 // ============================================================================
 // Split divider dragging — resize splits by dragging the divider
@@ -315,36 +301,6 @@ pub threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
 pub threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
 pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
 pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
-
-// Split resize overlay (for equalize/keyboard resize - shows overlay on all splits temporarily)
-threadlocal var g_split_resize_overlay_until: i64 = 0; // Timestamp when overlay should hide
-
-// ============================================================================
-// Resize overlay — shows terminal size during resize (like Ghostty)
-// ============================================================================
-
-const RESIZE_OVERLAY_DURATION_MS: i64 = 750; // How long to show after resize stops
-const RESIZE_OVERLAY_FADE_MS: i64 = 150; // Fade out duration
-const RESIZE_OVERLAY_FIRST_DELAY_MS: i64 = 500; // Delay before first overlay shows
-
-// Global resize overlay state
-threadlocal var g_resize_overlay_visible: bool = false; // Whether overlay should be showing
-threadlocal var g_resize_overlay_last_change: i64 = 0; // When size last changed
-threadlocal var g_resize_overlay_cols: u16 = 0; // Current cols being displayed
-threadlocal var g_resize_overlay_rows: u16 = 0; // Current rows being displayed
-threadlocal var g_resize_overlay_last_cols: u16 = 0; // Last "settled" cols (after timeout)
-threadlocal var g_resize_overlay_last_rows: u16 = 0; // Last "settled" rows (after timeout)
-threadlocal var g_resize_overlay_ready: bool = false; // Set after initial delay
-threadlocal var g_resize_overlay_init_time: i64 = 0; // When window was created
-threadlocal var g_resize_overlay_opacity: f32 = 0; // For fade out animation
-
-// Resize active state (for cursor hiding) - separate from overlay visibility
-const RESIZE_ACTIVE_TIMEOUT_MS: i64 = 50; // Consider resize "done" after this many ms of no changes
-pub threadlocal var g_resize_active: bool = false; // True while actively resizing
-
-// Suppress resize overlay briefly after tab switch/creation to avoid false triggers
-threadlocal var g_resize_overlay_suppress_until: i64 = 0;
-
 
 // Tab model — see appwindow/tab.zig
 const TabState = tab.TabState;
@@ -528,7 +484,7 @@ fn computeSplitLayout(
         // The surface computes grid size and balanced padding internally.
         // Right padding must account for scrollbar width plus gap.
         const surface = entry.surface;
-        const scrollbar_padding: u32 = @intFromFloat(SCROLLBAR_WIDTH + DEFAULT_PADDING);
+        const scrollbar_padding: u32 = @intFromFloat(overlays.SCROLLBAR_WIDTH + DEFAULT_PADDING);
         const explicit_padding = renderer.size.Padding{
             .top = DEFAULT_PADDING,
             .bottom = DEFAULT_PADDING,
@@ -550,7 +506,7 @@ fn computeSplitLayout(
             // Show resize overlay with new dimensions (but not during divider drag,
             // which has its own per-surface overlay logic)
             if (!g_divider_dragging) {
-                resizeOverlayShow(surface.size.grid.cols, surface.size.grid.rows);
+                overlays.resizeOverlayShow(surface.size.grid.cols, surface.size.grid.rows);
             }
         }
 
@@ -610,9 +566,9 @@ fn clearUiStateOnTabChange() void {
     g_divider_dragging = false;
     g_divider_drag_handle = null;
     g_divider_drag_layout = null;
-    g_resize_overlay_visible = false;
-    g_resize_overlay_opacity = 0;
-    g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
+    overlays.g_resize_overlay_visible = false;
+    overlays.g_resize_overlay_opacity = 0;
+    overlays.g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
     g_force_rebuild = true;
     g_cells_valid = false;
 }
@@ -668,7 +624,7 @@ pub fn splitFocused(direction: SplitTree.Split.Direction) void {
         }
     }
     if (tab.splitFocused(allocator, direction, font.cell_width, font.cell_height, g_cursor_style, g_cursor_blink, cwd)) {
-        g_resize_active = false;
+        overlays.g_resize_active = false;
         g_force_rebuild = true;
         g_cells_valid = false;
     }
@@ -704,7 +660,7 @@ pub fn gotoSplit(direction: SplitTree.Goto) void {
 pub fn equalizeSplits() void {
     const allocator = g_allocator orelse return;
     if (tab.equalizeSplits(allocator)) {
-        g_split_resize_overlay_until = std.time.milliTimestamp() + RESIZE_OVERLAY_DURATION_MS;
+        overlays.g_split_resize_overlay_until = std.time.milliTimestamp() + overlays.RESIZE_OVERLAY_DURATION_MS;
         g_force_rebuild = true;
         g_cells_valid = false;
     }
@@ -949,7 +905,7 @@ const overlay_fragment_source: [*c]const u8 =
     \\    color = overlayColor;
     \\}
 ;
-threadlocal var overlay_shader: c.GLuint = 0;
+pub threadlocal var overlay_shader: c.GLuint = 0;
 pub threadlocal var window_focused: bool = true; // Track window focus state
 
 // Fullscreen state (Alt+Enter to toggle)
@@ -1067,13 +1023,8 @@ const CURSOR_BLINK_INTERVAL_MS: i64 = 600; // Blink interval in ms (same as Ghos
 
 const ConfigWatcher = @import("config_watcher.zig");
 
-// FPS debug overlay state
-threadlocal var g_debug_fps: bool = false; // Whether to show FPS overlay
-threadlocal var g_debug_draw_calls: bool = false; // Whether to show draw call count overlay
+// FPS debug overlay state — moved to appwindow/overlays.zig
 pub threadlocal var g_draw_call_count: u32 = 0; // Reset each frame, incremented on each glDraw* call
-threadlocal var g_fps_frame_count: u32 = 0; // Frames since last FPS update
-threadlocal var g_fps_last_time: i64 = 0; // Timestamp of last FPS calculation
-threadlocal var g_fps_value: f32 = 0; // Current FPS value to display
 
 const vertex_shader_source: [*c]const u8 =
     \\#version 330 core
@@ -1326,141 +1277,8 @@ fn initSolidTexture() void {
     gl.TexParameteri.?(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_NEAREST);
 }
 
-// ============================================================================
-// Split rendering helpers
-// ============================================================================
-
-/// Render a semi-transparent overlay over an unfocused split pane.
-fn renderUnfocusedOverlay(rect: SplitRect, window_height: f32) void {
-    const opacity = 1.0 - g_unfocused_split_opacity;
-    if (opacity < 0.01) return;
-
-    gl.UseProgram.?(shader_program);
-    gl.BindVertexArray.?(vao);
-
-    // Draw semi-transparent background color overlay
-    const px: f32 = @floatFromInt(rect.x);
-    const py: f32 = window_height - @as(f32, @floatFromInt(rect.y + rect.height));
-    const pw: f32 = @floatFromInt(rect.width);
-    const ph: f32 = @floatFromInt(rect.height);
-
-    // Use background color with alpha for the overlay
-    renderQuadAlpha(px, py, pw, ph, g_theme.background, opacity);
-}
-
-/// Render unfocused overlay within current viewport (for split rendering).
-/// Assumes viewport is already set to the split's region.
-/// Uses true alpha blending so it blends with actual rendered content.
-fn renderUnfocusedOverlaySimple(width: f32, height: f32) void {
-    const alpha = 1.0 - g_unfocused_split_opacity;
-    if (alpha < 0.01) return;
-
-    const vertices = [6][4]f32{
-        .{ 0, height, 0.0, 0.0 },
-        .{ 0, 0, 0.0, 1.0 },
-        .{ width, 0, 1.0, 1.0 },
-        .{ 0, height, 0.0, 0.0 },
-        .{ width, 0, 1.0, 1.0 },
-        .{ width, height, 1.0, 0.0 },
-    };
-
-    // Use overlay shader with true alpha blending
-    gl.UseProgram.?(overlay_shader);
-    
-    // Set overlay color (background color with alpha)
-    gl.Uniform4f.?(
-        gl.GetUniformLocation.?(overlay_shader, "overlayColor"),
-        g_theme.background[0],
-        g_theme.background[1],
-        g_theme.background[2],
-        alpha,
-    );
-    
-    // Set projection for current viewport
-    var viewport: [4]c.GLint = undefined;
-    gl.GetIntegerv.?(c.GL_VIEWPORT, &viewport);
-    const vp_width: f32 = @floatFromInt(viewport[2]);
-    const vp_height: f32 = @floatFromInt(viewport[3]);
-    const projection = [16]f32{
-        2.0 / vp_width, 0.0,            0.0,  0.0,
-        0.0,            2.0 / vp_height, 0.0,  0.0,
-        0.0,            0.0,            -1.0, 0.0,
-        -1.0,           -1.0,           0.0,  1.0,
-    };
-    gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(overlay_shader, "projection"), 1, c.GL_FALSE, &projection);
-
-    gl.BindVertexArray.?(vao);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, vbo);
-    gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
-    gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
-    g_draw_call_count += 1;
-}
-
-/// Render split dividers between panes in the active tab.
-/// If split-divider-color is configured, uses that color (solid).
-/// Otherwise uses scrollbar-style rendering: black with alpha transparency.
-fn renderSplitDividers(active_tab: *const TabState, content_x: i32, content_y: i32, content_w: i32, content_h: i32, window_height: f32) void {
-    if (!active_tab.tree.isSplit()) return;
-
-    const allocator = g_allocator orelse return;
-
-    // Get spatial representation
-    var spatial = active_tab.tree.spatial(allocator) catch return;
-    defer spatial.deinit(allocator);
-
-    gl.UseProgram.?(shader_program);
-    gl.BindVertexArray.?(vao);
-
-    // Check if custom color is configured
-    const use_custom_color = g_split_divider_color != null;
-    const custom_color = g_split_divider_color orelse .{ 0, 0, 0 };
-    // Default alpha - similar to scrollbar thumb (0.45) but slightly less prominent
-    const default_alpha: f32 = 0.35;
-
-    // Walk the tree nodes and draw dividers for each split
-    for (active_tab.tree.nodes, 0..) |node, i| {
-        switch (node) {
-            .leaf => {},
-            .split => |s| {
-                const slot = spatial.slots[i];
-                const slot_x: f32 = @as(f32, @floatCast(slot.x)) * @as(f32, @floatFromInt(content_w)) + @as(f32, @floatFromInt(content_x));
-                const slot_y: f32 = @as(f32, @floatCast(slot.y)) * @as(f32, @floatFromInt(content_h)) + @as(f32, @floatFromInt(content_y));
-                const slot_w: f32 = @as(f32, @floatCast(slot.width)) * @as(f32, @floatFromInt(content_w));
-                const slot_h: f32 = @as(f32, @floatCast(slot.height)) * @as(f32, @floatFromInt(content_h));
-
-                switch (s.layout) {
-                    .horizontal => {
-                        // Vertical divider at ratio position
-                        const div_x = slot_x + slot_w * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
-                        const div_y = window_height - slot_y - slot_h;
-                        if (use_custom_color) {
-                            renderQuad(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, custom_color);
-                        } else {
-                            renderQuadAlpha(div_x, div_y, @floatFromInt(SPLIT_DIVIDER_WIDTH), slot_h, .{ 0, 0, 0 }, default_alpha);
-                        }
-                    },
-                    .vertical => {
-                        // Horizontal divider at ratio position
-                        const div_x = slot_x;
-                        const div_y = window_height - slot_y - slot_h * @as(f32, @floatCast(s.ratio)) - @as(f32, @floatFromInt(@divTrunc(SPLIT_DIVIDER_WIDTH, 2)));
-                        if (use_custom_color) {
-                            renderQuad(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), custom_color);
-                        } else {
-                            renderQuadAlpha(div_x, div_y, slot_w, @floatFromInt(SPLIT_DIVIDER_WIDTH), .{ 0, 0, 0 }, default_alpha);
-                        }
-                    },
-                }
-            },
-        }
-    }
-}
-
-/// Unfocused split opacity (default 0.7, configurable)
-threadlocal var g_unfocused_split_opacity: f32 = 0.7;
-
-/// Split divider color (null = use scrollbar style with alpha)
-threadlocal var g_split_divider_color: ?[3]f32 = null;
+// Split rendering helpers (renderUnfocusedOverlay, renderUnfocusedOverlaySimple,
+// renderSplitDividers) moved to appwindow/overlays.zig
 
 /// Focus follows mouse - when true, moving mouse into a split pane focuses it
 pub threadlocal var g_focus_follows_mouse: bool = false;
@@ -1631,438 +1449,7 @@ fn drawRendererFBOToScreen(rend: *Renderer, x: f32, y: f32, w: f32, h: f32, wind
     g_draw_call_count += 1;
 }
 
-/// Update the FPS counter. Call once per frame.
-fn updateFps() void {
-    g_fps_frame_count += 1;
-    const now = std.time.milliTimestamp();
-    const elapsed = now - g_fps_last_time;
-    if (elapsed >= 1000) {
-        g_fps_value = @as(f32, @floatFromInt(g_fps_frame_count)) * 1000.0 / @as(f32, @floatFromInt(elapsed));
-        g_fps_frame_count = 0;
-        g_fps_last_time = now;
-    }
-}
-
-// ============================================================================
-// Scrollbar — macOS-style overlay with fade
-// ============================================================================
-
-/// Scrollbar geometry result.
-pub const ScrollbarGeometry = struct {
-    track_x: f32,
-    track_y: f32, // bottom of track (GL coords, y=0 is bottom)
-    track_h: f32,
-    thumb_y: f32,
-    thumb_h: f32,
-};
-
-/// Compute scrollbar geometry for a specific surface.
-/// Returns null if there's no scrollback (nothing to scroll).
-fn scrollbarGeometryForSurface(surface: *Surface, view_height: f32, top_padding: f32) ?ScrollbarGeometry {
-    const sb = surface.terminal.screens.active.pages.scrollbar();
-    if (sb.total <= sb.len) return null; // No scrollback, no scrollbar
-
-    // Track spans the terminal content area (below top padding, all the way to bottom)
-    const track_top = view_height - top_padding; // top of terminal area in GL coords
-    const track_bottom: f32 = 0; // extend to bottom edge
-    const track_h = track_top - track_bottom;
-    if (track_h <= 0) return null;
-
-    // Thumb proportional to visible / total
-    const ratio = @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total));
-    const thumb_h = @max(SCROLLBAR_MIN_THUMB, track_h * ratio);
-
-    // Thumb position: offset=0 means top, offset=total-len means bottom
-    const max_offset = @as(f32, @floatFromInt(sb.total - sb.len));
-    const scroll_frac = if (max_offset > 0)
-        @as(f32, @floatFromInt(sb.offset)) / max_offset
-    else
-        0;
-    // In GL coords: top of track is higher y value
-    const thumb_top = track_top - scroll_frac * (track_h - thumb_h);
-    const thumb_y = thumb_top - thumb_h;
-
-    return .{
-        .track_x = 0, // placeholder — caller provides view_width
-        .track_y = track_bottom,
-        .track_h = track_h,
-        .thumb_y = thumb_y,
-        .thumb_h = thumb_h,
-    };
-}
-
-/// Compute scrollbar geometry from terminal state (uses active surface).
-/// Returns null if there's no scrollback (nothing to scroll).
-pub fn scrollbarGeometry(window_height: f32, top_padding: f32) ?ScrollbarGeometry {
-    const surface = activeSurface() orelse return null;
-    return scrollbarGeometryForSurface(surface, window_height, top_padding);
-}
-
-/// Show the scrollbar on the active surface (reset fade timer).
-pub fn scrollbarShow() void {
-    const surface = activeSurface() orelse return;
-    surface.scrollbar_opacity = 1.0;
-    surface.scrollbar_show_time = std.time.milliTimestamp();
-}
-
-/// Update scrollbar fade animation for a surface. Call once per frame.
-fn scrollbarUpdateFade(surface: *Surface) void {
-    if (g_scrollbar_hover or g_scrollbar_dragging) {
-        surface.scrollbar_opacity = 1.0;
-        return;
-    }
-    if (surface.scrollbar_opacity <= 0) return;
-
-    const now = std.time.milliTimestamp();
-    const elapsed = now - surface.scrollbar_show_time;
-
-    if (elapsed < SCROLLBAR_FADE_DELAY_MS) {
-        surface.scrollbar_opacity = 1.0;
-    } else {
-        const fade_elapsed = elapsed - SCROLLBAR_FADE_DELAY_MS;
-        if (fade_elapsed >= SCROLLBAR_FADE_DURATION_MS) {
-            surface.scrollbar_opacity = 0;
-        } else {
-            surface.scrollbar_opacity = 1.0 - @as(f32, @floatFromInt(fade_elapsed)) / @as(f32, @floatFromInt(SCROLLBAR_FADE_DURATION_MS));
-        }
-    }
-}
-
-/// Render the scrollbar overlay for a specific surface within the current viewport.
-/// view_width/view_height are the viewport dimensions (not full window).
-/// top_padding is the padding from the top of the viewport to the terminal content.
-fn renderScrollbarForSurface(surface: *Surface, view_width: f32, view_height: f32, top_padding: f32) void {
-    scrollbarUpdateFade(surface);
-    if (surface.scrollbar_opacity <= 0.01) return;
-
-    const geo = scrollbarGeometryForSurface(surface, view_height, top_padding) orelse return;
-
-    const bar_x = view_width - SCROLLBAR_WIDTH;
-    const bar_w = SCROLLBAR_WIDTH;
-
-    // Use the shader_program for quad rendering
-    gl.UseProgram.?(shader_program);
-    gl.BindVertexArray.?(vao);
-
-    const fade = surface.scrollbar_opacity;
-
-    // Track background: black at low alpha to subtly lift it from the terminal bg
-    const track_alpha = fade * 0.08;
-    renderQuadAlpha(bar_x, geo.track_y, bar_w, geo.track_h, .{ 0, 0, 0 }, track_alpha);
-
-    // Thumb: black at 45% opacity
-    const thumb_alpha = fade * 0.45;
-    renderQuadAlpha(bar_x, geo.thumb_y, bar_w, geo.thumb_h, .{ 0, 0, 0 }, thumb_alpha);
-}
-
-/// Render the scrollbar overlay (uses active surface at full window size).
-fn renderScrollbar(window_width: f32, window_height: f32, top_padding: f32) void {
-    const surface = activeSurface() orelse return;
-    renderScrollbarForSurface(surface, window_width, window_height, top_padding);
-}
-
-// ============================================================================
-// Resize overlay — shows "cols × rows" during terminal resize
-// ============================================================================
-
-/// Trigger the resize overlay to show with the given dimensions.
-/// Called whenever the terminal size changes.
-fn resizeOverlayShow(cols: u16, rows: u16) void {
-    const now = std.time.milliTimestamp();
-
-    // Check if overlay is suppressed (e.g., after tab switch)
-    if (now < g_resize_overlay_suppress_until) {
-        // Still update last cols/rows so we don't flash when suppression ends
-        g_resize_overlay_last_cols = cols;
-        g_resize_overlay_last_rows = rows;
-        return;
-    }
-
-    // Mark resize as active (for cursor hiding)
-    g_resize_active = true;
-    g_resize_overlay_last_change = now;
-
-    // Check if we're past the initial delay (avoid showing during initial window setup)
-    if (!g_resize_overlay_ready) {
-        if (g_resize_overlay_init_time == 0) {
-            g_resize_overlay_init_time = now;
-        }
-        if (now - g_resize_overlay_init_time < RESIZE_OVERLAY_FIRST_DELAY_MS) {
-            // Still in initial delay - update last_cols/rows so we don't flash when ready
-            g_resize_overlay_last_cols = cols;
-            g_resize_overlay_last_rows = rows;
-            return;
-        }
-        g_resize_overlay_ready = true;
-    }
-
-    // Update current size
-    g_resize_overlay_cols = cols;
-    g_resize_overlay_rows = rows;
-
-    // Show overlay if size differs from last settled size
-    if (cols != g_resize_overlay_last_cols or rows != g_resize_overlay_last_rows) {
-        g_resize_overlay_visible = true;
-        g_resize_overlay_opacity = 1.0;
-    }
-}
-
-/// Update resize overlay state. Call once per frame.
-/// Handles the timeout logic and fade animation.
-fn resizeOverlayUpdate() void {
-    const now = std.time.milliTimestamp();
-    const elapsed = now - g_resize_overlay_last_change;
-
-    // Update resize active state (short timeout for cursor to reappear)
-    if (g_resize_active and elapsed >= RESIZE_ACTIVE_TIMEOUT_MS) {
-        g_resize_active = false;
-    }
-
-    if (!g_resize_overlay_visible and g_resize_overlay_opacity <= 0) return;
-
-    if (g_resize_overlay_visible) {
-        // Check if we should start hiding (size hasn't changed for DURATION_MS)
-        if (elapsed >= RESIZE_OVERLAY_DURATION_MS) {
-            // Timer completed - "settle" the size and start fade out
-            g_resize_overlay_last_cols = g_resize_overlay_cols;
-            g_resize_overlay_last_rows = g_resize_overlay_rows;
-            g_resize_overlay_visible = false;
-            // opacity stays at current value, will fade in next block
-        }
-    }
-
-    // Handle fade out when not visible
-    if (!g_resize_overlay_visible and g_resize_overlay_opacity > 0) {
-        const fade_start = g_resize_overlay_last_change + RESIZE_OVERLAY_DURATION_MS;
-        const fade_elapsed = now - fade_start;
-        if (fade_elapsed >= RESIZE_OVERLAY_FADE_MS) {
-            g_resize_overlay_opacity = 0;
-        } else if (fade_elapsed > 0) {
-            g_resize_overlay_opacity = 1.0 - @as(f32, @floatFromInt(fade_elapsed)) / @as(f32, @floatFromInt(RESIZE_OVERLAY_FADE_MS));
-        }
-    }
-}
-
-/// Render a rounded rectangle with the given color and alpha.
-/// Uses multiple quads to approximate rounded corners.
-fn renderRoundedQuadAlpha(x: f32, y: f32, w: f32, h: f32, radius: f32, color: [3]f32, alpha: f32) void {
-    const r = @min(radius, @min(w, h) / 2); // Clamp radius to half of smallest dimension
-
-    // Main body (center rectangle, full height minus corners)
-    renderQuadAlpha(x + r, y, w - r * 2, h, color, alpha);
-
-    // Left strip (between corners)
-    renderQuadAlpha(x, y + r, r, h - r * 2, color, alpha);
-
-    // Right strip (between corners)
-    renderQuadAlpha(x + w - r, y + r, r, h - r * 2, color, alpha);
-
-    // Approximate corners with small quads (simple 2-step approximation)
-    // Bottom-left corner
-    const r2 = r * 0.7; // Inner radius approximation
-    renderQuadAlpha(x + r - r2, y + r - r2, r2, r2, color, alpha);
-    renderQuadAlpha(x, y + r - r2, r - r2, r2, color, alpha);
-    renderQuadAlpha(x + r - r2, y, r2, r - r2, color, alpha);
-
-    // Bottom-right corner
-    renderQuadAlpha(x + w - r, y + r - r2, r2, r2, color, alpha);
-    renderQuadAlpha(x + w - r + r2, y + r - r2, r - r2, r2, color, alpha);
-    renderQuadAlpha(x + w - r, y, r2, r - r2, color, alpha);
-
-    // Top-left corner
-    renderQuadAlpha(x + r - r2, y + h - r, r2, r2, color, alpha);
-    renderQuadAlpha(x, y + h - r, r - r2, r2, color, alpha);
-    renderQuadAlpha(x + r - r2, y + h - r + r2, r2, r - r2, color, alpha);
-
-    // Top-right corner
-    renderQuadAlpha(x + w - r, y + h - r, r2, r2, color, alpha);
-    renderQuadAlpha(x + w - r + r2, y + h - r, r - r2, r2, color, alpha);
-    renderQuadAlpha(x + w - r, y + h - r + r2, r2, r - r2, color, alpha);
-}
-
-/// Render the resize overlay centered on screen.
-fn renderResizeOverlay(window_width: f32, window_height: f32) void {
-    renderResizeOverlayWithOffset(window_width, window_height, 0);
-}
-
-/// Render the resize overlay centered in the content area (below titlebar).
-fn renderResizeOverlayWithOffset(window_width: f32, window_height: f32, top_offset: f32) void {
-    resizeOverlayUpdate();
-    if (g_resize_overlay_opacity <= 0.01) return;
-
-    renderResizeOverlayText(g_resize_overlay_cols, g_resize_overlay_rows, window_width, window_height, top_offset, g_resize_overlay_opacity);
-}
-
-/// Render the resize overlay for a specific surface (used during divider dragging or equalize).
-/// Shows the surface's current dimensions centered in the viewport.
-/// Only shows if this surface's size actually changed during the drag/equalize.
-fn renderResizeOverlayForSurface(surface: *Surface, window_width: f32, window_height: f32) void {
-    // Show during divider dragging OR during timed split resize overlay (equalize, keyboard resize)
-    const show_timed = std.time.milliTimestamp() < g_split_resize_overlay_until;
-    if (!g_divider_dragging and !show_timed) return;
-    if (!surface.resize_overlay_active) return;
-
-    const cols = surface.size.grid.cols;
-    const rows = surface.size.grid.rows;
-
-    renderResizeOverlayText(cols, rows, window_width, window_height, 0, 1.0);
-}
-
-/// Core function to render a resize overlay with specific dimensions.
-fn renderResizeOverlayText(cols: u16, rows: u16, window_width: f32, window_height: f32, top_offset: f32, alpha: f32) void {
-    if (alpha <= 0.01) return;
-
-    // Format the size string: "cols x rows"
-    var buf: [32]u8 = undefined;
-    const text = std.fmt.bufPrint(&buf, "{d} x {d}", .{ cols, rows }) catch return;
-
-    // Measure text width using titlebar glyph system
-    var text_width: f32 = 0;
-    for (text) |ch| {
-        text_width += titlebar.titlebarGlyphAdvance(@intCast(ch));
-    }
-    const text_height = font.g_titlebar_cell_height;
-
-    // Padding around text (compact)
-    const pad_x: f32 = 10;
-    const pad_y: f32 = 6;
-
-    // Box dimensions
-    const box_width = text_width + pad_x * 2;
-    const box_height = text_height + pad_y * 2;
-
-    // Center horizontally, center vertically in content area (below top_offset)
-    const content_height = window_height - top_offset;
-    const box_x = (window_width - box_width) / 2;
-    const box_y = (content_height - box_height) / 2; // Centered in content area (GL coords)
-
-    // Enable blending
-    gl.Enable.?(c.GL_BLEND);
-    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
-
-    gl.UseProgram.?(shader_program);
-    gl.BindVertexArray.?(vao);
-
-    // Draw rounded background box (black with alpha, slightly more transparent than scrollbar)
-    const corner_radius: f32 = 6;
-    renderRoundedQuadAlpha(box_x, box_y, box_width, box_height, corner_radius, .{ 0.0, 0.0, 0.0 }, alpha * 0.35);
-
-    // Draw text using titlebar rendering system (dimmed gray text)
-    var x = box_x + pad_x;
-    const y = box_y + pad_y;
-    const text_gray: f32 = 0.6; // Dimmed gray
-    for (text) |ch| {
-        titlebar.renderTitlebarChar(@intCast(ch), x, y, .{ text_gray, text_gray, text_gray });
-        x += titlebar.titlebarGlyphAdvance(@intCast(ch));
-    }
-}
-
-/// Check if a point (in client pixel coords, origin top-left) is over the scrollbar.
-pub fn scrollbarHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_padding: f32) bool {
-    const bar_right = window_width;
-    const bar_left = window_width - SCROLLBAR_HOVER_WIDTH;
-    const track_top_px = top_padding; // in pixel coords (top-left origin)
-    const track_bottom_px = window_height;
-
-    return @as(f32, @floatCast(xpos)) >= bar_left and
-        @as(f32, @floatCast(xpos)) <= bar_right and
-        @as(f32, @floatCast(ypos)) >= track_top_px and
-        @as(f32, @floatCast(ypos)) <= track_bottom_px;
-}
-
-/// Check if a point is over the scrollbar thumb specifically.
-pub fn scrollbarThumbHitTest(ypos: f64, window_height: f32, top_padding: f32) bool {
-    const geo = scrollbarGeometry(window_height, top_padding) orelse return false;
-    // Convert ypos (top-left origin) to GL coords (bottom-left origin)
-    const gl_y = window_height - @as(f32, @floatCast(ypos));
-    return gl_y >= geo.thumb_y and gl_y <= geo.thumb_y + geo.thumb_h;
-}
-
-/// Handle scrollbar drag: convert pixel y to scroll position.
-pub fn scrollbarDrag(ypos: f64, window_height: f32, top_padding: f32) void {
-    const surface = activeSurface() orelse return;
-    const sb = surface.terminal.screens.active.pages.scrollbar();
-    if (sb.total <= sb.len) return;
-
-    const padding: f32 = 10;
-    const track_top_px = top_padding;
-    const track_bottom_px = window_height - padding;
-    const track_h = track_bottom_px - track_top_px;
-    if (track_h <= 0) return;
-
-    const ratio = @as(f32, @floatFromInt(sb.len)) / @as(f32, @floatFromInt(sb.total));
-    const thumb_h = @max(SCROLLBAR_MIN_THUMB, track_h * ratio);
-    const scrollable_h = track_h - thumb_h;
-    if (scrollable_h <= 0) return;
-
-    // ypos is in top-left coords; track_top_px is the top of the track
-    const y_in_track = @as(f32, @floatCast(ypos)) - track_top_px - g_scrollbar_drag_offset;
-    const frac = std.math.clamp(y_in_track / scrollable_h, 0, 1);
-
-    const max_offset = sb.total - sb.len;
-    const target_offset: isize = @intFromFloat(frac * @as(f32, @floatFromInt(max_offset)));
-    const current_offset: isize = @intCast(sb.offset);
-    const delta = target_offset - current_offset;
-
-    if (delta != 0) {
-        surface.render_state.mutex.lock();
-        defer surface.render_state.mutex.unlock();
-        surface.terminal.scrollViewport(.{ .delta = delta }) catch {};
-    }
-}
-
-/// Render the FPS debug overlay in the bottom-right corner.
-fn renderDebugOverlay(window_width: f32) void {
-    const margin: f32 = 8;
-    const pad_h: f32 = 4;
-    const pad_v: f32 = 2;
-    const line_h = font.g_titlebar_cell_height + pad_v * 2;
-    var overlay_y: f32 = margin;
-
-    if (g_debug_fps) {
-        renderDebugLine(window_width, &overlay_y, margin, pad_h, pad_v, line_h, blk: {
-            var buf: [32]u8 = undefined;
-            const fps_int: u32 = @intFromFloat(@round(g_fps_value));
-            break :blk std.fmt.bufPrint(&buf, "{d} fps", .{fps_int}) catch break :blk "";
-        }, .{ 0.0, 1.0, 0.0 });
-    }
-
-    if (g_debug_draw_calls) {
-        renderDebugLine(window_width, &overlay_y, margin, pad_h, pad_v, line_h, blk: {
-            var buf: [32]u8 = undefined;
-            break :blk std.fmt.bufPrint(&buf, "{d} draws", .{g_draw_call_count}) catch break :blk "";
-        }, .{ 1.0, 1.0, 0.0 });
-
-    }
-}
-
-fn renderDebugLine(window_width: f32, y_pos: *f32, margin: f32, pad_h: f32, pad_v: f32, line_h: f32, text: []const u8, text_color: [3]f32) void {
-    if (text.len == 0) return;
-
-    gl.UseProgram.?(shader_program);
-    gl.ActiveTexture.?(c.GL_TEXTURE0);
-    gl.BindVertexArray.?(vao);
-
-    var text_width: f32 = 0;
-    for (text) |ch| {
-        text_width += titlebar.titlebarGlyphAdvance(@intCast(ch));
-    }
-
-    const bg_w = text_width + pad_h * 2;
-    const bg_x = window_width - bg_w - margin;
-    const bg_y = y_pos.*;
-
-    renderQuad(bg_x, bg_y, bg_w, line_h, .{ 0.0, 0.0, 0.0 });
-
-    var x = bg_x + pad_h;
-    const y = bg_y + pad_v;
-    for (text) |ch| {
-        titlebar.renderTitlebarChar(@intCast(ch), x, y, text_color);
-        x += titlebar.titlebarGlyphAdvance(@intCast(ch));
-    }
-
-    y_pos.* += line_h + 2; // spacing between lines
-}
+// Scrollbar, resize overlay, debug overlays, FPS counter — moved to appwindow/overlays.zig
 
 /// Update cursor blink state based on time (call once per frame)
 fn updateCursorBlink() void {
@@ -2110,7 +1497,7 @@ fn onWin32Resize(width: i32, height: i32) void {
     // Height: render-loop subtracts (render_padding+TB) top and render_padding
     //         bottom, then setScreenSize subtracts explicit T+B on top of that.
     const padding_left: f32 = @floatFromInt(DEFAULT_PADDING);
-    const padding_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
+    const padding_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const padding_top: f32 = @floatFromInt(DEFAULT_PADDING);
     const padding_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
     const render_padding: f32 = 10;
@@ -2130,7 +1517,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         g_pending_resize = false;
 
         // Show resize overlay with new dimensions
-        resizeOverlayShow(new_cols, new_rows);
+        overlays.resizeOverlayShow(new_cols, new_rows);
 
         for (0..tab.g_tab_count) |ti| {
             if (tab.g_tabs[ti]) |active_t| {
@@ -2170,9 +1557,9 @@ fn onWin32Resize(width: i32, height: i32) void {
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
         titlebar.renderTitlebar(@floatFromInt(width), @floatFromInt(height), tb);
         cell_renderer.drawCells(rend, @floatFromInt(height), padding_left, padding_top + tb);
-        renderScrollbar(@floatFromInt(width), @floatFromInt(height), padding_top + tb);
-        renderResizeOverlay(@floatFromInt(width), @floatFromInt(height));
-        renderDebugOverlay(@floatFromInt(width));
+        overlays.renderScrollbar(@floatFromInt(width), @floatFromInt(height), padding_top + tb);
+        overlays.renderResizeOverlay(@floatFromInt(width), @floatFromInt(height));
+        overlays.renderDebugOverlay(@floatFromInt(width));
     } else {
         gl.Viewport.?(0, 0, width, height);
         setProjection(@floatFromInt(width), @floatFromInt(height));
@@ -2219,13 +1606,13 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     g_force_rebuild = true;
     g_cursor_style = cfg.@"cursor-style";
     g_cursor_blink = cfg.@"cursor-style-blink";
-    g_debug_fps = cfg.@"phantty-debug-fps";
-    g_debug_draw_calls = cfg.@"phantty-debug-draw-calls";
+    overlays.g_debug_fps = cfg.@"phantty-debug-fps";
+    overlays.g_debug_draw_calls = cfg.@"phantty-debug-draw-calls";
 
     // --- Split config ---
-    g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
+    overlays.g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
     g_focus_follows_mouse = cfg.@"focus-follows-mouse";
-    g_split_divider_color = cfg.@"split-divider-color";
+    overlays.g_split_divider_color = cfg.@"split-divider-color";
 
     // Sync cursor style to all tabs' terminals (rendering reads from terminal state)
     for (0..tab.g_tab_count) |ti| {
@@ -2674,7 +2061,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     //   avail_h = (fb_height - 54) - 10 - 10 = fb_height - 74
     const titlebar_height: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const explicit_left: f32 = @floatFromInt(DEFAULT_PADDING);
-    const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + SCROLLBAR_WIDTH;
+    const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
     const explicit_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
     const render_padding: f32 = 10;
@@ -2751,7 +2138,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     defer if (config_watcher) |*w| w.deinit();
 
     // Initialize FPS timer
-    g_fps_last_time = std.time.milliTimestamp();
+    overlays.g_fps_last_time = std.time.milliTimestamp();
 
     // Apply fullscreen if requested (after all initialization is complete)
     std.debug.print("g_start_fullscreen = {}\n", .{g_start_fullscreen});
@@ -2833,7 +2220,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         const fb_height: c_int = fb.height;
 
         g_draw_call_count = 0;
-        updateFps();
+        overlays.updateFps();
 
         // Sync atlas textures to GPU if modified
         if (font.g_atlas != null) font.syncAtlasTexture(&font.g_atlas, &font.g_atlas_texture, &font.g_atlas_modified);
@@ -2911,10 +2298,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                     cell_renderer.drawCells(rend, @floatFromInt(fb_height), @floatFromInt(pad.left), pad_top);
-                    renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
+                    overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
 
                     // Render resize overlay centered in content area (offset for titlebar)
-                    renderResizeOverlayWithOffset(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                    overlays.renderResizeOverlayWithOffset(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 }
             } else {
                 // Multiple splits: render with scissor/viewport per surface
@@ -2956,21 +2343,21 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                         cell_renderer.drawCells(rend, @floatFromInt(rect.height), @floatFromInt(pad.left), @floatFromInt(pad.top));
 
                         // Render scrollbar for this surface within its viewport
-                        renderScrollbarForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height), @floatFromInt(pad.top));
+                        overlays.renderScrollbarForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height), @floatFromInt(pad.top));
 
                         // Draw unfocused overlay if not focused
                         if (!is_focused) {
-                            renderUnfocusedOverlaySimple(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                            overlays.renderUnfocusedOverlaySimple(@floatFromInt(rect.width), @floatFromInt(rect.height));
                         }
 
                         // Render resize overlay:
                         // - During divider dragging or timed overlay (equalize): show on ALL splits
                         // - Otherwise: show only on focused split (for window resize)
-                        const show_timed_overlay = std.time.milliTimestamp() < g_split_resize_overlay_until;
+                        const show_timed_overlay = std.time.milliTimestamp() < overlays.g_split_resize_overlay_until;
                         if (g_divider_dragging or show_timed_overlay) {
-                            renderResizeOverlayForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height));
+                            overlays.renderResizeOverlayForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height));
                         } else if (is_focused) {
-                            renderResizeOverlay(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                            overlays.renderResizeOverlay(@floatFromInt(rect.width), @floatFromInt(rect.height));
                         }
                     }
 
@@ -2979,7 +2366,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
                     // Draw split dividers
-                    renderSplitDividers(active_tab, content_x, content_y, content_w, content_h, @floatFromInt(fb_height));
+                    overlays.renderSplitDividers(active_tab, content_x, content_y, content_w, content_h, @floatFromInt(fb_height));
                 }
             }
         } else if (!post_process.g_post_enabled) {
@@ -2990,7 +2377,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         }
 
-        renderDebugOverlay(@floatFromInt(fb_width));
+        overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
         win.swapBuffers();
     }
