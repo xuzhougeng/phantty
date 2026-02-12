@@ -88,6 +88,7 @@ pub const VtStream = ghostty_vt.Stream(VtHandler);
 // Core state
 // ============================================================================
 
+allocator: std.mem.Allocator,
 terminal: ghostty_vt.Terminal,
 pty: Pty,
 command: Command,
@@ -97,6 +98,23 @@ render_state: renderer.State,
 /// Size information for this surface (screen size, cell size, padding).
 /// Used by the renderer to position content correctly.
 size: renderer.size.Size = .{},
+
+// ============================================================================
+// IO threads (Ghostty two-thread architecture: writer + reader)
+// ============================================================================
+
+/// Mailbox for sending messages from main thread to IO writer thread.
+mailbox: termio.Mailbox,
+
+/// IO writer thread state (xev event loop, coalesce timer, etc.).
+/// Heap-allocated so the pointer stays stable when passed to the thread.
+io_thread_state: ?*termio.Thread = null,
+
+/// IO writer thread (xev event loop — handles resize, future messages).
+io_writer_thread: ?std.Thread = null,
+
+/// IO reader thread (blocking ReadFile loop).
+io_reader_thread: ?std.Thread = null,
 
 // ============================================================================
 // Per-surface renderer (Ghostty architecture)
@@ -157,8 +175,6 @@ resize_overlay_last_rows: u16 = 0, // Last known rows (to detect changes)
 /// ref count reaches 0, the surface is destroyed.
 ref_count: u32 = 1,
 
-/// IO thread handle (null until Phase 2).
-io_thread: ?std.Thread = null,
 
 // ============================================================================
 // OSC title fields
@@ -252,12 +268,22 @@ pub fn init(
     };
 
     // Init remaining fields
+    surface.allocator = allocator;
     surface.selection = .{};
     surface.render_state = renderer.State.init(&surface.terminal);
     surface.dirty = std.atomic.Value(bool).init(true);
     surface.exited = std.atomic.Value(bool).init(false);
-    surface.io_thread = null;
-    
+
+    // Initialize mailbox for main thread → IO writer communication
+    surface.mailbox = termio.Mailbox.init() catch |err| {
+        surface.pty.deinit();
+        surface.terminal.deinit(allocator);
+        return err;
+    };
+    surface.io_thread_state = null;
+    surface.io_writer_thread = null;
+    surface.io_reader_thread = null;
+
     // Initialize grid size to match terminal dimensions.
     // This prevents spurious resize on first render when computeSplitLayout
     // calls setScreenSize - without this, the default 80x24 would differ from
@@ -295,10 +321,42 @@ pub fn init(
     // Init ref count (for split tree ownership)
     surface.ref_count = 1;
 
-    // Spawn IO thread — must be last, after all state is initialized.
-    // The thread starts reading from the PTY immediately.
-    surface.io_thread = std.Thread.spawn(.{}, termio.Thread.threadMain, .{surface}) catch |err| {
-        std.debug.print("Failed to spawn IO thread: {}\n", .{err});
+    // Initialize IO writer thread state (xev loop, async handles)
+    const thread_state = allocator.create(termio.Thread) catch |err| {
+        surface.mailbox.deinit();
+        surface.pty.deinit();
+        surface.terminal.deinit(allocator);
+        return err;
+    };
+    thread_state.* = termio.Thread.init() catch |err| {
+        allocator.destroy(thread_state);
+        surface.mailbox.deinit();
+        surface.pty.deinit();
+        surface.terminal.deinit(allocator);
+        return err;
+    };
+    surface.io_thread_state = thread_state;
+
+    // Spawn IO writer thread (xev event loop — handles resize, future messages)
+    surface.io_writer_thread = std.Thread.spawn(.{}, termio.Thread.threadMain, .{ thread_state, surface }) catch |err| {
+        std.debug.print("Failed to spawn IO writer thread: {}\n", .{err});
+        thread_state.deinit();
+        allocator.destroy(thread_state);
+        surface.mailbox.deinit();
+        surface.pty.deinit();
+        surface.terminal.deinit(allocator);
+        return err;
+    };
+
+    // Spawn IO reader thread (blocking ReadFile loop)
+    surface.io_reader_thread = std.Thread.spawn(.{}, termio.ReadThread.threadMain, .{surface}) catch |err| {
+        std.debug.print("Failed to spawn IO reader thread: {}\n", .{err});
+        // Stop writer thread since we can't proceed without reader
+        thread_state.stop.notify() catch {};
+        if (surface.io_writer_thread) |t| t.join();
+        thread_state.deinit();
+        allocator.destroy(thread_state);
+        surface.mailbox.deinit();
         surface.pty.deinit();
         surface.terminal.deinit(allocator);
         return err;
@@ -321,26 +379,36 @@ pub fn deinit(self: *Surface, allocator: std.mem.Allocator) void {
     self.renderer_thread.stop();
     self.surface_renderer.deinit();
 
-    // 2. Signal the IO thread to stop.
+    // 2. Signal both IO threads to stop.
     self.exited.store(true, .release);
 
-    if (self.io_thread) |thread| {
-        // Cancel the blocking ReadFile on the pipe handle.
-        // Must happen BEFORE closing the handle (like Ghostty does).
-        if (self.pty.out_pipe != windows.INVALID_HANDLE_VALUE) {
-            _ = win32.CancelIoEx(self.pty.out_pipe, null);
-        }
-
-        // Close the read pipe — causes ReadFile to fail with BROKEN_PIPE
-        // if CancelIoEx didn't already unblock it.
-        if (self.pty.out_pipe != windows.INVALID_HANDLE_VALUE) {
-            windows.CloseHandle(self.pty.out_pipe);
-            self.pty.out_pipe = windows.INVALID_HANDLE_VALUE;
-        }
-
-        thread.join();
-        self.io_thread = null;
+    // Stop the writer thread (xev event loop) via its stop async
+    if (self.io_thread_state) |state| {
+        state.stop.notify() catch {};
     }
+
+    // Cancel the reader thread's blocking ReadFile
+    if (self.pty.out_pipe != windows.INVALID_HANDLE_VALUE) {
+        _ = win32.CancelIoEx(self.pty.out_pipe, null);
+    }
+
+    // Join both threads
+    if (self.io_writer_thread) |thread| {
+        thread.join();
+        self.io_writer_thread = null;
+    }
+    if (self.io_reader_thread) |thread| {
+        thread.join();
+        self.io_reader_thread = null;
+    }
+
+    // Clean up writer thread state and mailbox
+    if (self.io_thread_state) |state| {
+        state.deinit();
+        self.allocator.destroy(state);
+        self.io_thread_state = null;
+    }
+    self.mailbox.deinit();
 
     // 3. Now safe to tear down everything — no other thread is accessing.
     self.command.deinit();
@@ -370,22 +438,17 @@ pub fn unref(self: *Surface, allocator: std.mem.Allocator) void {
 // Size and Resize
 // ============================================================================
 
-/// Update the surface size and resize the terminal/PTY if needed.
+/// Update the surface size and queue a resize to the IO thread if needed.
 /// This is called by the split layout computation to set each surface
 /// to its correct dimensions based on the split geometry.
 ///
-/// Parameters:
-/// - allocator: Used for terminal resize operations
-/// - screen_width: Total pixel width available for this surface
-/// - screen_height: Total pixel height available for this surface  
-/// - cell_width: Width of a single cell in pixels
-/// - cell_height: Height of a single cell in pixels
-/// - explicit_padding: Minimum padding to apply (from config)
+/// The main thread updates pixel/grid dimensions in surface.size (needed
+/// for layout/rendering), but the actual PTY + terminal resize happens
+/// on the IO thread via queueIo() with 25ms coalescing.
 ///
-/// Returns true if the terminal was resized.
+/// Returns true if the grid dimensions changed (resize was queued).
 pub fn setScreenSize(
     self: *Surface,
-    allocator: std.mem.Allocator,
     screen_width: u32,
     screen_height: u32,
     cell_width: f32,
@@ -401,12 +464,6 @@ pub fn setScreenSize(
     // Store explicit padding (used for rendering offset)
     self.size.padding = explicit_padding;
 
-    // Update screen and cell info
-    self.size.screen.width = screen_width;
-    self.size.screen.height = screen_height;
-    self.size.cell.width = cell_width;
-    self.size.cell.height = cell_height;
-
     // Compute grid size from available space (screen minus padding)
     const avail_width = screen_width -| explicit_padding.left -| explicit_padding.right;
     const avail_height = screen_height -| explicit_padding.top -| explicit_padding.bottom;
@@ -420,25 +477,23 @@ pub fn setScreenSize(
     else
         1;
 
+    const changed = (self.size.grid.cols != new_cols or self.size.grid.rows != new_rows);
     self.size.grid.cols = new_cols;
     self.size.grid.rows = new_rows;
 
-    // Resize terminal if dimensions changed
-    if (self.terminal.cols != new_cols or self.terminal.rows != new_rows) {
-        // Resize PTY first (like Ghostty), then terminal state.
-        // This ensures the shell receives SIGWINCH before we reflow,
-        // which helps keep the viewport and cursor in sync.
-        self.pty.setSize(.{ .ws_col = new_cols, .ws_row = new_rows }) catch {};
-
-        self.render_state.mutex.lock();
-        defer self.render_state.mutex.unlock();
-
-        self.terminal.resize(allocator, new_cols, new_rows) catch {};
-        self.terminal.scrollViewport(.{ .bottom = {} }) catch {};
+    // Queue resize to IO thread if grid dimensions changed
+    if (changed) {
+        self.queueIo(.{ .resize = .{ .cols = new_cols, .rows = new_rows } });
         return true;
     }
 
     return false;
+}
+
+/// Send a message to the IO writer thread via the mailbox.
+pub fn queueIo(self: *Surface, msg: termio.Message) void {
+    self.mailbox.send(msg);
+    self.mailbox.notify();
 }
 
 /// Get the padding for rendering. Returns the computed padding

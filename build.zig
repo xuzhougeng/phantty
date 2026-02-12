@@ -27,10 +27,20 @@ pub fn build(b: *std.Build) void {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
     }
 
+    // Add libxev dependency (xev event loop for IO thread)
+    if (b.lazyDependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
+        exe_mod.addImport("xev", dep.module("xev"));
+    }
+
     // Win32: link native Windows libraries
     exe_mod.linkSystemLibrary("user32", .{});
     exe_mod.linkSystemLibrary("gdi32", .{});
     exe_mod.linkSystemLibrary("dwmapi", .{});
+    exe_mod.linkSystemLibrary("ws2_32", .{});
+    exe_mod.linkSystemLibrary("mswsock", .{});
 
     // Add FreeType dependency (shared between main and harfbuzz)
     const freetype_dep = b.lazyDependency("freetype", .{

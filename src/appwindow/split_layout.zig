@@ -203,7 +203,6 @@ pub fn computeSplitLayout(
         };
 
         const resized = surface.setScreenSize(
-            allocator,
             if (pw > 0) @intCast(pw) else 1,
             if (ph > 0) @intCast(ph) else 1,
             font.cell_width,

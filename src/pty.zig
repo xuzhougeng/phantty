@@ -14,11 +14,9 @@ pub const winsize = struct {
 
 pub const Pty = WindowsPty;
 
-var pipe_name_counter = std.atomic.Value(u32).init(0);
-
 const WindowsPty = struct {
-    out_pipe: HANDLE, // Our read end (child stdout -> us)
-    in_pipe: HANDLE, // Our write end (us -> child stdin) -- named pipe, overlapped-capable
+    out_pipe: HANDLE, // Our read end (child stdout -> us) -- anonymous pipe, synchronous
+    in_pipe: HANDLE, // Our write end (us -> child stdin) -- anonymous pipe, synchronous
     out_pipe_pty: HANDLE, // PTY-side write end (ConPTY writes here)
     in_pipe_pty: HANDLE, // PTY-side read end (ConPTY reads here)
     pseudo_console: win32.HPCON,
@@ -28,9 +26,9 @@ const WindowsPty = struct {
         var self: Pty = undefined;
         self.size = size;
 
-        // Create anonymous pipe for output (ConPTY -> us).
-        // Default 4KB buffer creates natural backpressure -- the child and VT
-        // parser work in lockstep, which yields better throughput.
+        // Output pipe (ConPTY → us): anonymous pipe via CreatePipe.
+        // Synchronous so ReadThread's blocking ReadFile properly registers
+        // a kernel IRP — critical for draining during resize.
         if (win32.CreatePipe(&self.out_pipe, &self.out_pipe_pty, null, 0) == 0) {
             return error.CreatePipeFailed;
         }
@@ -39,11 +37,13 @@ const WindowsPty = struct {
             windows.CloseHandle(self.out_pipe_pty);
         }
 
-        // Create named pipe for input (us -> ConPTY).
-        // Named pipe enables future overlapped (async) I/O.
-        const pipe_pair = try createNamedPipePair();
-        self.in_pipe = pipe_pair.server;
-        self.in_pipe_pty = pipe_pair.client;
+        // Input pipe (us → ConPTY): anonymous pipe via CreatePipe.
+        // Synchronous — main thread writes with blocking WriteFile.
+        // When xev IOCP writes are needed later, switch to CreateNamedPipeW
+        // with FILE_FLAG_OVERLAPPED (like Ghostty).
+        if (win32.CreatePipe(&self.in_pipe_pty, &self.in_pipe, null, 0) == 0) {
+            return error.CreatePipeFailed;
+        }
         errdefer {
             windows.CloseHandle(self.in_pipe);
             windows.CloseHandle(self.in_pipe_pty);
@@ -82,45 +82,5 @@ const WindowsPty = struct {
         const hr = win32.ResizePseudoConsole(self.pseudo_console, coord);
         if (hr != win32.S_OK) return error.ResizePseudoConsoleFailed;
         self.size = s;
-    }
-
-    fn createNamedPipePair() !struct { server: HANDLE, client: HANDLE } {
-        const pid = win32.GetCurrentProcessId();
-        const counter = pipe_name_counter.fetchAdd(1, .monotonic);
-
-        // Format pipe name (ASCII, so direct byte-to-u16 widening is safe)
-        var name_buf: [128]u8 = undefined;
-        const name = std.fmt.bufPrint(&name_buf, "\\\\.\\pipe\\phantty-pty-{d}-{d}", .{ pid, counter }) catch unreachable;
-
-        var wide_buf: [128:0]u16 = [_:0]u16{0} ** 128;
-        for (name, 0..) |byte, i| {
-            wide_buf[i] = byte;
-        }
-
-        const server = win32.CreateNamedPipeW(
-            &wide_buf,
-            win32.PIPE_ACCESS_OUTBOUND | win32.FILE_FLAG_FIRST_PIPE_INSTANCE | win32.FILE_FLAG_OVERLAPPED,
-            win32.PIPE_TYPE_BYTE,
-            1, // nMaxInstances
-            0, // nOutBufferSize (default)
-            0, // nInBufferSize (default)
-            0, // nDefaultTimeOut
-            null,
-        );
-        if (server == INVALID_HANDLE_VALUE) return error.CreateNamedPipeFailed;
-        errdefer windows.CloseHandle(server);
-
-        const client = win32.CreateFileW(
-            &wide_buf,
-            win32.GENERIC_READ,
-            0, // dwShareMode
-            null,
-            win32.OPEN_EXISTING,
-            win32.FILE_ATTRIBUTE_NORMAL,
-            null,
-        );
-        if (client == INVALID_HANDLE_VALUE) return error.CreateNamedPipeFailed;
-
-        return .{ .server = server, .client = client };
     }
 };

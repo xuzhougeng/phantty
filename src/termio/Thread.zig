@@ -1,84 +1,151 @@
-/// IO reader thread — reads from PTY in a blocking loop.
+/// IO writer thread — runs an xev event loop for mailbox-driven operations.
 ///
-/// Each Surface spawns one of these. The thread blocks on ReadFile(),
-/// then briefly locks the Surface mutex to feed data through the VT
-/// parser and OSC scanner.
+/// Each Surface spawns one of these (plus a ReadThread for PTY data).
+/// The writer thread handles:
+///   - Mailbox wakeup: drains queued messages from the main thread
+///   - Resize coalescing: 25ms xev.Timer batches rapid resize events
+///   - Stop signal: clean shutdown via xev.Async
 ///
-/// Modeled after Ghostty's `src/termio/Exec.zig` ReadThread:
-/// - 1KB read buffer (like Ghostty) to keep lock hold times short
-/// - Lock acquired per read chunk
-/// - dirty flag set inside the lock so the render thread can't miss it
+/// Resize is applied directly on this thread. This works because the
+/// ReadThread is concurrently blocked in ReadFile on the output pipe,
+/// which keeps the pipe draining while ResizePseudoConsole runs.
+/// (ResizePseudoConsole makes ConPTY send a full screen redraw through
+/// the pipe — the ReadThread's pending ReadFile absorbs that output.)
 ///
-/// Read coalescing: after the first blocking read, we drain any
-/// additional data already buffered in the pipe (via PeekNamedPipe)
-/// before releasing the lock. This reduces the chance of the render
-/// thread snapshotting mid-sequence when ConPTY splits output across
-/// multiple writes.
+/// Flow:
+///   Main thread → mailbox.send(.resize) → mailbox.notify()
+///   Writer thread → wakeup → drainMailbox → coalesce timer (25ms)
+///   Writer thread → coalesceCallback → pty.setSize + terminal.resize
 
 const std = @import("std");
-const windows = std.os.windows;
+const xev = @import("xev");
 const Surface = @import("../Surface.zig");
-const win32 = @import("../apprt/win32.zig");
+const renderer = @import("../renderer.zig");
 
 const Thread = @This();
 
-const READ_BUF_SIZE = 1024;
+const COALESCE_MS = 25;
 
-/// The thread entry point. Runs a blocking read loop on the Surface's PTY.
-pub fn threadMain(surface: *Surface) void {
-    var buf: [READ_BUF_SIZE]u8 = undefined;
+loop: xev.Loop,
+stop: xev.Async,
+coalesce: xev.Timer,
 
-    while (true) {
-        if (surface.exited.load(.acquire)) return;
+/// Completions — must be stable pointers (not moved while in use).
+wakeup_c: xev.Completion = .{},
+stop_c: xev.Completion = .{},
+coalesce_c: xev.Completion = .{},
+coalesce_cancel_c: xev.Completion = .{},
 
-        // First read — blocks until data is available.
-        var bytes_read: windows.DWORD = 0;
-        if (windows.kernel32.ReadFile(surface.pty.out_pipe, &buf, READ_BUF_SIZE, &bytes_read, null) == 0) {
-            surface.exited.store(true, .release);
-            return;
-        }
+/// Pending coalesced resize (latest wins). Writer-thread-only.
+coalesce_data: ?renderer.size.GridSize = null,
 
-        if (bytes_read == 0) {
-            surface.exited.store(true, .release);
-            return;
-        }
+/// Whether the coalesce timer is currently active.
+coalesce_active: bool = false,
 
-        {
-            surface.render_state.mutex.lock();
-            defer surface.render_state.mutex.unlock();
+/// Back-pointer to the surface, set during threadMain.
+surface: ?*Surface = null,
 
-            surface.resetOscBatch();
+pub fn init() !Thread {
+    return .{
+        .loop = try xev.Loop.init(.{}),
+        .stop = try xev.Async.init(),
+        .coalesce = try xev.Timer.init(),
+    };
+}
 
-            var stream = surface.vtStream();
+pub fn deinit(self: *Thread) void {
+    self.coalesce.deinit();
+    self.stop.deinit();
+    self.loop.deinit();
+}
 
-            // Process the first chunk.
-            const data = buf[0..@intCast(bytes_read)];
-            stream.nextSlice(data) catch {};
-            surface.scanForOscTitle(data);
+pub fn threadMain(self: *Thread, surface: *Surface) void {
+    self.surface = surface;
 
-            // Coalesce: drain a limited amount of additional data already
-            // in the pipe so we don't release the lock mid-sequence.
-            // Cap iterations to avoid holding the lock indefinitely when
-            // the child produces data faster than we render (e.g. cat /dev/urandom).
-            const MAX_COALESCE = 16;
-            var coalesce_count: usize = 0;
-            while (coalesce_count < MAX_COALESCE) : (coalesce_count += 1) {
-                var avail: windows.DWORD = 0;
-                if (win32.PeekNamedPipe(surface.pty.out_pipe, null, 0, null, &avail, null) == 0)
-                    break;
-                if (avail == 0) break;
+    // Register mailbox wakeup callback
+    surface.mailbox.wakeup.wait(&self.loop, &self.wakeup_c, Thread, self, wakeupCallback);
 
-                var extra_bytes: windows.DWORD = 0;
-                if (windows.kernel32.ReadFile(surface.pty.out_pipe, &buf, READ_BUF_SIZE, &extra_bytes, null) == 0)
-                    break;
-                if (extra_bytes == 0) break;
+    // Register stop callback
+    self.stop.wait(&self.loop, &self.stop_c, Thread, self, stopCallback);
 
-                const extra_data = buf[0..@intCast(extra_bytes)];
-                stream.nextSlice(extra_data) catch {};
-                surface.scanForOscTitle(extra_data);
-            }
+    // Run the event loop until stop is signaled
+    self.loop.run(.until_done) catch {};
+}
 
-            surface.dirty.store(true, .release);
+fn wakeupCallback(
+    self_opt: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    _ = r catch return .disarm;
+    const self = self_opt orelse return .disarm;
+    self.drainMailbox();
+    return .rearm;
+}
+
+fn stopCallback(
+    _: ?*Thread,
+    loop: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    loop.stop();
+    return .disarm;
+}
+
+fn drainMailbox(self: *Thread) void {
+    const surface = self.surface orelse return;
+    while (surface.mailbox.pop()) |msg| {
+        switch (msg) {
+            .resize => |grid| self.handleResize(grid),
         }
     }
+}
+
+fn handleResize(self: *Thread, grid: renderer.size.GridSize) void {
+    self.coalesce_data = grid;
+
+    if (self.coalesce_active) return; // timer already running, it will pick up latest data
+
+    // Start 25ms coalesce timer
+    self.coalesce_active = true;
+    self.coalesce.run(&self.loop, &self.coalesce_c, COALESCE_MS, Thread, self, coalesceCallback);
+}
+
+fn coalesceCallback(
+    self_opt: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch {
+        if (self_opt) |self| self.coalesce_active = false;
+        return .disarm;
+    };
+    const self = self_opt orelse return .disarm;
+
+    self.coalesce_active = false;
+
+    if (self.coalesce_data) |grid| {
+        self.coalesce_data = null;
+        applyResize(self.surface.?, grid);
+    }
+
+    return .disarm;
+}
+
+fn applyResize(surface: *Surface, grid: renderer.size.GridSize) void {
+    // PTY resize first (like Ghostty), then terminal.
+    // The ReadThread is concurrently in blocking ReadFile, which keeps
+    // a kernel IRP pending on the pipe. This drains the pipe while
+    // ResizePseudoConsole sends its full screen redraw through it.
+    surface.pty.setSize(.{ .ws_col = grid.cols, .ws_row = grid.rows }) catch {};
+
+    surface.render_state.mutex.lock();
+    defer surface.render_state.mutex.unlock();
+
+    surface.terminal.resize(surface.allocator, grid.cols, grid.rows) catch {};
+    surface.terminal.scrollViewport(.{ .bottom = {} }) catch {};
+    surface.dirty.store(true, .release);
 }

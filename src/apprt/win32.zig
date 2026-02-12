@@ -358,11 +358,14 @@ pub const HANDLE_FLAG_INHERIT: DWORD = 0x00000001;
 // Named pipe constants
 pub const FILE_FLAG_OVERLAPPED: DWORD = 0x40000000;
 pub const PIPE_ACCESS_OUTBOUND: DWORD = 0x00000002;
+pub const PIPE_ACCESS_INBOUND: DWORD = 0x00000001;
 pub const PIPE_TYPE_BYTE: DWORD = 0x00000000;
 pub const FILE_FLAG_FIRST_PIPE_INSTANCE: DWORD = 0x00080000;
 pub const GENERIC_READ: DWORD = 0x80000000;
+pub const GENERIC_WRITE: DWORD = 0x40000000;
 pub const OPEN_EXISTING: DWORD = 3;
 pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
+
 
 // Wait constants
 pub const WAIT_OBJECT_0: DWORD = 0x00000000;
@@ -459,6 +462,16 @@ pub extern "kernel32" fn CancelIoEx(
 ) callconv(.winapi) BOOL;
 
 pub extern "kernel32" fn WaitForSingleObject(hHandle: windows.HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
+
+pub extern "kernel32" fn CreateEventW(
+    lpEventAttributes: ?*anyopaque,
+    bManualReset: BOOL,
+    bInitialState: BOOL,
+    lpName: ?[*:0]const u16,
+) callconv(.winapi) ?windows.HANDLE;
+
+pub extern "kernel32" fn SetEvent(hEvent: windows.HANDLE) callconv(.winapi) BOOL;
+pub extern "kernel32" fn ResetEvent(hEvent: windows.HANDLE) callconv(.winapi) BOOL;
 
 pub extern "kernel32" fn GetExitCodeProcess(hProcess: windows.HANDLE, lpExitCode: *DWORD) callconv(.winapi) BOOL;
 

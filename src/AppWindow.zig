@@ -325,7 +325,6 @@ pub threadlocal var g_pending_resize: bool = false;
 pub threadlocal var g_pending_cols: u16 = 0;
 pub threadlocal var g_pending_rows: u16 = 0;
 pub threadlocal var g_last_resize_time: i64 = 0;
-threadlocal var g_resize_in_progress: bool = false; // Prevent rendering during resize
 const RESIZE_COALESCE_MS: i64 = 25; // Same as Ghostty
 
 pub threadlocal var g_cursor_style: CursorStyle = .block; // Default cursor style
@@ -376,7 +375,7 @@ fn updateCursorBlinkForRenderer(rend: *Renderer) void {
 /// while Win32's modal drag loop is active.
 fn onWin32Resize(width: i32, height: i32) void {
     if (width <= 0 or height <= 0) return;
-    const allocator = g_allocator orelse return;
+    if (g_allocator == null) return;
 
     // Match exactly what computeSplitLayout → setScreenSize computes for a
     // root (full-window) surface, so term_cols/term_rows stay in sync and
@@ -399,64 +398,116 @@ fn onWin32Resize(width: i32, height: i32) void {
     const new_cols: u16 = @intFromFloat(@max(1, avail_w / font.cell_width));
     const new_rows: u16 = @intFromFloat(@max(1, avail_h / font.cell_height));
 
-    // Resize terminal + PTY if grid dimensions changed
+    // Update root grid dimensions (used for spawning new tabs).
+    // Actual terminal + PTY resize is handled by computeSplitLayout → setScreenSize
+    // below, which is the single resize path for all surfaces.
     if (new_cols != term_cols or new_rows != term_rows) {
         term_cols = new_cols;
         term_rows = new_rows;
         // Clear any pending coalesced resize — we're handling it now
         g_pending_resize = false;
+    }
 
-        // Show resize overlay with new dimensions
-        overlays.resizeOverlayShow(new_cols, new_rows);
+    // Sync atlas textures
+    if (font.g_atlas != null) font.syncAtlasTexture(&font.g_atlas, &font.g_atlas_texture, &font.g_atlas_modified);
+    if (font.g_color_atlas != null) font.syncAtlasTexture(&font.g_color_atlas, &font.g_color_atlas_texture, &font.g_color_atlas_modified);
+    if (font.g_icon_atlas != null) font.syncAtlasTexture(&font.g_icon_atlas, &font.g_icon_atlas_texture, &font.g_icon_atlas_modified);
+    if (font.g_titlebar_atlas != null) font.syncAtlasTexture(&font.g_titlebar_atlas, &font.g_titlebar_atlas_texture, &font.g_titlebar_atlas_modified);
 
-        for (0..tab.g_tab_count) |ti| {
-            if (tab.g_tabs[ti]) |active_t| {
-                // Resize all surfaces in this tab's split tree
-                var it = active_t.tree.iterator();
-                while (it.next()) |entry| {
-                    entry.surface.render_state.mutex.lock();
-                    entry.surface.terminal.resize(allocator, term_cols, term_rows) catch {};
-                    entry.surface.render_state.mutex.unlock();
-                    entry.surface.pty.setSize(.{ .ws_col = term_cols, .ws_row = term_rows }) catch {};
+    const fb_width: c_int = width;
+    const fb_height: c_int = height;
+    const titlebar_offset: f32 = tb;
+
+    // Snapshot + rebuild + draw (split-aware, mirrors main loop)
+    if (activeTab()) |active_tab| {
+        // Compute split layout — also calls setScreenSize on each surface,
+        // which corrects the per-surface dimensions for splits.
+        const content_x: i32 = @intFromFloat(render_padding);
+        const content_y: i32 = @intFromFloat(render_padding + tb);
+        const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(width)) - render_padding * 2);
+        const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(height)) - (render_padding + tb) - render_padding);
+        const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
+
+        if (split_count <= 1) {
+            // Single surface: simple render path
+            if (activeSurface()) |surface| {
+                const rend = &surface.surface_renderer;
+                var needs_rebuild: bool = false;
+                {
+                    surface.render_state.mutex.lock();
+                    defer surface.render_state.mutex.unlock();
+                    rend.force_rebuild = true;
+                    needs_rebuild = cell_renderer.updateTerminalCells(rend, &surface.terminal);
+                }
+                if (needs_rebuild) cell_renderer.rebuildCells(rend);
+
+                gl.Viewport.?(0, 0, fb_width, fb_height);
+                gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+                gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
+                gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
+
+                const pad = surface.getPadding();
+                const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
+                titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                cell_renderer.drawCells(rend, @floatFromInt(fb_height), @floatFromInt(pad.left), pad_top);
+                overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
+                overlays.renderResizeOverlayWithOffset(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+            }
+        } else {
+            // Multiple splits: render each surface in its own viewport
+            gl.Viewport.?(0, 0, fb_width, fb_height);
+            gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+            gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
+            gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
+
+            titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+
+            for (0..split_count) |i| {
+                const rect = split_layout.g_split_rects[i];
+                const is_focused = (rect.handle == active_tab.focused);
+                const rend = &rect.surface.surface_renderer;
+
+                const viewport_y = fb_height - rect.y - rect.height;
+                gl.Viewport.?(rect.x, viewport_y, rect.width, rect.height);
+                gl_init.setProjection(@floatFromInt(rect.width), @floatFromInt(rect.height));
+
+                {
+                    rect.surface.render_state.mutex.lock();
+                    defer rect.surface.render_state.mutex.unlock();
+                    rend.force_rebuild = true;
+                    cell_renderer.g_current_render_surface = rect.surface;
+                    _ = cell_renderer.updateTerminalCellsForSurface(rend, &rect.surface.terminal, is_focused);
+                }
+                cell_renderer.rebuildCells(rend);
+
+                const pad = rect.surface.getPadding();
+                cell_renderer.drawCells(rend, @floatFromInt(rect.height), @floatFromInt(pad.left), @floatFromInt(pad.top));
+                overlays.renderScrollbarForSurface(rect.surface, @floatFromInt(rect.width), @floatFromInt(rect.height), @floatFromInt(pad.top));
+
+                if (!is_focused) {
+                    overlays.renderUnfocusedOverlaySimple(@floatFromInt(rect.width), @floatFromInt(rect.height));
+                }
+
+                // Show resize overlay on all splits during window resize
+                if (is_focused) {
+                    overlays.renderResizeOverlay(@floatFromInt(rect.width), @floatFromInt(rect.height));
                 }
             }
+
+            // Restore full viewport for dividers
+            gl.Viewport.?(0, 0, fb_width, fb_height);
+            gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+            overlays.renderSplitDividers(active_tab, content_x, content_y, content_w, content_h, @floatFromInt(fb_height));
         }
-    }
-
-    // Snapshot + rebuild + draw
-    if (activeSurface()) |surface| {
-        const rend = &surface.surface_renderer;
-        var needs_rebuild: bool = false;
-        {
-            surface.render_state.mutex.lock();
-            defer surface.render_state.mutex.unlock();
-            rend.force_rebuild = true;
-            needs_rebuild = cell_renderer.updateTerminalCells(rend, &surface.terminal);
-        }
-        if (needs_rebuild) cell_renderer.rebuildCells(rend);
-
-        // Sync atlas if needed
-        if (font.g_atlas != null) font.syncAtlasTexture(&font.g_atlas, &font.g_atlas_texture, &font.g_atlas_modified);
-        if (font.g_color_atlas != null) font.syncAtlasTexture(&font.g_color_atlas, &font.g_color_atlas_texture, &font.g_color_atlas_modified);
-        if (font.g_icon_atlas != null) font.syncAtlasTexture(&font.g_icon_atlas, &font.g_icon_atlas_texture, &font.g_icon_atlas_modified);
-        if (font.g_titlebar_atlas != null) font.syncAtlasTexture(&font.g_titlebar_atlas, &font.g_titlebar_atlas_texture, &font.g_titlebar_atlas_modified);
-
-        gl.Viewport.?(0, 0, width, height);
-        gl_init.setProjection(@floatFromInt(width), @floatFromInt(height));
-        gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
-        gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
-        titlebar.renderTitlebar(@floatFromInt(width), @floatFromInt(height), tb);
-        cell_renderer.drawCells(rend, @floatFromInt(height), padding_left, padding_top + tb);
-        overlays.renderScrollbar(@floatFromInt(width), @floatFromInt(height), padding_top + tb);
-        overlays.renderResizeOverlay(@floatFromInt(width), @floatFromInt(height));
-        overlays.renderDebugOverlay(@floatFromInt(width));
     } else {
-        gl.Viewport.?(0, 0, width, height);
-        gl_init.setProjection(@floatFromInt(width), @floatFromInt(height));
+        gl.Viewport.?(0, 0, fb_width, fb_height);
+        gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
         gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
-        titlebar.renderTitlebar(@floatFromInt(width), @floatFromInt(height), tb);
+        titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     }
+
+    overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
     if (g_window) |w| w.swapBuffers();
 }
@@ -563,24 +614,12 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
         }
 
         // --- Window size ---
-        // If window size is configured, apply it; then resize window to match new cell dims
+        // If window size is configured, apply it; then resize window to match new cell dims.
+        // Actual terminal + PTY resize is handled by computeSplitLayout → setScreenSize
+        // in the render loop (triggered by the window resize event from setSize).
         if (cfg.@"window-width" > 0) term_cols = cfg.@"window-width";
         if (cfg.@"window-height" > 0) term_rows = cfg.@"window-height";
         resizeWindowToGrid();
-
-        // Resize ALL tabs' terminals and PTYs to match
-        for (0..tab.g_tab_count) |ti| {
-            if (tab.g_tabs[ti]) |tb| {
-                // Resize all surfaces in this tab's split tree
-                var it = tb.tree.iterator();
-                while (it.next()) |entry| {
-                    entry.surface.render_state.mutex.lock();
-                    entry.surface.terminal.resize(allocator, term_cols, term_rows) catch {};
-                    entry.surface.render_state.mutex.unlock();
-                    entry.surface.pty.setSize(.{ .ws_col = term_cols, .ws_row = term_rows }) catch {};
-                }
-            }
-        }
     } else {
         std.debug.print("Reload: failed to load font, keeping current font\n", .{});
     }
@@ -976,43 +1015,17 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         if (config_watcher) |*w| checkConfigReload(allocator, w);
 
         // Process pending resize (coalesced, like Ghostty)
-        // We wait for RESIZE_COALESCE_MS after last resize event before applying
+        // We wait for RESIZE_COALESCE_MS after last resize event before applying.
+        // Only update the root grid dimensions here — actual terminal + PTY resize
+        // is handled by computeSplitLayout → setScreenSize in the render loop below.
         if (g_pending_resize) {
             const now = std.time.milliTimestamp();
             if (now - g_last_resize_time >= RESIZE_COALESCE_MS) {
                 g_pending_resize = false;
 
                 if (g_pending_cols != term_cols or g_pending_rows != term_rows) {
-                    // Mark resize in progress to prevent rendering with inconsistent state
-                    g_resize_in_progress = true;
-                    defer g_resize_in_progress = false;
-
                     term_cols = g_pending_cols;
                     term_rows = g_pending_rows;
-
-                    // Resize ALL tabs' terminals and PTYs (lock each surface)
-                    for (0..tab.g_tab_count) |ti| {
-                        if (tab.g_tabs[ti]) |tb| {
-                            // Resize all surfaces in this tab's split tree
-                            var it = tb.tree.iterator();
-                            while (it.next()) |entry| {
-                                entry.surface.render_state.mutex.lock();
-                                entry.surface.terminal.resize(allocator, term_cols, term_rows) catch |err| {
-                                    std.debug.print("Terminal resize error (tab {}): {}\n", .{ ti, err });
-                                };
-                                entry.surface.render_state.mutex.unlock();
-                                // PTY resize doesn't need the mutex (independent Win32 call)
-                                entry.surface.pty.setSize(.{ .ws_col = term_cols, .ws_row = term_rows }) catch {};
-                            }
-                        }
-                    }
-
-                    // Scroll active tab to bottom after resize
-                    if (activeSurface()) |surface| {
-                        surface.render_state.mutex.lock();
-                        defer surface.render_state.mutex.unlock();
-                        surface.terminal.scrollViewport(.{ .bottom = {} }) catch {};
-                    }
                 }
             }
         }
