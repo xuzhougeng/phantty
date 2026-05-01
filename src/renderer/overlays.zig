@@ -77,6 +77,37 @@ pub threadlocal var g_resize_active: bool = false; // True while actively resizi
 
 // Suppress resize overlay briefly after tab switch/creation to avoid false triggers
 pub threadlocal var g_resize_overlay_suppress_until: i64 = 0;
+// ============================================================================
+// Startup shortcuts overlay
+// ============================================================================
+
+const STARTUP_SHORTCUTS_DURATION_MS: i64 = 12000;
+const STARTUP_SHORTCUTS_FADE_MS: i64 = 800;
+
+const STARTUP_SHORTCUT_LINES = [_][]const u8{
+    "Keyboard shortcuts",
+    "Ctrl+Shift+T      New tab",
+    "Ctrl+W            Close split / tab",
+    "Ctrl+Shift+O      Split right",
+    "Ctrl+Shift+E      Split down",
+    "Ctrl+Alt+Arrows   Focus split",
+    "Ctrl+Shift+C/V    Copy / paste",
+    "Ctrl+,            Open config",
+    "Alt+Enter / F11   Fullscreen",
+    "Press any key or click to hide",
+};
+
+pub threadlocal var g_startup_shortcuts_visible: bool = false;
+threadlocal var g_startup_shortcuts_started_at: i64 = 0;
+
+pub fn startupShortcutsShow() void {
+    g_startup_shortcuts_visible = true;
+    g_startup_shortcuts_started_at = std.time.milliTimestamp();
+}
+
+pub fn startupShortcutsDismiss() void {
+    g_startup_shortcuts_visible = false;
+}
 
 // ============================================================================
 // FPS debug overlay state
@@ -455,6 +486,107 @@ fn renderResizeOverlayText(cols: u16, rows: u16, window_width: f32, window_heigh
     for (text) |ch| {
         titlebar.renderTitlebarChar(@intCast(ch), x, y, .{ text_gray, text_gray, text_gray });
         x += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
+}
+fn startupShortcutsOpacity() f32 {
+    if (!g_startup_shortcuts_visible) return 0;
+
+    if (g_startup_shortcuts_started_at == 0) {
+        g_startup_shortcuts_started_at = std.time.milliTimestamp();
+    }
+
+    const now = std.time.milliTimestamp();
+    const elapsed = now - g_startup_shortcuts_started_at;
+    if (elapsed >= STARTUP_SHORTCUTS_DURATION_MS) {
+        g_startup_shortcuts_visible = false;
+        return 0;
+    }
+
+    const fade_start = STARTUP_SHORTCUTS_DURATION_MS - STARTUP_SHORTCUTS_FADE_MS;
+    if (elapsed > fade_start) {
+        const fade_elapsed = elapsed - fade_start;
+        return 1.0 - @as(f32, @floatFromInt(fade_elapsed)) / @as(f32, @floatFromInt(STARTUP_SHORTCUTS_FADE_MS));
+    }
+
+    return 1.0;
+}
+
+fn mixColor(from: [3]f32, to: [3]f32, amount: f32) [3]f32 {
+    const inv = 1.0 - amount;
+    return .{
+        from[0] * inv + to[0] * amount,
+        from[1] * inv + to[1] * amount,
+        from[2] * inv + to[2] * amount,
+    };
+}
+
+fn measureTitlebarText(text: []const u8) f32 {
+    var text_width: f32 = 0;
+    for (text) |ch| {
+        text_width += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
+    return text_width;
+}
+
+/// Render a centered startup overlay listing common keyboard shortcuts.
+pub fn renderStartupShortcutsOverlay(window_width: f32, window_height: f32, top_offset: f32) void {
+    const alpha = startupShortcutsOpacity();
+    if (alpha <= 0.01) return;
+
+    const gl = &AppWindow.gl;
+
+    var max_text_width: f32 = 0;
+    for (STARTUP_SHORTCUT_LINES) |line| {
+        max_text_width = @max(max_text_width, measureTitlebarText(line));
+    }
+
+    const pad_x: f32 = 24;
+    const pad_y: f32 = 18;
+    const line_gap: f32 = 6;
+    const line_height = font.g_titlebar_cell_height + line_gap;
+    const line_count: f32 = @floatFromInt(STARTUP_SHORTCUT_LINES.len);
+    const gap_count: f32 = @floatFromInt(STARTUP_SHORTCUT_LINES.len - 1);
+    const box_width = max_text_width + pad_x * 2;
+    const box_height = font.g_titlebar_cell_height * line_count + line_gap * gap_count + pad_y * 2;
+
+    const content_height = window_height - top_offset;
+    const box_x = @max(12, (window_width - box_width) / 2);
+    const box_y = @max(12, (content_height - box_height) / 2);
+
+    gl.Enable.?(c.GL_BLEND);
+    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.ActiveTexture.?(c.GL_TEXTURE0);
+    gl.BindVertexArray.?(gl_init.vao);
+
+    renderRoundedQuadAlpha(box_x, box_y, box_width, box_height, 10, .{ 0.0, 0.0, 0.0 }, alpha * 0.48);
+
+    const heading_color = mixColor(AppWindow.g_theme.background, .{ 0.86, 0.86, 0.86 }, alpha);
+    const body_color = mixColor(AppWindow.g_theme.background, .{ 0.68, 0.68, 0.68 }, alpha);
+    const hint_color = mixColor(AppWindow.g_theme.background, .{ 0.50, 0.50, 0.50 }, alpha);
+
+    var y = box_y + box_height - pad_y - font.g_titlebar_cell_height;
+    for (STARTUP_SHORTCUT_LINES, 0..) |line, idx| {
+        const is_heading = idx == 0;
+        const is_hint = idx == STARTUP_SHORTCUT_LINES.len - 1;
+        const line_width = measureTitlebarText(line);
+        var x = if (is_heading or is_hint)
+            box_x + (box_width - line_width) / 2
+        else
+            box_x + pad_x;
+        const text_color = if (is_heading)
+            heading_color
+        else if (is_hint)
+            hint_color
+        else
+            body_color;
+
+        for (line) |ch| {
+            titlebar.renderTitlebarChar(@intCast(ch), x, y, text_color);
+            x += titlebar.titlebarGlyphAdvance(@intCast(ch));
+        }
+
+        y -= line_height;
     }
 }
 

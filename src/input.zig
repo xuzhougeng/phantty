@@ -174,6 +174,7 @@ fn processSizeChange(win: *win32_backend.Window) void {
 }
 
 fn handleChar(ev: win32_backend.CharEvent) void {
+    overlays.startupShortcutsDismiss();
     // When tab rename is active, route chars to the rename buffer
     if (tab.g_tab_rename_active) {
         AppWindow.g_cursor_blink_visible = true;
@@ -201,6 +202,7 @@ fn handleChar(ev: win32_backend.CharEvent) void {
 }
 
 fn handleKey(ev: win32_backend.KeyEvent) void {
+    overlays.startupShortcutsDismiss();
     // Ctrl+Shift+N = new window (even during tab rename)
     if (ev.ctrl and ev.shift and ev.vk == 0x4E) { // 'N'
         if (tab.g_tab_rename_active) tab.commitTabRename();
@@ -407,6 +409,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
 }
 
 fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
+    overlays.startupShortcutsDismiss();
     // Double-click on tab text to rename, elsewhere to maximize
     if (ev.button == .left and ev.action == .double_click) {
         const xpos: f64 = @floatFromInt(ev.x);
@@ -837,6 +840,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 }
 
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
+    overlays.startupShortcutsDismiss();
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
     // Fall back to focused surface if mouse is not over any split.
     const surface = split_layout.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;

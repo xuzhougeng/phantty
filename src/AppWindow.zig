@@ -1000,6 +1000,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
     // Initialize FPS timer
     overlays.g_fps_last_time = std.time.milliTimestamp();
+    overlays.startupShortcutsShow();
 
     // Apply fullscreen if requested (after all initialization is complete)
     std.debug.print("g_start_fullscreen = {}\n", .{g_start_fullscreen});
@@ -1212,6 +1213,9 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         }
 
+        gl.Viewport.?(0, 0, fb_width, fb_height);
+        gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
+        overlays.renderStartupShortcutsOverlay(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
         win.swapBuffers();
