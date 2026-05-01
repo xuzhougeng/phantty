@@ -38,33 +38,33 @@ pub const Theme = struct {
     selection_background: Color,
     selection_foreground: ?Color,
 
-    /// Default colors matching Ghostty's built-in defaults.
+    /// Phantty's default theme: a warm, Ayu-inspired dark palette.
     pub fn default() Theme {
         return .{
             .palette = .{
-                hexToColor(0x1d1f21), // 0: black
-                hexToColor(0xcc6666), // 1: red
-                hexToColor(0xb5bd68), // 2: green
-                hexToColor(0xf0c674), // 3: yellow
-                hexToColor(0x81a2be), // 4: blue
-                hexToColor(0xb294bb), // 5: magenta
-                hexToColor(0x8abeb7), // 6: cyan
-                hexToColor(0xc5c8c6), // 7: white
-                hexToColor(0x666666), // 8: bright black
-                hexToColor(0xd54e53), // 9: bright red
-                hexToColor(0xb9ca4a), // 10: bright green
-                hexToColor(0xe7c547), // 11: bright yellow
-                hexToColor(0x7aa6da), // 12: bright blue
-                hexToColor(0xc397d8), // 13: bright magenta
-                hexToColor(0x70c0b1), // 14: bright cyan
-                hexToColor(0xeaeaea), // 15: bright white
+                hexToColor(0x191e2a), // 0: black
+                hexToColor(0xff3333), // 1: red
+                hexToColor(0xbae67e), // 2: green
+                hexToColor(0xffa759), // 3: yellow
+                hexToColor(0x73d0ff), // 4: blue
+                hexToColor(0xd4bfff), // 5: magenta
+                hexToColor(0x95e6cb), // 6: cyan
+                hexToColor(0xc7c7c7), // 7: white
+                hexToColor(0x5c6773), // 8: bright black
+                hexToColor(0xff6565), // 9: bright red
+                hexToColor(0xc2d94c), // 10: bright green
+                hexToColor(0xffd580), // 11: bright yellow
+                hexToColor(0x5ccfe6), // 12: bright blue
+                hexToColor(0xffae57), // 13: bright magenta
+                hexToColor(0x95e6cb), // 14: bright cyan
+                hexToColor(0xffffff), // 15: bright white
             },
-            .background = hexToColor(0x282c34),
-            .foreground = hexToColor(0xffffff),
-            .cursor_color = hexToColor(0xffffff),
-            .cursor_text = null,
-            .selection_background = hexToColor(0xffffff),
-            .selection_foreground = hexToColor(0x282c34),
+            .background = hexToColor(0x1f2430),
+            .foreground = hexToColor(0xcbccc6),
+            .cursor_color = hexToColor(0xffcc66),
+            .cursor_text = hexToColor(0x1f2430),
+            .selection_background = hexToColor(0x33415e),
+            .selection_foreground = hexToColor(0xf3f4f5),
         };
     }
 
@@ -179,15 +179,14 @@ pub const FontWeight = enum {
 // Config Fields
 // ============================================================================
 
-/// Font family name. Ghostty default: unset (system default).
-/// We default to an empty string meaning "use system default".
-@"font-family": []const u8 = "",
+/// Font family name.
+@"font-family": []const u8 = "JetBrains Mono",
 
 /// Font weight/style. Ghostty default: regular (default).
 @"font-style": FontWeight = .regular,
 
 /// Font size in points. Ghostty default: 13 (macOS), 12 (other).
-@"font-size": u32 = 12,
+@"font-size": u32 = 13,
 
 /// Cursor shape: block, bar, underline, block_hollow.
 @"cursor-style": CursorStyle = .block,
@@ -796,7 +795,7 @@ pub fn printHelp() void {
         \\  --font-style <style>         Font weight (default: regular)
         \\                               Values: thin, extra-light, light, regular, medium,
         \\                                       semi-bold, bold, extra-bold, black
-        \\  --font-size <pt>             Font size in points (default: 12)
+        \\  --font-size <pt>             Font size in points (default: 13)
         \\  --cursor-style <style>       Cursor shape (default: "block")
         \\                               Values: block, bar, underline, block_hollow
         \\  --cursor-style-blink <bool>  Enable cursor blinking (default: true)
@@ -985,6 +984,44 @@ pub fn setConfigValue(allocator: std.mem.Allocator, key: []const u8, value: []co
     try file.writeAll(out.items);
 }
 
+/// Remove active `key = value` lines from the main config file. Comments are left
+/// intact, so the generated template remains useful after UI changes.
+pub fn removeConfigKeys(allocator: std.mem.Allocator, keys: []const []const u8) !void {
+    ensureConfigExists(allocator);
+
+    const path = try configFilePath(allocator);
+    defer allocator.free(path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
+    defer if (content.len > 0) allocator.free(content);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trimRight(u8, line_raw, "\r");
+        var should_remove = false;
+        for (keys) |key| {
+            if (configLineMatchesKey(line, key)) {
+                should_remove = true;
+                break;
+            }
+        }
+        if (!should_remove and line.len > 0) {
+            try out.appendSlice(allocator, line);
+            try out.append(allocator, '\n');
+        }
+    }
+
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(out.items);
+}
+
 fn configLineMatchesKey(line: []const u8, key: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r");
     if (trimmed.len == 0 or trimmed[0] == '#') return false;
@@ -1000,25 +1037,26 @@ const default_config_template =
     \\
     \\# Font
     \\# font-family = JetBrains Mono
-    \\# font-style = semi-bold
-    \\# font-size = 14
+    \\# font-style = regular
+    \\# font-size = 13
     \\
     \\# Cursor
     \\# cursor-style = block
     \\# cursor-style-blink = true
-    \\# cursor-color = #ffffff
-    \\# cursor-text = #000000
+    \\# cursor-color = #ffcc66
+    \\# cursor-text = #1f2430
     \\
     \\# Theme (name or file path)
+    \\# Common choices: Catppuccin Mocha, TokyoNight Night, GitHub Light Default, Xcode Light
     \\# theme =
     \\
     \\# Color overrides (override theme colors)
-    \\# background = #282c34
-    \\# foreground = #ffffff
-    \\# selection-background = #ffffff
-    \\# selection-foreground = #282c34
-    \\# palette = 0=#1d1f21
-    \\# palette = 1=#cc6666
+    \\# background = #1f2430
+    \\# foreground = #cbccc6
+    \\# selection-background = #33415e
+    \\# selection-foreground = #f3f4f5
+    \\# palette = 0=#191e2a
+    \\# palette = 1=#ff3333
     \\
     \\# Custom post-processing shader (GLSL)
     \\# custom-shader =

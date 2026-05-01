@@ -1308,9 +1308,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                     },
                     .maximize => {
                         if (w.is_fullscreen) {
-                            // Exit fullscreen → restore to windowed size
-                            // Push a synthetic key event for Alt+Enter
-                            w.key_events.push(.{ .vk = VK_RETURN, .alt = true, .ctrl = false, .shift = false });
+                            w.key_events.push(.{ .vk = VK_RETURN, .alt = false, .ctrl = true, .shift = false });
                         } else if (IsZoomed(hwnd) != 0) {
                             _ = ShowWindow(hwnd, SW_RESTORE);
                         } else {

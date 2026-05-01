@@ -245,7 +245,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         return;
     }
     if (overlays.settingsPageVisible()) {
-        if (ev.vk == win32_backend.VK_ESCAPE) overlays.settingsPageClose();
+        overlays.settingsPageHandleKey(ev);
         return;
     }
     // Ctrl+Shift+N = new window (even during tab rename)
@@ -299,6 +299,12 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (ev.ctrl and ev.shift and ev.vk == 0x42) { // 'B'
         if (tab.g_tab_rename_active) tab.commitTabRename();
         toggleSidebar();
+        return;
+    }
+    // Ctrl+Enter = maximize / restore window
+    if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == win32_backend.VK_RETURN) {
+        if (tab.g_tab_rename_active) tab.commitTabRename();
+        toggleMaximize();
         return;
     }
     // When tab rename is active, handle special keys
@@ -375,9 +381,8 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         if (AppWindow.g_allocator) |alloc| Config.openConfigInEditor(alloc);
         return;
     }
-    // Alt+Enter = toggle fullscreen
-    if (ev.alt and ev.vk == win32_backend.VK_RETURN) {
-        toggleFullscreen();
+    // Legacy fullscreen chord is intentionally unused; Ctrl+Enter owns maximize/restore.
+    if (ev.alt and !ev.ctrl and ev.vk == win32_backend.VK_RETURN) {
         return;
     }
 
@@ -424,10 +429,6 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         },
         win32_backend.VK_INSERT => "\x1b[2~",
         win32_backend.VK_DELETE => "\x1b[3~",
-        win32_backend.VK_F11 => blk: {
-            toggleFullscreen();
-            break :blk null;
-        },
         else => blk: {
             // Ctrl+A through Ctrl+Z
             if (ev.ctrl and ev.vk >= 0x41 and ev.vk <= 0x5A) {
@@ -589,13 +590,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             if (hitTestConfigButton(xpos, ypos)) {
                 overlays.settingsPageOpen();
             } else if (xpos >= @as(f64, titlebar.TITLEBAR_TOGGLE_W)) {
-                if (AppWindow.g_window) |w| {
-                    if (win32_backend.IsZoomed(w.hwnd) != 0) {
-                        _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_RESTORE);
-                    } else {
-                        _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_MAXIMIZE);
-                    }
-                }
+                toggleMaximize();
             }
         } else if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
             // Only rename if clicking on the rendered title text itself.
@@ -1027,17 +1022,31 @@ fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
 
 // --- Clipboard (Win32 native) ---
 
+fn selectionSurfaceForClipboard() ?*Surface {
+    if (AppWindow.activeTab()) |tb| {
+        var selected_surface: ?*Surface = null;
+        var it = tb.tree.iterator();
+        while (it.next()) |entry| {
+            if (!entry.surface.selection.active) continue;
+            if (entry.handle == tb.focused) return entry.surface;
+            if (selected_surface == null) selected_surface = entry.surface;
+        }
+        if (selected_surface) |surface| return surface;
+    }
+    return AppWindow.activeSurface();
+}
+
 pub fn copySelectionToClipboard() void {
-    const surface = AppWindow.activeSurface() orelse return;
+    const surface = selectionSurfaceForClipboard() orelse return;
     const allocator = AppWindow.g_allocator orelse return;
     const win = AppWindow.g_window orelse return;
 
-    if (!AppWindow.activeSelection().active) return;
+    if (!surface.selection.active) return;
 
-    var start_row = AppWindow.activeSelection().start_row;
-    var start_col = AppWindow.activeSelection().start_col;
-    var end_row = AppWindow.activeSelection().end_row;
-    var end_col = AppWindow.activeSelection().end_col;
+    var start_row = surface.selection.start_row;
+    var start_col = surface.selection.start_col;
+    var end_row = surface.selection.end_row;
+    var end_col = surface.selection.end_col;
 
     if (start_row > end_row or (start_row == end_row and start_col > end_col)) {
         std.mem.swap(usize, &start_row, &end_row);
@@ -1077,12 +1086,15 @@ pub fn copySelectionToClipboard() void {
             }
         }
         if (row < end_row) {
-            text.append(allocator, '\n') catch {};
+            text.appendSlice(allocator, "\r\n") catch {};
         }
     }
     surface.render_state.mutex.unlock();
 
     if (text.items.len == 0) return;
+
+    const utf16 = std.unicode.utf8ToUtf16LeAllocZ(allocator, text.items) catch return;
+    defer allocator.free(utf16);
 
     // Win32 clipboard: OpenClipboard → EmptyClipboard → SetClipboardData → CloseClipboard
     if (win32_backend.OpenClipboard(win.hwnd) == 0) return;
@@ -1090,15 +1102,15 @@ pub fn copySelectionToClipboard() void {
     _ = win32_backend.EmptyClipboard();
 
     // Clipboard wants a GlobalAlloc'd GMEM_MOVEABLE buffer with null-terminated data
-    const size = text.items.len + 1;
+    const size = (utf16.len + 1) * @sizeOf(u16);
     const hmem = win32_backend.GlobalAlloc(0x0002, size) orelse return; // GMEM_MOVEABLE
     const ptr = win32_backend.GlobalLock(hmem) orelse return;
-    const dest: [*]u8 = @ptrCast(ptr);
-    @memcpy(dest[0..text.items.len], text.items);
-    dest[text.items.len] = 0;
+    const dest: [*]u16 = @ptrCast(@alignCast(ptr));
+    @memcpy(dest[0..utf16.len], utf16);
+    dest[utf16.len] = 0;
     _ = win32_backend.GlobalUnlock(hmem);
 
-    _ = win32_backend.SetClipboardData(1, hmem); // CF_TEXT = 1
+    _ = win32_backend.SetClipboardData(13, hmem); // CF_UNICODETEXT = 13
     std.debug.print("Copied {} bytes to clipboard\n", .{text.items.len});
 }
 
@@ -1130,6 +1142,23 @@ pub fn writeTextToActivePty(text: []const u8) void {
 
 pub fn writeTextToSurfacePty(surface: *Surface, text: []const u8) void {
     writeToPty(surface, text);
+}
+
+// --- Maximize toggle (Win32 native) ---
+
+pub fn toggleMaximize() void {
+    const win = AppWindow.g_window orelse return;
+
+    if (is_fullscreen or win.is_fullscreen) {
+        toggleFullscreen();
+        return;
+    }
+
+    if (win32_backend.IsZoomed(win.hwnd) != 0) {
+        _ = win32_backend.ShowWindow(win.hwnd, win32_backend.SW_RESTORE);
+    } else {
+        _ = win32_backend.ShowWindow(win.hwnd, win32_backend.SW_MAXIMIZE);
+    }
 }
 
 // --- Fullscreen toggle (Win32 native) ---

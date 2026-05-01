@@ -27,19 +27,12 @@ pub fn sidebarWidth() f32 {
     return if (tab.g_sidebar_visible) SIDEBAR_WIDTH else 0;
 }
 
-fn lighten(color: [3]f32, amount: f32) [3]f32 {
+fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
+    const clamped = @max(0.0, @min(1.0, t));
     return .{
-        @min(1.0, color[0] + amount),
-        @min(1.0, color[1] + amount),
-        @min(1.0, color[2] + amount),
-    };
-}
-
-fn darken(color: [3]f32, amount: f32) [3]f32 {
-    return .{
-        @max(0.0, color[0] - amount),
-        @max(0.0, color[1] - amount),
-        @max(0.0, color[2] - amount),
+        a[0] + (b[0] - a[0]) * clamped,
+        a[1] + (b[1] - a[1]) * clamped,
+        a[2] + (b[2] - a[2]) * clamped,
     };
 }
 
@@ -336,11 +329,12 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
 
     const tb_top = window_height - titlebar_h; // top of titlebar in GL coords
     const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
     if (AppWindow.g_window != null) {
-        const top_bg = lighten(bg, 0.025);
-        const hover_bg = lighten(bg, 0.08);
-        const border_color_simple = darken(bg, 0.035);
-        const icon_color = [3]f32{ 0.78, 0.78, 0.78 };
+        const top_bg = blend(bg, fg, 0.04);
+        const hover_bg = blend(bg, fg, 0.11);
+        const border_color_simple = blend(bg, .{ 0.0, 0.0, 0.0 }, 0.20);
+        const icon_color = blend(bg, fg, 0.72);
 
         // Phantty keeps terminal tabs in the application UI layer, matching
         // Ghostty's apprt action/tab-view split. The top bar now only hosts the
@@ -395,7 +389,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         if (tab.activeTab()) |active_tab| {
             const title = active_tab.getTitle();
             const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
-            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, .{ 0.64, 0.64, 0.64 }, config_x - TITLEBAR_TOGGLE_W - 22);
+            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, blend(bg, fg, 0.66), config_x - TITLEBAR_TOGGLE_W - 22);
         }
 
         renderCaptionButton(top_caption_start, tb_top, top_caption_btn_w, top_btn_h, .minimize, top_hovered == .minimize);
@@ -926,13 +920,15 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
     gl.BindVertexArray.?(gl_init.vao);
 
     const bg = AppWindow.g_theme.background;
-    const sidebar_bg = lighten(bg, 0.035);
-    const hover_bg = lighten(bg, 0.075);
-    const active_bg = lighten(bg, 0.105);
-    const border_color = darken(bg, 0.035);
-    const text_active = [3]f32{ 0.92, 0.92, 0.92 };
-    const text_inactive = [3]f32{ 0.62, 0.62, 0.62 };
-    const muted = [3]f32{ 0.46, 0.46, 0.46 };
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const sidebar_bg = blend(bg, fg, 0.035);
+    const hover_bg = blend(bg, fg, 0.09);
+    const active_bg = blend(bg, accent, 0.16);
+    const border_color = blend(bg, .{ 0.0, 0.0, 0.0 }, 0.20);
+    const text_active = blend(bg, fg, 0.94);
+    const text_inactive = blend(bg, fg, 0.62);
+    const muted = blend(bg, fg, 0.44);
 
     const side_h = window_height - titlebar_h;
     if (side_h <= 0) return;
@@ -1060,7 +1056,7 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
                 raw_color[2] * close_opacity + sidebar_bg[2] * (1 - close_opacity),
             };
             if (close_hovered) {
-                gl_init.renderQuad(close_btn_x + 6, row_y + 10, 20, 20, lighten(bg, 0.12));
+                gl_init.renderQuad(close_btn_x + 6, row_y + 10, 20, 20, blend(bg, fg, 0.14));
             }
             renderCloseIcon(close_btn_x, row_y, tab.TAB_CLOSE_BTN_W, row_h, close_color);
         }

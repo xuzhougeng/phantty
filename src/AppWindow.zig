@@ -203,11 +203,18 @@ fn clearUiStateOnTabChange() void {
     g_cells_valid = false;
 }
 
+fn isUnsupportedShellCwd(path: []const u16) bool {
+    if (path.len < 2) return false;
+    if (path[0] != '\\' or path[1] != '\\') return false;
+    return !(path.len >= 4 and path[2] == '?' and path[3] == '\\');
+}
+
 /// Convert the active surface's CWD from Unix to Windows path.
 fn getActiveCwd(cwd_buf: *[260]u16) ?[*:0]const u16 {
     if (tab.activeSurface()) |surface| {
         if (surface.getCwd()) |unix_path| {
             if (unixPathToWindows(unix_path, cwd_buf)) |len| {
+                if (isUnsupportedShellCwd(cwd_buf[0..len])) return null;
                 cwd_buf[len] = 0;
                 return @ptrCast(cwd_buf);
             }
@@ -260,15 +267,7 @@ pub fn switchTab(idx: usize) void {
 pub fn splitFocused(direction: SplitTree.Split.Direction) void {
     const allocator = g_allocator orelse return;
     var cwd_buf: [260]u16 = undefined;
-    var cwd: ?[*:0]const u16 = null;
-    if (tab.activeSurface()) |surface| {
-        if (surface.getCwd()) |unix_path| {
-            if (unixPathToWindows(unix_path, &cwd_buf)) |len| {
-                cwd_buf[len] = 0;
-                cwd = @ptrCast(&cwd_buf);
-            }
-        }
-    }
+    const cwd = getActiveCwd(&cwd_buf);
     if (tab.splitFocused(allocator, direction, font.cell_width, font.cell_height, g_cursor_style, g_cursor_blink, cwd)) {
         overlays.g_resize_active = false;
         g_force_rebuild = true;

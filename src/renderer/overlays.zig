@@ -103,7 +103,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+Z", .action = "Equalize panels" },
     .{ .keys = "Ctrl+Shift+C/V", .action = "Copy / paste" },
     .{ .keys = "Ctrl+,", .action = "Open config" },
-    .{ .keys = "Alt+Enter / F11", .action = "Fullscreen" },
+    .{ .keys = "Ctrl+Enter", .action = "Maximize / restore" },
 };
 
 pub threadlocal var g_startup_shortcuts_visible: bool = false;
@@ -138,7 +138,7 @@ const CommandAction = enum {
     toggle_sidebar,
     show_shortcuts,
     open_config,
-    toggle_fullscreen,
+    toggle_maximize,
 };
 
 const CommandEntry = struct {
@@ -161,7 +161,7 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "Ctrl+Shift+B", .action = .toggle_sidebar },
     .{ .title = "Keyboard Shortcuts", .detail = "Show the shortcut reference overlay", .shortcut = "Ctrl+Shift+P", .action = .show_shortcuts },
     .{ .title = "Open Config", .detail = "Open the Phantty config file", .shortcut = "Ctrl+,", .action = .open_config },
-    .{ .title = "Toggle Fullscreen", .detail = "Enter or exit fullscreen", .shortcut = "Alt+Enter / F11", .action = .toggle_fullscreen },
+    .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Ctrl+Enter", .action = .toggle_maximize },
 };
 
 pub threadlocal var g_command_palette_visible: bool = false;
@@ -276,7 +276,7 @@ fn executeCommand(action: CommandAction) void {
         .toggle_sidebar => AppWindow.input.toggleSidebar(),
         .show_shortcuts => startupShortcutsShow(),
         .open_config => if (AppWindow.g_allocator) |alloc| Config.openConfigInEditor(alloc),
-        .toggle_fullscreen => AppWindow.input.toggleFullscreen(),
+        .toggle_maximize => AppWindow.input.toggleMaximize(),
     }
 }
 
@@ -356,15 +356,15 @@ fn commandPaletteLayout(window_width: f32, window_height: f32, top_offset: f32) 
     const visible_count = commandPaletteVisibleCount();
     const rendered_rows = @min(visible_count, COMMAND_PALETTE_MAX_VISIBLE_ROWS);
 
-    const box_w = @round(@min(@max(360, window_width - 32), 720));
-    const row_h: f32 = 34;
-    const header_h: f32 = 42;
-    const filter_h: f32 = 36;
-    const footer_h: f32 = 24;
+    const box_w = @round(@min(@max(520, window_width - 64), 760));
+    const row_h: f32 = 38;
+    const header_h: f32 = 48;
+    const filter_h: f32 = 42;
+    const footer_h: f32 = 30;
     const row_area_h = row_h * @as(f32, @floatFromInt(@max(rendered_rows, 1)));
-    const box_h = @round(header_h + filter_h + row_area_h + footer_h + 24);
-    const box_x = @round(@max(12, (window_width - box_w) / 2));
-    const box_top_px = @round(top_offset + @max(12, (content_height - box_h) / 2));
+    const box_h = @round(header_h + filter_h + row_area_h + footer_h + 28);
+    const box_x = @round(@max(16, (window_width - box_w) / 2));
+    const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
     const row_top_px = @round(box_top_px + header_h + filter_h + 10);
 
     return .{
@@ -417,12 +417,11 @@ fn renderTitlebarTextLimited(text: []const u8, x_start: f32, y: f32, color: [3]f
         if (x + advance > x_start + max_w) {
             const ellipsis_w = titlebar.titlebarGlyphAdvance('.') * 3;
             if (idx > 0 and x + ellipsis_w <= x_start + max_w) {
-                renderTitlebarTextStrong("...", x, y_aligned, color);
+                renderTitlebarText("...", x, y_aligned, color);
             }
             return;
         }
         titlebar.renderTitlebarChar(@intCast(ch), x, y_aligned, color);
-        titlebar.renderTitlebarChar(@intCast(ch), x + 1, y_aligned, color);
         x += advance;
     }
 }
@@ -441,29 +440,39 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     gl.ActiveTexture.?(c.GL_TEXTURE0);
     gl.BindVertexArray.?(gl_init.vao);
 
-    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.30);
-    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, .{ 0.0, 0.0, 0.0 }, 0.88);
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel_color = mixColor(bg, fg, 0.035);
+    const border_color = mixColor(bg, fg, 0.16);
+    const field_color = mixColor(bg, fg, 0.075);
+    const field_border = mixColor(bg, fg, 0.19);
+    const muted = mixColor(bg, fg, 0.62);
+    const dim = mixColor(bg, fg, 0.44);
+    const title_color = mixColor(fg, accent, 0.08);
+    const selected_bg = mixColor(bg, accent, 0.50);
+    const selected_border = mixColor(accent, fg, 0.16);
 
-    const fg: [3]f32 = .{ 1.0, 1.0, 1.0 };
-    const muted: [3]f32 = .{ 0.84, 0.84, 0.84 };
-    const dim: [3]f32 = .{ 0.68, 0.68, 0.68 };
-    const accent: [3]f32 = .{ 0.18, 0.36, 0.74 };
+    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.22);
+    renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 9, border_color, 0.42);
+    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 8, panel_color, 0.98);
 
-    const pad_x: f32 = 18;
-    const title_y = @round(window_height - layout.box_top_px - 29);
-    renderTitlebarTextStrong("Command Center", layout.box_x + pad_x, title_y, fg);
-    renderTitlebarTextStrong("Esc closes", layout.box_x + layout.box_w - pad_x - measureTitlebarText("Esc closes") - 1, title_y, muted);
+    const pad_x: f32 = 24;
+    const title_y = @round(window_height - layout.box_top_px - 31);
+    renderTitlebarText("Command Center", layout.box_x + pad_x, title_y, title_color);
+    renderTitlebarText("Esc closes", layout.box_x + layout.box_w - pad_x - measureTitlebarText("Esc closes"), title_y, muted);
 
     const filter_x = @round(layout.box_x + pad_x);
-    const filter_y = @round(window_height - (layout.box_top_px + 74));
+    const filter_y = @round(window_height - (layout.box_top_px + 80));
     const filter_w = layout.box_w - pad_x * 2;
-    renderRoundedQuadAlpha(filter_x, filter_y - 7, filter_w, 26, 5, .{ 1.0, 1.0, 1.0 }, 0.10);
+    renderRoundedQuadAlpha(filter_x - 1, filter_y - 9, filter_w + 2, 32, 6, field_border, 0.42);
+    renderRoundedQuadAlpha(filter_x, filter_y - 8, filter_w, 30, 5, field_color, 0.92);
 
     const filter = commandPaletteFilter();
     if (filter.len > 0) {
-        renderTitlebarTextStrong(filter, filter_x + 10, filter_y, fg);
+        renderTitlebarText(filter, filter_x + 12, filter_y, fg);
     } else {
-        renderTitlebarTextStrong("Type to filter commands", filter_x + 10, filter_y, dim);
+        renderTitlebarText("Type to filter commands", filter_x + 12, filter_y, dim);
     }
 
     const visible_count = commandPaletteVisibleCount();
@@ -481,22 +490,23 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
             const row_y = @round(window_height - row_top - layout.row_h);
             const selected = visible_idx == g_command_palette_selected;
             if (selected) {
-                renderRoundedQuadAlpha(layout.box_x + 8, row_y + 2, layout.box_w - 16, layout.row_h - 4, 6, accent, 0.72);
+                renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
+                renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
             }
 
-            const title_color: [3]f32 = if (selected) fg else .{ 0.92, 0.92, 0.92 };
-            const shortcut_color = if (selected) fg else muted;
+            const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
+            const shortcut_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
 
-            const text_y = @round(row_y + 17);
-            const title_x = @round(layout.box_x + pad_x);
+            const text_y = @round(row_y + (layout.row_h - font.g_titlebar_cell_height) / 2);
+            const title_x = @round(layout.box_x + pad_x + 2);
             var shortcut_left = layout.box_x + layout.box_w - pad_x;
             if (entry.shortcut.len > 0) {
                 const shortcut_w = measureTitlebarText(entry.shortcut);
-                shortcut_left = @round(layout.box_x + layout.box_w - pad_x - shortcut_w - 1);
-                renderTitlebarTextStrong(entry.shortcut, shortcut_left, text_y, shortcut_color);
+                shortcut_left = @round(layout.box_x + layout.box_w - pad_x - shortcut_w);
+                renderTitlebarText(entry.shortcut, shortcut_left, text_y, shortcut_color);
             }
 
-            renderTitlebarTextLimited(entry.title, title_x, text_y, title_color, shortcut_left - title_x - 18);
+            renderTitlebarTextLimited(entry.title, title_x, text_y, row_title_color, shortcut_left - title_x - 18);
 
             visible_idx += 1;
             rendered_rows += 1;
@@ -504,7 +514,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     }
 
     const footer = "Up/Down select, Enter run";
-    renderTitlebarTextStrong(footer, layout.box_x + pad_x, box_y + 15, muted);
+    renderTitlebarText(footer, layout.box_x + pad_x, box_y + 17, muted);
 }
 
 // ============================================================================
@@ -515,6 +525,7 @@ const SSH_FIELD_COUNT = 5;
 const SSH_FIELD_MAX = 128;
 const SSH_PROFILE_MAX = 16;
 const SSH_PROFILE_NONE = std.math.maxInt(usize);
+const SESSION_LAUNCHER_ROW_COUNT = 3;
 
 const SshField = enum(usize) {
     name = 0,
@@ -552,6 +563,7 @@ const SessionLayout = struct {
 };
 
 pub threadlocal var g_session_launcher_visible: bool = false;
+threadlocal var g_session_launcher_selected: usize = 0;
 threadlocal var g_ssh_list_visible: bool = false;
 threadlocal var g_ssh_form_visible: bool = false;
 threadlocal var g_ssh_focus: usize = @intFromEnum(SshField.name);
@@ -573,6 +585,7 @@ pub fn sessionLauncherVisible() bool {
 
 pub fn sessionLauncherOpen() void {
     g_session_launcher_visible = true;
+    g_session_launcher_selected = 0;
     g_ssh_list_visible = false;
     g_ssh_form_visible = false;
     g_command_palette_visible = false;
@@ -607,12 +620,23 @@ pub fn sessionLauncherHandleKey(ev: win32_backend.KeyEvent) void {
             handleSshListKey(ev);
             return;
         }
-        if (ev.vk == 0x50) {
-            openPowerShellSession();
-        } else if (ev.vk == 0x53) {
-            openSshList();
-        } else if (ev.vk == 0x57) {
-            openWslSession();
+        switch (ev.vk) {
+            win32_backend.VK_DOWN, win32_backend.VK_TAB => g_session_launcher_selected = (g_session_launcher_selected + 1) % SESSION_LAUNCHER_ROW_COUNT,
+            win32_backend.VK_UP => g_session_launcher_selected = if (g_session_launcher_selected == 0) SESSION_LAUNCHER_ROW_COUNT - 1 else g_session_launcher_selected - 1,
+            win32_backend.VK_RETURN => runSessionLauncherRow(g_session_launcher_selected),
+            0x50 => {
+                g_session_launcher_selected = 0;
+                runSessionLauncherRow(g_session_launcher_selected);
+            },
+            0x53 => {
+                g_session_launcher_selected = 1;
+                runSessionLauncherRow(g_session_launcher_selected);
+            },
+            0x57 => {
+                g_session_launcher_selected = 2;
+                runSessionLauncherRow(g_session_launcher_selected);
+            },
+            else => {},
         }
         return;
     }
@@ -661,6 +685,15 @@ fn openPowerShellSession() void {
 fn openWslSession() void {
     sessionLauncherClose();
     _ = AppWindow.spawnTabWithCommandUtf8("wsl.exe ~");
+}
+
+fn runSessionLauncherRow(row: usize) void {
+    switch (row) {
+        0 => openPowerShellSession(),
+        1 => openSshList(),
+        2 => openWslSession(),
+        else => {},
+    }
 }
 
 fn openSshList() void {
@@ -980,7 +1013,7 @@ fn sessionLayout(window_width: f32, window_height: f32, top_offset: f32) Session
     const content_height = @max(1, window_height - top_offset);
     const box_w: f32 = if (g_ssh_form_visible or g_ssh_list_visible) @round(@min(@max(460, window_width - 48), 760)) else 360;
     const row_h: f32 = 38;
-    const row_count: usize = if (g_ssh_form_visible) SSH_FIELD_COUNT + 3 else if (g_ssh_list_visible) sshListRowCount() else 3;
+    const row_count: usize = if (g_ssh_form_visible) SSH_FIELD_COUNT + 3 else if (g_ssh_list_visible) sshListRowCount() else SESSION_LAUNCHER_ROW_COUNT;
     const box_h = @round(74 + row_h * @as(f32, @floatFromInt(row_count)) + 28);
     const box_x = @round(@max(16, (window_width - box_w) / 2));
     const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
@@ -1015,6 +1048,8 @@ fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, t
     }
 
     if (!g_ssh_form_visible) {
+        if (row >= SESSION_LAUNCHER_ROW_COUNT) return null;
+        g_session_launcher_selected = row;
         return switch (row) {
             0 => .powershell,
             1 => .ssh,
@@ -1089,7 +1124,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, .{ 0.0, 0.0, 0.0 }, 0.88);
 
     const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
-    const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Choose how to start";
+    const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Up/Down select, Enter starts";
     const title_y = @round(window_height - layout.box_top_px - 34);
     renderTitlebarTextStrong(title, layout.box_x + 24, title_y, .{ 1.0, 1.0, 1.0 });
     renderTitlebarTextStrong(hint, layout.box_x + 24, title_y - 24, .{ 0.66, 0.66, 0.66 });
@@ -1109,9 +1144,9 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
             renderSessionRow(layout, window_height, row, "Cancel", "Esc", g_ssh_list_selected == row);
             return;
         }
-        renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", false);
-        renderSessionRow(layout, window_height, 1, "SSH", "connect server", false);
-        renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", false);
+        renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", g_session_launcher_selected == 0);
+        renderSessionRow(layout, window_height, 1, "SSH", "connect server", g_session_launcher_selected == 1);
+        renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", g_session_launcher_selected == 2);
         return;
     }
 
@@ -1129,11 +1164,28 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
 // Settings page
 // ============================================================================
 
-const SETTINGS_ROW_COUNT = 7;
+const ThemePreset = struct {
+    label: []const u8,
+    theme: ?[]const u8,
+    detail: []const u8,
+};
+
+const SETTINGS_THEME_PRESETS = [_]ThemePreset{
+    .{ .label = "Phantty Default", .theme = null, .detail = "Warm balanced dark" },
+    .{ .label = "Catppuccin Mocha", .theme = "Catppuccin Mocha", .detail = "Soft popular dark" },
+    .{ .label = "TokyoNight Night", .theme = "TokyoNight Night", .detail = "Deep blue coding" },
+    .{ .label = "GitHub Light", .theme = "GitHub Light Default", .detail = "Clean white" },
+    .{ .label = "Xcode Light", .theme = "Xcode Light", .detail = "Bright native" },
+};
+
+const SETTINGS_THEME_ROW = 1;
+const SETTINGS_CONTROL_ROW_START = SETTINGS_THEME_ROW + 1;
+const SETTINGS_ROW_COUNT = SETTINGS_CONTROL_ROW_START + 6;
 
 const SettingsAction = enum {
     font_size_minus,
     font_size_plus,
+    cycle_theme,
     cycle_cursor_style,
     toggle_cursor_blink,
     toggle_focus_follows_mouse,
@@ -1152,6 +1204,7 @@ const SettingsLayout = struct {
 };
 
 pub threadlocal var g_settings_visible: bool = false;
+threadlocal var g_settings_focus: usize = SETTINGS_THEME_ROW;
 
 pub fn settingsPageVisible() bool {
     return g_settings_visible;
@@ -1159,12 +1212,25 @@ pub fn settingsPageVisible() bool {
 
 pub fn settingsPageOpen() void {
     g_settings_visible = true;
+    g_settings_focus = SETTINGS_THEME_ROW;
     g_command_palette_visible = false;
     g_startup_shortcuts_visible = false;
 }
 
 pub fn settingsPageClose() void {
     g_settings_visible = false;
+}
+
+pub fn settingsPageHandleKey(ev: win32_backend.KeyEvent) void {
+    switch (ev.vk) {
+        win32_backend.VK_ESCAPE => settingsPageClose(),
+        win32_backend.VK_DOWN, win32_backend.VK_TAB => g_settings_focus = (g_settings_focus + 1) % SETTINGS_ROW_COUNT,
+        win32_backend.VK_UP => g_settings_focus = if (g_settings_focus == 0) SETTINGS_ROW_COUNT - 1 else g_settings_focus - 1,
+        win32_backend.VK_LEFT => runSettingsFocusLeft(),
+        win32_backend.VK_RIGHT => runSettingsFocusRight(),
+        win32_backend.VK_RETURN => runSettingsFocusPrimary(),
+        else => {},
+    }
 }
 
 pub fn settingsPageContainsPoint(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
@@ -1215,6 +1281,7 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
     if (y < layout.row_top_px) return null;
     const row: usize = @intFromFloat(@floor((y - layout.row_top_px) / layout.row_h));
     if (row >= SETTINGS_ROW_COUNT) return null;
+    g_settings_focus = row;
 
     if (row == 0) {
         const plus_x = layout.box_x + layout.box_w - 70;
@@ -1224,13 +1291,17 @@ fn settingsHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, 
         return null;
     }
 
-    return switch (row) {
-        1 => .cycle_cursor_style,
-        2 => .toggle_cursor_blink,
-        3 => .toggle_focus_follows_mouse,
-        4 => .cycle_shell,
-        5 => .open_raw_config,
-        6 => .close,
+    if (row == SETTINGS_THEME_ROW) {
+        return .cycle_theme;
+    }
+
+    return switch (row - SETTINGS_CONTROL_ROW_START) {
+        0 => .cycle_cursor_style,
+        1 => .toggle_cursor_blink,
+        2 => .toggle_focus_follows_mouse,
+        3 => .cycle_shell,
+        4 => .open_raw_config,
+        5 => .close,
         else => null,
     };
 }
@@ -1249,6 +1320,7 @@ fn executeSettingsAction(action: SettingsAction) void {
             const next = @min(cfg.@"font-size" + 1, 72);
             writeConfigInt("font-size", next);
         },
+        .cycle_theme => cycleThemePreset(1),
         .cycle_cursor_style => Config.setConfigValue(allocator, "cursor-style", nextCursorStyle(cfg.@"cursor-style")) catch {},
         .toggle_cursor_blink => Config.setConfigValue(allocator, "cursor-style-blink", if (cfg.@"cursor-style-blink") "false" else "true") catch {},
         .toggle_focus_follows_mouse => Config.setConfigValue(allocator, "focus-follows-mouse", if (cfg.@"focus-follows-mouse") "false" else "true") catch {},
@@ -1263,6 +1335,107 @@ fn writeConfigInt(key: []const u8, value: u32) void {
     var buf: [32]u8 = undefined;
     const value_text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch return;
     Config.setConfigValue(allocator, key, value_text) catch {};
+}
+
+fn runSettingsFocusPrimary() void {
+    switch (g_settings_focus) {
+        0 => executeSettingsAction(.font_size_plus),
+        SETTINGS_THEME_ROW => cycleThemePreset(1),
+        SETTINGS_CONTROL_ROW_START + 0 => executeSettingsAction(.cycle_cursor_style),
+        SETTINGS_CONTROL_ROW_START + 1 => executeSettingsAction(.toggle_cursor_blink),
+        SETTINGS_CONTROL_ROW_START + 2 => executeSettingsAction(.toggle_focus_follows_mouse),
+        SETTINGS_CONTROL_ROW_START + 3 => executeSettingsAction(.cycle_shell),
+        SETTINGS_CONTROL_ROW_START + 4 => executeSettingsAction(.open_raw_config),
+        SETTINGS_CONTROL_ROW_START + 5 => executeSettingsAction(.close),
+        else => {},
+    }
+}
+
+fn runSettingsFocusLeft() void {
+    switch (g_settings_focus) {
+        0 => executeSettingsAction(.font_size_minus),
+        SETTINGS_THEME_ROW => cycleThemePreset(-1),
+        else => {},
+    }
+}
+
+fn runSettingsFocusRight() void {
+    switch (g_settings_focus) {
+        0 => executeSettingsAction(.font_size_plus),
+        SETTINGS_THEME_ROW => cycleThemePreset(1),
+        else => runSettingsFocusPrimary(),
+    }
+}
+
+const THEME_OVERRIDE_KEYS = [_][]const u8{
+    "background",
+    "foreground",
+    "cursor-color",
+    "cursor-text",
+    "selection-background",
+    "selection-foreground",
+    "palette",
+};
+
+const THEME_RESET_KEYS = [_][]const u8{
+    "theme",
+    "background",
+    "foreground",
+    "cursor-color",
+    "cursor-text",
+    "selection-background",
+    "selection-foreground",
+    "palette",
+};
+
+fn applyThemePreset(index: usize) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    if (index >= SETTINGS_THEME_PRESETS.len) return;
+
+    const preset = SETTINGS_THEME_PRESETS[index];
+    if (preset.theme) |theme_name| {
+        Config.removeConfigKeys(allocator, &THEME_OVERRIDE_KEYS) catch {};
+        Config.setConfigValue(allocator, "theme", theme_name) catch {};
+    } else {
+        Config.removeConfigKeys(allocator, &THEME_RESET_KEYS) catch {};
+    }
+}
+
+fn activeThemePresetIndex(cfg: *const Config) ?usize {
+    for (SETTINGS_THEME_PRESETS, 0..) |preset, i| {
+        if (themePresetIsActive(cfg, preset)) return i;
+    }
+    return null;
+}
+
+fn cycleThemePreset(delta: i32) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    var cfg = Config.load(allocator) catch Config{};
+    defer cfg.deinit(allocator);
+
+    const count: i32 = @intCast(SETTINGS_THEME_PRESETS.len);
+    const current: i32 = @intCast(activeThemePresetIndex(&cfg) orelse 0);
+    const next = @mod(current + delta, count);
+    applyThemePreset(@intCast(next));
+}
+
+fn themePresetIsActive(cfg: *const Config, preset: ThemePreset) bool {
+    if (preset.theme) |theme_name| {
+        return if (cfg.theme) |active| std.mem.eql(u8, active, theme_name) else false;
+    }
+    return cfg.theme == null;
+}
+
+fn currentThemePresetLabel(cfg: *const Config) []const u8 {
+    if (activeThemePresetIndex(cfg)) |idx| return SETTINGS_THEME_PRESETS[idx].label;
+    if (cfg.theme) |theme_name| return theme_name;
+    return SETTINGS_THEME_PRESETS[0].label;
+}
+
+fn currentThemePresetDetail(cfg: *const Config) []const u8 {
+    if (activeThemePresetIndex(cfg)) |idx| return SETTINGS_THEME_PRESETS[idx].detail;
+    if (cfg.theme != null) return "Custom theme";
+    return SETTINGS_THEME_PRESETS[0].detail;
 }
 
 fn cursorStyleText(style: Config.CursorStyle) []const u8 {
@@ -1294,27 +1467,35 @@ fn boolText(value: bool) []const u8 {
     return if (value) "on" else "off";
 }
 
-fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, title: []const u8, value: []const u8, hint: []const u8, clickable: bool) void {
+fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, title: []const u8, value: []const u8, hint: []const u8, clickable: bool, selected: bool) void {
     const row_y = @round(@as(f32, @floatFromInt(row)) * layout.row_h);
     const y_top_px = layout.row_top_px + row_y;
     const gl_y = @round(window_height - y_top_px - layout.row_h);
     const x = layout.box_x + 18;
     const w = layout.box_w - 36;
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const active = std.mem.eql(u8, value, "active");
 
     if (clickable) {
-        gl_init.renderQuadAlpha(x, gl_y + 3, w, layout.row_h - 6, .{ 1.0, 1.0, 1.0 }, 0.045);
+        const row_color = if (selected) mixColor(bg, accent, 0.24) else if (active) mixColor(bg, accent, 0.18) else mixColor(bg, fg, 0.055);
+        gl_init.renderQuadAlpha(x, gl_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.72 else if (active) 0.44 else 0.82);
+        if (selected) gl_init.renderQuadAlpha(x, gl_y + 3, 3, layout.row_h - 6, accent, 0.82);
     }
 
     const text_y = gl_y + 15;
-    renderTitlebarTextStrong(title, x + 12, text_y, .{ 0.92, 0.92, 0.92 });
+    const title_color = if (selected or active) mixColor(fg, accent, 0.18) else fg;
+    renderTitlebarText(title, x + 12, text_y, title_color);
 
     if (value.len > 0) {
         const value_w = measureTitlebarText(value);
-        renderTitlebarTextStrong(value, layout.box_x + layout.box_w - 36 - value_w, text_y, .{ 0.82, 0.82, 0.82 });
+        const value_color = if (selected or active) accent else mixColor(bg, fg, 0.78);
+        renderTitlebarText(value, layout.box_x + layout.box_w - 36 - value_w, text_y, value_color);
     }
 
     if (hint.len > 0) {
-        renderTitlebarTextStrong(hint, x + 210, text_y, .{ 0.58, 0.58, 0.58 });
+        renderTitlebarText(hint, x + 210, text_y, mixColor(bg, fg, 0.55));
     }
 }
 
@@ -1335,23 +1516,36 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
     gl.ActiveTexture.?(c.GL_TEXTURE0);
     gl.BindVertexArray.?(gl_init.vao);
 
-    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.18);
-    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, .{ 0.0, 0.0, 0.0 }, 0.86);
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel_color = mixColor(bg, fg, 0.035);
+    const border_color = mixColor(bg, accent, 0.24);
+    const muted_color = mixColor(bg, fg, 0.58);
+
+    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.16);
+    renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 11, border_color, 0.24);
+    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, panel_color, 0.96);
 
     const title_y = @round(window_height - layout.box_top_px - 34);
-    renderTitlebarTextStrong("Settings", layout.box_x + 24, title_y, .{ 1.0, 1.0, 1.0 });
-    renderTitlebarTextStrong("Config changes save immediately", layout.box_x + 24, title_y - 24, .{ 0.66, 0.66, 0.66 });
-    renderTitlebarTextStrong("Esc", layout.box_x + layout.box_w - 52, title_y, .{ 0.76, 0.76, 0.76 });
+    renderTitlebarText("Settings", layout.box_x + 24, title_y, mixColor(fg, accent, 0.14));
+    renderTitlebarText("Config changes save immediately", layout.box_x + 24, title_y - 24, muted_color);
+    renderTitlebarText("Esc", layout.box_x + layout.box_w - 52, title_y, mixColor(bg, fg, 0.72));
 
     var font_buf: [24]u8 = undefined;
     const font_value = std.fmt.bufPrint(&font_buf, "-  {d}  +", .{cfg.@"font-size"}) catch "";
-    renderSettingsRow(layout, window_height, 0, "Font size", font_value, "Click - / +", true);
-    renderSettingsRow(layout, window_height, 1, "Cursor style", cursorStyleText(cfg.@"cursor-style"), "Click to cycle", true);
-    renderSettingsRow(layout, window_height, 2, "Cursor blink", boolText(cfg.@"cursor-style-blink"), "Click to toggle", true);
-    renderSettingsRow(layout, window_height, 3, "Focus follows mouse", boolText(cfg.@"focus-follows-mouse"), "Click to toggle", true);
-    renderSettingsRow(layout, window_height, 4, "Shell for new tabs", cfg.shell, "cmd / powershell / pwsh / wsl", true);
-    renderSettingsRow(layout, window_height, 5, "Raw config file", "open", "Advanced editor", true);
-    renderSettingsRow(layout, window_height, 6, "Close settings", "Esc", "", true);
+    renderSettingsRow(layout, window_height, 0, "Font size", font_value, "Left / Right", true, g_settings_focus == 0);
+
+    var theme_buf: [96]u8 = undefined;
+    const theme_value = std.fmt.bufPrint(&theme_buf, "< {s} >", .{currentThemePresetLabel(&cfg)}) catch currentThemePresetLabel(&cfg);
+    renderSettingsRow(layout, window_height, SETTINGS_THEME_ROW, "Theme", theme_value, currentThemePresetDetail(&cfg), true, g_settings_focus == SETTINGS_THEME_ROW);
+
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 0, "Cursor style", cursorStyleText(cfg.@"cursor-style"), "Enter / Right", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 0);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 1, "Cursor blink", boolText(cfg.@"cursor-style-blink"), "Enter / Right", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 1);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 2, "Focus follows mouse", boolText(cfg.@"focus-follows-mouse"), "Enter / Right", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 2);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 3, "Shell for new tabs", cfg.shell, "cmd / powershell / pwsh / wsl", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 3);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 4, "Raw config file", "open", "Advanced editor", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 4);
+    renderSettingsRow(layout, window_height, SETTINGS_CONTROL_ROW_START + 5, "Close settings", "Esc", "", true, g_settings_focus == SETTINGS_CONTROL_ROW_START + 5);
 }
 
 // ============================================================================
@@ -1812,28 +2006,36 @@ pub fn renderStartupShortcutsOverlay(window_width: f32, window_height: f32, top_
     gl.ActiveTexture.?(c.GL_TEXTURE0);
     gl.BindVertexArray.?(gl_init.vao);
 
-    renderRoundedQuadAlpha(box_x, box_y, box_width, box_height, 10, .{ 0.0, 0.0, 0.0 }, alpha * 0.76);
+    const panel_color = mixColor(AppWindow.g_theme.background, AppWindow.g_theme.foreground, 0.035);
+    const border_color = mixColor(AppWindow.g_theme.background, AppWindow.g_theme.cursor_color, 0.24);
+    renderRoundedQuadAlpha(box_x - 1, box_y - 1, box_width + 2, box_height + 2, 11, border_color, alpha * 0.24);
+    renderRoundedQuadAlpha(box_x, box_y, box_width, box_height, 10, panel_color, alpha * 0.94);
 
-    const heading_color = mixColor(AppWindow.g_theme.background, .{ 1.0, 1.0, 1.0 }, alpha);
-    const keys_color = mixColor(AppWindow.g_theme.background, .{ 0.88, 0.88, 0.88 }, alpha);
-    const action_color = mixColor(AppWindow.g_theme.background, .{ 0.78, 0.78, 0.78 }, alpha);
-    const hint_color = mixColor(AppWindow.g_theme.background, .{ 0.68, 0.68, 0.68 }, alpha);
+    const heading_base = mixColor(AppWindow.g_theme.foreground, AppWindow.g_theme.cursor_color, 0.18);
+    const keys_base = mixColor(AppWindow.g_theme.foreground, AppWindow.g_theme.cursor_color, 0.08);
+    const action_base = AppWindow.g_theme.foreground;
+    const hint_base = mixColor(AppWindow.g_theme.background, AppWindow.g_theme.foreground, 0.58);
+    const heading_color = mixColor(AppWindow.g_theme.background, heading_base, alpha);
+    const keys_color = mixColor(AppWindow.g_theme.background, keys_base, alpha);
+    const action_color = mixColor(AppWindow.g_theme.background, action_base, alpha);
+    const hint_color = mixColor(AppWindow.g_theme.background, hint_base, alpha);
 
     const heading_w = measureTitlebarText(heading);
     const heading_y = @round(box_y + box_height - pad_y - font.g_titlebar_cell_height);
-    renderTitlebarTextStrong(heading, box_x + (box_width - heading_w) / 2, heading_y, heading_color);
+    renderTitlebarText(heading, box_x + (box_width - heading_w) / 2, heading_y, heading_color);
+    gl_init.renderQuadAlpha(box_x + pad_x, heading_y - heading_gap / 2 - 1, box_width - pad_x * 2, 1, border_color, alpha * 0.36);
 
     const keys_x = @round(box_x + pad_x);
     const action_x = @round(keys_x + max_keys_width + col_gap);
     var y = @round(heading_y - heading_gap - line_height);
     for (STARTUP_SHORTCUT_ENTRIES) |entry| {
-        renderTitlebarTextStrong(entry.keys, keys_x, y, keys_color);
-        renderTitlebarTextStrong(entry.action, action_x, y, action_color);
+        renderTitlebarText(entry.keys, keys_x, y, keys_color);
+        renderTitlebarText(entry.action, action_x, y, action_color);
         y -= line_height;
     }
 
     const hint_w = measureTitlebarText(hint);
-    renderTitlebarTextStrong(hint, box_x + (box_width - hint_w) / 2, box_y + pad_y, hint_color);
+    renderTitlebarText(hint, box_x + (box_width - hint_w) / 2, box_y + pad_y, hint_color);
 }
 
 // ============================================================================
