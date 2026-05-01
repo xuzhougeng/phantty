@@ -79,7 +79,7 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     }
 }
 
-fn toggleSidebar() void {
+pub fn toggleSidebar() void {
     tab.g_sidebar_visible = !tab.g_sidebar_visible;
     if (AppWindow.g_window) |win| {
         syncGridFromWindowSize(win.width, win.height);
@@ -186,6 +186,10 @@ fn processSizeChange(win: *win32_backend.Window) void {
 
 fn handleChar(ev: win32_backend.CharEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.commandPaletteVisible()) {
+        if (!ev.ctrl and !ev.alt) overlays.commandPaletteInsertChar(ev.codepoint);
+        return;
+    }
     // When tab rename is active, route chars to the rename buffer
     if (tab.g_tab_rename_active) {
         AppWindow.g_cursor_blink_visible = true;
@@ -214,6 +218,28 @@ fn handleChar(ev: win32_backend.CharEvent) void {
 
 fn handleKey(ev: win32_backend.KeyEvent) void {
     overlays.startupShortcutsDismiss();
+    // Ctrl+Shift+P = command center (even during tab rename)
+    if (ev.ctrl and ev.shift and ev.vk == 0x50) { // 'P'
+        if (tab.g_tab_rename_active) tab.commitTabRename();
+        overlays.commandPaletteToggle();
+        return;
+    }
+    if (overlays.commandPaletteVisible()) {
+        switch (ev.vk) {
+            win32_backend.VK_ESCAPE => overlays.commandPaletteClose(),
+            win32_backend.VK_UP => overlays.commandPaletteMove(-1),
+            win32_backend.VK_DOWN => overlays.commandPaletteMove(1),
+            win32_backend.VK_RETURN => overlays.commandPaletteExecuteSelected(),
+            win32_backend.VK_BACK => overlays.commandPaletteBackspace(),
+            win32_backend.VK_DELETE => overlays.commandPaletteClearFilter(),
+            else => {},
+        }
+        return;
+    }
+    if (overlays.settingsPageVisible()) {
+        if (ev.vk == win32_backend.VK_ESCAPE) overlays.settingsPageClose();
+        return;
+    }
     // Ctrl+Shift+N = new window (even during tab rename)
     if (ev.ctrl and ev.shift and ev.vk == 0x4E) { // 'N'
         if (tab.g_tab_rename_active) tab.commitTabRename();
@@ -455,9 +481,26 @@ fn hitTestSidebarTabCloseButton(xpos: f64, ypos: f64, tab_idx: usize) bool {
     return xpos >= close_x and xpos < close_x + @as(f64, tab.TAB_CLOSE_BTN_W);
 }
 
+fn hitTestConfigButton(xpos: f64, ypos: f64) bool {
+    const titlebar_h = titlebarHeight();
+    if (ypos < 0 or ypos >= titlebar_h) return false;
+
+    const win = AppWindow.g_window orelse return false;
+    const window_width: f64 = @floatFromInt(win.width);
+    const caption_w: f64 = 46 * 3;
+    const config_w: f64 = @floatCast(titlebar.TITLEBAR_CONFIG_W);
+    const config_x = window_width - caption_w - config_w;
+    return xpos >= config_x and xpos < config_x + config_w;
+}
+
 fn handleTopbarPress(xpos: f64) void {
     if (xpos >= 0 and xpos < @as(f64, titlebar.TITLEBAR_TOGGLE_W)) {
         toggleSidebar();
+        return;
+    }
+
+    if (hitTestConfigButton(xpos, titlebarHeight() / 2)) {
+        overlays.settingsPageOpen();
     }
 }
 
@@ -480,6 +523,38 @@ fn handleSidebarPress(xpos: f64, ypos: f64) void {
 
 fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.settingsPageVisible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = win.getFramebufferSize();
+            const w_f: f32 = @floatFromInt(fb.width);
+            const h_f: f32 = @floatFromInt(fb.height);
+            const top_offset: f32 = @floatCast(titlebarHeight());
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            if (overlays.settingsPageExecuteAt(xpos, ypos, w_f, h_f, top_offset)) return;
+            if (!overlays.settingsPageContainsPoint(xpos, ypos, w_f, h_f, top_offset)) {
+                overlays.settingsPageClose();
+            }
+        }
+        return;
+    }
+    if (overlays.commandPaletteVisible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = win.getFramebufferSize();
+            const w_f: f32 = @floatFromInt(fb.width);
+            const h_f: f32 = @floatFromInt(fb.height);
+            const top_offset: f32 = @floatCast(titlebarHeight());
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            if (overlays.commandPaletteExecuteAt(xpos, ypos, w_f, h_f, top_offset)) return;
+            if (!overlays.commandPaletteContainsPoint(xpos, ypos, w_f, h_f, top_offset)) {
+                overlays.commandPaletteClose();
+            }
+        }
+        return;
+    }
     // Double-click on tab text to rename, elsewhere to maximize
     if (ev.button == .left and ev.action == .double_click) {
         const xpos: f64 = @floatFromInt(ev.x);
@@ -487,7 +562,9 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         const titlebar_h: f64 = titlebarHeight();
         const ypos: f64 = @floatFromInt(ev.y);
         if (ypos < titlebar_h) {
-            if (xpos >= @as(f64, titlebar.TITLEBAR_TOGGLE_W)) {
+            if (hitTestConfigButton(xpos, ypos)) {
+                overlays.settingsPageOpen();
+            } else if (xpos >= @as(f64, titlebar.TITLEBAR_TOGGLE_W)) {
                 if (AppWindow.g_window) |w| {
                     if (win32_backend.IsZoomed(w.hwnd) != 0) {
                         _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_RESTORE);

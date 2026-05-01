@@ -510,6 +510,8 @@ fn onWin32Resize(width: i32, height: i32) void {
         titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     }
 
+    overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
     if (g_window) |w| w.swapBuffers();
@@ -1225,6 +1227,8 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         gl.Viewport.?(0, 0, fb_width, fb_height);
         gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderStartupShortcutsOverlay(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
         win.swapBuffers();

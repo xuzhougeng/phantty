@@ -14,7 +14,6 @@
 ///   - `config-file` key loads additional config files
 ///
 /// Every config key is also a valid CLI flag: `--key value` or `--key=value`.
-
 const Config = @This();
 
 const std = @import("std");
@@ -941,6 +940,57 @@ pub fn openConfigInEditor(allocator: std.mem.Allocator) void {
     // Don't call wait() — let notepad run independently
 
     std.debug.print("[config] notepad.exe spawned successfully\n", .{});
+}
+
+/// Update or append a single `key = value` line in the main config file.
+/// This is used by the built-in Settings page; the file watcher applies the
+/// change through the normal hot-reload path.
+pub fn setConfigValue(allocator: std.mem.Allocator, key: []const u8, value: []const u8) !void {
+    ensureConfigExists(allocator);
+
+    const path = try configFilePath(allocator);
+    defer allocator.free(path);
+
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    };
+    defer if (content.len > 0) allocator.free(content);
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var replaced = false;
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line_raw| {
+        const line = std.mem.trimRight(u8, line_raw, "\r");
+        if (!replaced and configLineMatchesKey(line, key)) {
+            try out.writer(allocator).print("{s} = {s}\n", .{ key, value });
+            replaced = true;
+        } else if (line.len > 0) {
+            try out.appendSlice(allocator, line);
+            try out.append(allocator, '\n');
+        }
+    }
+
+    if (!replaced) {
+        if (out.items.len > 0 and out.items[out.items.len - 1] != '\n') {
+            try out.append(allocator, '\n');
+        }
+        try out.writer(allocator).print("{s} = {s}\n", .{ key, value });
+    }
+
+    const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.writeAll(out.items);
+}
+
+fn configLineMatchesKey(line: []const u8, key: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    if (trimmed.len == 0 or trimmed[0] == '#') return false;
+    const eq_pos = std.mem.indexOf(u8, trimmed, "=") orelse return false;
+    const lhs = std.mem.trim(u8, trimmed[0..eq_pos], " \t");
+    return std.mem.eql(u8, lhs, key);
 }
 
 const default_config_template =

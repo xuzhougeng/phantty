@@ -1226,8 +1226,14 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                     return HTMINBUTTON;
                 }
 
+                // App-handled settings button immediately left of caption buttons.
+                if (pt.x >= client_rect.right - btn_width - 46 and pt.x < client_rect.right - btn_width) {
+                    return HTCLIENT;
+                }
+
                 // The top bar no longer contains tabs. Only the left sidebar
-                // toggle is client-handled; the rest is draggable caption area.
+                // toggle and settings button are client-handled; the rest is
+                // draggable caption area.
                 if (pt.x < 46) {
                     return HTCLIENT;
                 }
@@ -1368,7 +1374,13 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
 
             // Titlebar clicks outside the sidebar toggle initiate window drag.
-            if (y < w.titlebar_height and x >= 46) {
+            const in_settings_button = blk: {
+                var rect: RECT = undefined;
+                _ = GetClientRect(hwnd, &rect);
+                const btn_width = getCaptionButtonWidth();
+                break :blk x >= rect.right - btn_width - 46 and x < rect.right - btn_width;
+            };
+            if (y < w.titlebar_height and x >= 46 and !in_settings_button) {
                 _ = ReleaseCapture();
                 _ = SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, lParam);
                 return 0;

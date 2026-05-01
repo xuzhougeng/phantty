@@ -21,6 +21,7 @@ pub const SIDEBAR_WIDTH: f32 = 220;
 pub const SIDEBAR_ROW_H: f32 = 42;
 pub const SIDEBAR_HEADER_H: f32 = 46;
 pub const TITLEBAR_TOGGLE_W: f32 = 46;
+pub const TITLEBAR_CONFIG_W: f32 = 46;
 
 pub fn sidebarWidth() f32 {
     return if (tab.g_sidebar_visible) SIDEBAR_WIDTH else 0;
@@ -73,6 +74,24 @@ fn renderFallbackMenuIcon(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
     gl_init.renderQuad(cx - line_w / 2, cy - 5, line_w, line_h, color);
     gl_init.renderQuad(cx - line_w / 2, cy, line_w, line_h, color);
     gl_init.renderQuad(cx - line_w / 2, cy + 5, line_w, line_h, color);
+}
+
+fn renderFallbackGearIcon(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const stroke: f32 = 2;
+    const ring: f32 = 12;
+    const tooth: f32 = 4;
+
+    gl_init.renderQuad(cx - ring / 2, cy - ring / 2, ring, stroke, color);
+    gl_init.renderQuad(cx - ring / 2, cy + ring / 2 - stroke, ring, stroke, color);
+    gl_init.renderQuad(cx - ring / 2, cy - ring / 2, stroke, ring, color);
+    gl_init.renderQuad(cx + ring / 2 - stroke, cy - ring / 2, stroke, ring, color);
+
+    gl_init.renderQuad(cx - stroke / 2, cy - ring / 2 - tooth, stroke, tooth, color);
+    gl_init.renderQuad(cx - stroke / 2, cy + ring / 2, stroke, tooth, color);
+    gl_init.renderQuad(cx - ring / 2 - tooth, cy - stroke / 2, tooth, stroke, color);
+    gl_init.renderQuad(cx + ring / 2, cy - stroke / 2, tooth, stroke, color);
 }
 
 fn renderPlusIcon(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
@@ -348,18 +367,37 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             renderFallbackMenuIcon(0, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
         }
 
-        if (tab.activeTab()) |active_tab| {
-            const title = active_tab.getTitle();
-            const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
-            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, .{ 0.64, 0.64, 0.64 }, window_width - TITLEBAR_TOGGLE_W - 160);
-        }
-
         const top_caption_btn_w: f32 = 46;
         const top_caption_area_w: f32 = top_caption_btn_w * 3;
         const top_btn_h: f32 = titlebar_h;
         const top_hovered: win32_backend.CaptionButton = if (AppWindow.g_window) |w| w.hovered_button else .none;
 
         const top_caption_start = window_width - top_caption_area_w;
+        const config_x = top_caption_start - TITLEBAR_CONFIG_W;
+        const config_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_y < 0 or win.mouse_y >= @as(i32, @intFromFloat(titlebar_h))) break :blk false;
+            break :blk @as(f32, @floatFromInt(win.mouse_x)) >= config_x and @as(f32, @floatFromInt(win.mouse_x)) < config_x + TITLEBAR_CONFIG_W;
+        };
+        if (config_hovered) {
+            gl_init.renderQuad(config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, hover_bg);
+        }
+        if (font.icon_face != null) {
+            if (font.loadIconGlyph(0xE713)) |ch| {
+                renderIconGlyph(ch, config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, icon_color, 1.0);
+            } else {
+                renderFallbackGearIcon(config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, icon_color);
+            }
+        } else {
+            renderFallbackGearIcon(config_x, tb_top, TITLEBAR_CONFIG_W, titlebar_h, icon_color);
+        }
+
+        if (tab.activeTab()) |active_tab| {
+            const title = active_tab.getTitle();
+            const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
+            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, .{ 0.64, 0.64, 0.64 }, config_x - TITLEBAR_TOGGLE_W - 22);
+        }
+
         renderCaptionButton(top_caption_start, tb_top, top_caption_btn_w, top_btn_h, .minimize, top_hovered == .minimize);
         renderCaptionButton(top_caption_start + top_caption_btn_w, tb_top, top_caption_btn_w, top_btn_h, .maximize, top_hovered == .maximize);
         renderCaptionButton(top_caption_start + top_caption_btn_w * 2, tb_top, top_caption_btn_w, top_btn_h, .close, top_hovered == .close);
