@@ -18,13 +18,33 @@ const Character = font.Character;
 
 pub const CaptionButtonType = enum { minimize, maximize, close };
 pub const SIDEBAR_WIDTH: f32 = 220;
+pub const SIDEBAR_MIN_WIDTH: f32 = 160;
+pub const SIDEBAR_MAX_WIDTH: f32 = 420;
+pub const SIDEBAR_MIN_CONTENT_WIDTH: f32 = 240;
+pub const SIDEBAR_RESIZE_HIT_WIDTH: f32 = 8;
 pub const SIDEBAR_ROW_H: f32 = 42;
 pub const SIDEBAR_HEADER_H: f32 = 46;
 pub const TITLEBAR_TOGGLE_W: f32 = 46;
 pub const TITLEBAR_CONFIG_W: f32 = 46;
+pub threadlocal var g_sidebar_width: f32 = SIDEBAR_WIDTH;
 
 pub fn sidebarWidth() f32 {
-    return if (tab.g_sidebar_visible) SIDEBAR_WIDTH else 0;
+    return if (tab.g_sidebar_visible) g_sidebar_width else 0;
+}
+
+pub fn sidebarMaxWidthForWindow(window_width: f32) f32 {
+    return @max(SIDEBAR_MIN_WIDTH, @min(SIDEBAR_MAX_WIDTH, window_width - SIDEBAR_MIN_CONTENT_WIDTH));
+}
+
+pub fn clampSidebarWidth(width: f32, window_width: f32) f32 {
+    return @max(SIDEBAR_MIN_WIDTH, @min(sidebarMaxWidthForWindow(window_width), width));
+}
+
+pub fn setSidebarWidth(width: f32, window_width: f32) bool {
+    const next = clampSidebarWidth(width, window_width);
+    if (next == g_sidebar_width) return false;
+    g_sidebar_width = next;
+    return true;
 }
 
 fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
@@ -334,7 +354,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         const top_bg = blend(bg, fg, 0.04);
         const hover_bg = blend(bg, fg, 0.11);
         const border_color_simple = blend(bg, .{ 0.0, 0.0, 0.0 }, 0.20);
-        const icon_color = blend(bg, fg, 0.72);
+        const icon_color = blend(bg, fg, 0.82);
 
         // Phantty keeps terminal tabs in the application UI layer, matching
         // Ghostty's apprt action/tab-view split. The top bar now only hosts the
@@ -389,7 +409,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         if (tab.activeTab()) |active_tab| {
             const title = active_tab.getTitle();
             const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
-            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, blend(bg, fg, 0.66), config_x - TITLEBAR_TOGGLE_W - 22);
+            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, blend(bg, fg, 0.90), config_x - TITLEBAR_TOGGLE_W - 22);
         }
 
         renderCaptionButton(top_caption_start, tb_top, top_caption_btn_w, top_btn_h, .minimize, top_hovered == .minimize);
@@ -913,6 +933,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
 pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
     _ = window_width;
     if (!tab.g_sidebar_visible) return;
+    const sidebar_w = sidebarWidth();
 
     const gl = AppWindow.gl;
     gl.UseProgram.?(gl_init.shader_program);
@@ -926,20 +947,31 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
     const hover_bg = blend(bg, fg, 0.09);
     const active_bg = blend(bg, accent, 0.16);
     const border_color = blend(bg, .{ 0.0, 0.0, 0.0 }, 0.20);
-    const text_active = blend(bg, fg, 0.94);
-    const text_inactive = blend(bg, fg, 0.62);
-    const muted = blend(bg, fg, 0.44);
+    const text_active = fg;
+    const text_inactive = blend(bg, fg, 0.88);
+    const muted = blend(bg, fg, 0.76);
+    const header_text = blend(bg, fg, 0.84);
 
     const side_h = window_height - titlebar_h;
     if (side_h <= 0) return;
 
-    gl_init.renderQuad(0, 0, SIDEBAR_WIDTH, side_h, sidebar_bg);
-    gl_init.renderQuad(SIDEBAR_WIDTH - 1, 0, 1, side_h, border_color);
+    const resize_hovered = blk: {
+        const win = AppWindow.g_window orelse break :blk false;
+        if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+        const mx: f32 = @floatFromInt(win.mouse_x);
+        const my: f32 = @floatFromInt(win.mouse_y);
+        const half_hit = SIDEBAR_RESIZE_HIT_WIDTH / 2;
+        break :blk mx >= sidebar_w - half_hit and mx <= sidebar_w + half_hit and my >= titlebar_h and my < window_height;
+    };
+    const edge_color = if (resize_hovered) blend(bg, accent, 0.38) else border_color;
+
+    gl_init.renderQuad(0, 0, sidebar_w, side_h, sidebar_bg);
+    gl_init.renderQuad(sidebar_w - 1, 0, if (resize_hovered) 2 else 1, side_h, edge_color);
 
     const header_top_px = titlebar_h;
     const header_y = window_height - header_top_px - SIDEBAR_HEADER_H;
     const plus_btn_w: f32 = 42;
-    const plus_x = SIDEBAR_WIDTH - plus_btn_w - 6;
+    const plus_x = sidebar_w - plus_btn_w - 6;
     const plus_hovered = blk: {
         const win = AppWindow.g_window orelse break :blk false;
         if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
@@ -950,9 +982,9 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
     if (plus_hovered) {
         gl_init.renderQuad(plus_x, header_y + 4, plus_btn_w, SIDEBAR_HEADER_H - 8, hover_bg);
     }
-    _ = renderTextLimited("Tabs", 14, header_y + (SIDEBAR_HEADER_H - font.g_titlebar_cell_height) / 2, muted, SIDEBAR_WIDTH - plus_btn_w - 26);
+    _ = renderTextLimited("Tabs", 14, header_y + (SIDEBAR_HEADER_H - font.g_titlebar_cell_height) / 2, header_text, sidebar_w - plus_btn_w - 26);
     renderPlusIcon(plus_x, header_y, plus_btn_w, SIDEBAR_HEADER_H, text_active);
-    gl_init.renderQuad(0, header_y, SIDEBAR_WIDTH, 1, border_color);
+    gl_init.renderQuad(0, header_y, sidebar_w, 1, border_color);
 
     const now_ms = std.time.milliTimestamp();
     const dt: f32 = if (tab.g_last_frame_time_ms > 0)
@@ -981,14 +1013,14 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
             if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
             const mx: f32 = @floatFromInt(win.mouse_x);
             const my: f32 = @floatFromInt(win.mouse_y);
-            break :blk mx >= 0 and mx < SIDEBAR_WIDTH and my >= row_top_px and my < row_top_px + row_h;
+            break :blk mx >= 0 and mx < sidebar_w and my >= row_top_px and my < row_top_px + row_h;
         };
 
         if (is_active) {
-            gl_init.renderQuad(0, row_y, SIDEBAR_WIDTH, row_h, active_bg);
+            gl_init.renderQuad(0, row_y, sidebar_w, row_h, active_bg);
             gl_init.renderQuad(0, row_y + 6, 3, row_h - 12, AppWindow.g_theme.cursor_color);
         } else if (row_hovered) {
-            gl_init.renderQuad(0, row_y, SIDEBAR_WIDTH, row_h, hover_bg);
+            gl_init.renderQuad(0, row_y, sidebar_w, row_h, hover_bg);
         }
 
         if (tab.g_tab_count > 1) {
@@ -1028,7 +1060,7 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
             "New Tab";
 
         const close_opacity = tab.g_tab_close_opacity[tab_idx];
-        const close_btn_x = SIDEBAR_WIDTH - tab.TAB_CLOSE_BTN_W - 4;
+        const close_btn_x = sidebar_w - tab.TAB_CLOSE_BTN_W - 4;
         const title_x: f32 = 42;
         const title_max_w = close_btn_x - title_x - 8;
         const title_color = if (is_active) text_active else text_inactive;

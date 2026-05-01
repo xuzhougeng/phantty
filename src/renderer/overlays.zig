@@ -1083,12 +1083,19 @@ fn renderSessionRow(layout: SessionLayout, window_height: f32, row: usize, left:
     const row_y = @round(window_height - row_top - layout.row_h);
     const x = layout.box_x + 18;
     const w = layout.box_w - 36;
-    gl_init.renderQuadAlpha(x, row_y + 3, w, layout.row_h - 6, if (selected) .{ 0.18, 0.36, 0.74 } else .{ 1.0, 1.0, 1.0 }, if (selected) 0.72 else 0.045);
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const row_color = if (selected) mixColor(bg, accent, 0.34) else mixColor(bg, fg, 0.055);
+    gl_init.renderQuadAlpha(x, row_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.82 else 0.78);
+    if (selected) gl_init.renderQuadAlpha(x, row_y + 3, 3, layout.row_h - 6, accent, 0.86);
     const text_y = row_y + 15;
-    renderTitlebarTextStrong(left, x + 12, text_y, .{ 0.96, 0.96, 0.96 });
+    const left_color = if (selected) mixColor(fg, accent, 0.12) else mixColor(bg, fg, 0.88);
+    renderTitlebarTextStrong(left, x + 12, text_y, left_color);
     if (right.len > 0) {
         const right_w = measureTitlebarText(right);
-        renderTitlebarTextStrong(right, layout.box_x + layout.box_w - 34 - right_w, text_y, .{ 0.78, 0.78, 0.78 });
+        const right_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.56);
+        renderTitlebarTextStrong(right, layout.box_x + layout.box_w - 34 - right_w, text_y, right_color);
     }
 }
 
@@ -1126,15 +1133,23 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
     gl.UseProgram.?(gl_init.shader_program);
     gl.ActiveTexture.?(c.GL_TEXTURE0);
     gl.BindVertexArray.?(gl_init.vao);
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const panel_color = mixColor(bg, fg, 0.035);
+    const border_color = mixColor(bg, accent, 0.24);
+    const title_color = mixColor(fg, accent, 0.14);
+    const muted_color = mixColor(bg, fg, 0.58);
 
     gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.18);
-    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, .{ 0.0, 0.0, 0.0 }, 0.88);
+    renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 11, border_color, 0.24);
+    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, panel_color, 0.96);
 
     const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
     const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Up/Down select, Enter starts";
     const title_y = @round(window_height - layout.box_top_px - 34);
-    renderTitlebarTextStrong(title, layout.box_x + 24, title_y, .{ 1.0, 1.0, 1.0 });
-    renderTitlebarTextStrong(hint, layout.box_x + 24, title_y - 24, .{ 0.66, 0.66, 0.66 });
+    renderTitlebarTextStrong(title, layout.box_x + 24, title_y, title_color);
+    renderTitlebarTextStrong(hint, layout.box_x + 24, title_y - 24, muted_color);
 
     if (!g_ssh_form_visible) {
         if (g_ssh_list_visible) {

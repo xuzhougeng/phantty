@@ -193,6 +193,8 @@ pub fn isActiveTabTerminal() bool {
 /// Clear UI state after tab creation or switch.
 fn clearUiStateOnTabChange() void {
     input.g_selecting = false;
+    input.g_sidebar_resize_hover = false;
+    input.g_sidebar_resize_dragging = false;
     input.g_divider_dragging = false;
     input.g_divider_drag_handle = null;
     input.g_divider_drag_layout = null;

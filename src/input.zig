@@ -42,6 +42,8 @@ pub threadlocal var g_divider_hover: bool = false; // Mouse is over a divider
 pub threadlocal var g_divider_dragging: bool = false; // Currently dragging a divider
 pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Handle of the split node being resized
 pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
+pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the sidebar resize edge
+pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
 
 // Internal state (moved from win32_input struct)
 threadlocal var plus_btn_pressed: bool = false;
@@ -196,6 +198,11 @@ fn processMouseWheelEvents(win: *win32_backend.Window) void {
 fn processSizeChange(win: *win32_backend.Window) void {
     if (!win.size_changed) return;
     win.size_changed = false;
+    if (titlebar.setSidebarWidth(titlebar.g_sidebar_width, @floatFromInt(win.width))) {
+        win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
+        AppWindow.g_force_rebuild = true;
+        AppWindow.g_cells_valid = false;
+    }
 
     syncGridFromWindowSize(win.width, win.height);
 }
@@ -489,7 +496,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
 
 fn hitTestSidebarTab(xpos: f64, ypos: f64) ?usize {
     if (!tab.g_sidebar_visible) return null;
-    if (xpos < 0 or xpos >= @as(f64, titlebar.SIDEBAR_WIDTH)) return null;
+    if (xpos < 0 or xpos >= @as(f64, @floatCast(titlebar.sidebarWidth()))) return null;
 
     const list_top = titlebarHeight() + @as(f64, titlebar.SIDEBAR_HEADER_H) + 6;
     if (ypos < list_top) return null;
@@ -504,7 +511,7 @@ fn hitTestSidebarPlusButton(xpos: f64, ypos: f64) bool {
     if (!tab.g_sidebar_visible) return false;
     const top = titlebarHeight();
     const plus_w: f64 = 42;
-    const plus_x = @as(f64, titlebar.SIDEBAR_WIDTH) - plus_w - 6;
+    const plus_x = @as(f64, @floatCast(titlebar.sidebarWidth())) - plus_w - 6;
     return xpos >= plus_x and xpos < plus_x + plus_w and
         ypos >= top and ypos < top + @as(f64, titlebar.SIDEBAR_HEADER_H);
 }
@@ -513,8 +520,25 @@ fn hitTestSidebarTabCloseButton(xpos: f64, ypos: f64, tab_idx: usize) bool {
     if (!tab.g_sidebar_visible or tab_idx >= tab.g_tab_count or tab.g_tab_count <= 1) return false;
     const row = hitTestSidebarTab(xpos, ypos) orelse return false;
     if (row != tab_idx) return false;
-    const close_x = @as(f64, titlebar.SIDEBAR_WIDTH - tab.TAB_CLOSE_BTN_W - 4);
+    const close_x = @as(f64, @floatCast(titlebar.sidebarWidth() - tab.TAB_CLOSE_BTN_W - 4));
     return xpos >= close_x and xpos < close_x + @as(f64, tab.TAB_CLOSE_BTN_W);
+}
+
+fn hitTestSidebarResizeHandle(xpos: f64, ypos: f64) bool {
+    if (!tab.g_sidebar_visible) return false;
+    if (ypos < titlebarHeight()) return false;
+    const sidebar_w: f64 = @floatCast(titlebar.sidebarWidth());
+    const half_hit: f64 = @as(f64, @floatCast(titlebar.SIDEBAR_RESIZE_HIT_WIDTH)) / 2;
+    return xpos >= sidebar_w - half_hit and xpos <= sidebar_w + half_hit;
+}
+
+fn applySidebarWidthFromMouse(xpos: f64) void {
+    const win = AppWindow.g_window orelse return;
+    if (!titlebar.setSidebarWidth(@floatCast(xpos), @floatFromInt(win.width))) return;
+    syncGridFromWindowSize(win.width, win.height);
+    win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
 }
 
 fn hitTestConfigButton(xpos: f64, ypos: f64) bool {
@@ -660,8 +684,14 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 handleTopbarPress(xpos);
                 return;
             }
+            if (hitTestSidebarResizeHandle(xpos, ypos)) {
+                g_sidebar_resize_dragging = true;
+                g_sidebar_resize_hover = true;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+                return;
+            }
 
-            if (tab.g_sidebar_visible and xpos < @as(f64, titlebar.SIDEBAR_WIDTH)) {
+            if (tab.g_sidebar_visible and xpos < @as(f64, @floatCast(titlebar.sidebarWidth()))) {
                 handleSidebarPress(xpos, ypos);
                 return;
             }
@@ -740,6 +770,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         } else {
             // Mouse up
             overlays.g_scrollbar_dragging = false;
+            if (g_sidebar_resize_dragging) {
+                g_sidebar_resize_dragging = false;
+                g_sidebar_resize_hover = hitTestSidebarResizeHandle(xpos, ypos);
+                const cursor_id = if (g_sidebar_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
+                return;
+            }
 
             // Handle divider drag release
             if (g_divider_dragging) {
@@ -911,6 +948,11 @@ fn hitTestPlusButton(xpos: f64) bool {
 fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     const xpos: f64 = @floatFromInt(ev.x);
     const ypos: f64 = @floatFromInt(ev.y);
+    if (g_sidebar_resize_dragging) {
+        applySidebarWidthFromMouse(xpos);
+        _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+        return;
+    }
 
     // Handle divider dragging
     if (g_divider_dragging) {
@@ -959,6 +1001,17 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             AppWindow.g_cells_valid = false;
         }
         return;
+    }
+    if (!g_selecting and !overlays.g_scrollbar_dragging) {
+        const over_sidebar_resize = hitTestSidebarResizeHandle(xpos, ypos);
+        if (over_sidebar_resize) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+            g_sidebar_resize_hover = true;
+            return;
+        } else if (g_sidebar_resize_hover) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
+            g_sidebar_resize_hover = false;
+        }
     }
 
     // Focus follows mouse: check if mouse is over a different split
@@ -1030,7 +1083,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
-    if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.SIDEBAR_WIDTH))) return;
+    if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
     // Fall back to focused surface if mouse is not over any split.
     const surface = split_layout.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;
