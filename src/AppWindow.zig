@@ -228,6 +228,22 @@ pub fn spawnTab(allocator: std.mem.Allocator) bool {
     return spawnTabWithCwd(allocator, cwd);
 }
 
+pub fn spawnTabWithCommandUtf8(command: []const u8) bool {
+    return spawnTabWithCommandUtf8ReturningSurface(command) != null;
+}
+
+pub fn spawnTabWithCommandUtf8ReturningSurface(command: []const u8) ?*Surface {
+    const allocator = g_allocator orelse return null;
+    const command_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, command) catch return null;
+    defer allocator.free(command_w);
+
+    var cwd_buf: [260]u16 = undefined;
+    const cwd = getActiveCwd(&cwd_buf);
+    if (!tab.spawnTabWithCommandAndCwd(allocator, term_cols, term_rows, command_w, g_cursor_style, g_cursor_blink, cwd)) return null;
+    clearUiStateOnTabChange();
+    return activeSurface();
+}
+
 pub fn closeTab(idx: usize) void {
     const allocator = g_allocator orelse return;
     tab.closeTab(idx, allocator);
@@ -512,6 +528,7 @@ fn onWin32Resize(width: i32, height: i32) void {
 
     overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+    overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
     if (g_window) |w| w.swapBuffers();
@@ -1020,6 +1037,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     while (running) {
         // Check for config file changes
         if (config_watcher) |*w| checkConfigReload(allocator, w);
+        overlays.tickSessionLauncher();
 
         // Process pending resize (coalesced, like Ghostty)
         // We wait for RESIZE_COALESCE_MS after last resize event before applying.
@@ -1229,6 +1247,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         overlays.renderStartupShortcutsOverlay(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderCommandPalette(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderSettingsPage(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        overlays.renderSessionLauncher(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
 
         win.swapBuffers();

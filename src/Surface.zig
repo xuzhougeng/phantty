@@ -8,7 +8,6 @@
 ///   (IO thread added in Phase 2, renderer stays in main.zig for now)
 ///
 /// TabState in main.zig becomes a thin wrapper: `{ surface: *Surface }`.
-
 const std = @import("std");
 const ghostty_vt = @import("ghostty-vt");
 const Pty = @import("pty.zig").Pty;
@@ -174,7 +173,6 @@ resize_overlay_last_rows: u16 = 0, // Last known rows (to detect changes)
 /// a split tree, it gets ref'd. When removed, it gets unref'd. When the
 /// ref count reaches 0, the surface is destroyed.
 ref_count: u32 = 1,
-
 
 // ============================================================================
 // OSC title fields
@@ -616,6 +614,8 @@ fn shellFriendlyName(title: []const u8) []const u8 {
         std.mem.indexOf(u8, lower, ".exe") == null) return "PowerShell";
     if (std.mem.indexOf(u8, lower, "cmd.exe") != null) return "Command Prompt";
     if (std.mem.eql(u8, lower, "cmd")) return "Command Prompt";
+    if (std.mem.indexOf(u8, lower, "wsl.exe") != null) return "WSL";
+    if (std.mem.eql(u8, lower, "wsl")) return "WSL";
 
     return title;
 }

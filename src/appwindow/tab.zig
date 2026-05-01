@@ -156,13 +156,17 @@ pub fn isActiveTabTerminal() bool {
 /// The caller is responsible for clearing UI state (selection, divider, resize overlay)
 /// and setting rebuild flags after a successful spawn.
 pub fn spawnTabWithCwd(allocator: std.mem.Allocator, cols: u16, rows: u16, cursor_style: CursorStyle, cursor_blink: bool, cwd: ?[*:0]const u16) bool {
+    return spawnTabWithCommandAndCwd(allocator, cols, rows, getShellCmd(), cursor_style, cursor_blink, cwd);
+}
+
+pub fn spawnTabWithCommandAndCwd(allocator: std.mem.Allocator, cols: u16, rows: u16, command: [:0]const u16, cursor_style: CursorStyle, cursor_blink: bool, cwd: ?[*:0]const u16) bool {
     if (g_tab_count >= MAX_TABS) return false;
 
     const surface = Surface.init(
         allocator,
         cols,
         rows,
-        getShellCmd(),
+        command,
         g_scrollback_limit,
         cursor_style,
         cursor_blink,

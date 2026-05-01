@@ -13,6 +13,7 @@ const split_layout = AppWindow.split_layout;
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const Config = @import("../config.zig");
+const win32_backend = @import("../apprt/win32.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -92,7 +93,7 @@ const StartupShortcut = struct {
 
 const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+P", .action = "Command center" },
-    .{ .keys = "Ctrl+Shift+T", .action = "New tab" },
+    .{ .keys = "Ctrl+Shift+T", .action = "New session" },
     .{ .keys = "Ctrl+Shift+B", .action = "Toggle sidebar" },
     .{ .keys = "Ctrl+W", .action = "Close panel / tab" },
     .{ .keys = "Ctrl+Shift+O", .action = "Split right" },
@@ -148,7 +149,7 @@ const CommandEntry = struct {
 };
 
 const COMMAND_ENTRIES = [_]CommandEntry{
-    .{ .title = "New Tab", .detail = "Create a new terminal tab", .shortcut = "Ctrl+Shift+T", .action = .new_tab },
+    .{ .title = "New Session", .detail = "Choose PowerShell, SSH, or WSL", .shortcut = "Ctrl+Shift+T", .action = .new_tab },
     .{ .title = "Split Right", .detail = "Create a panel to the right", .shortcut = "Ctrl+Shift+O", .action = .split_right },
     .{ .title = "Split Down", .detail = "Create a panel below", .shortcut = "Ctrl+Shift+E", .action = .split_down },
     .{ .title = "Split Left", .detail = "Create a panel to the left", .shortcut = "", .action = .split_left },
@@ -263,7 +264,7 @@ pub fn commandPaletteContainsPoint(xpos: f64, ypos: f64, window_width: f32, wind
 
 fn executeCommand(action: CommandAction) void {
     switch (action) {
-        .new_tab => _ = AppWindow.spawnTab(AppWindow.g_allocator orelse return),
+        .new_tab => sessionLauncherOpen(),
         .split_right => AppWindow.splitFocused(.right),
         .split_down => AppWindow.splitFocused(.down),
         .split_left => AppWindow.splitFocused(.left),
@@ -504,6 +505,624 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
 
     const footer = "Up/Down select, Enter run";
     renderTitlebarTextStrong(footer, layout.box_x + pad_x, box_y + 15, muted);
+}
+
+// ============================================================================
+// New session / SSH launcher
+// ============================================================================
+
+const SSH_FIELD_COUNT = 5;
+const SSH_FIELD_MAX = 128;
+const SSH_PROFILE_MAX = 16;
+const SSH_PROFILE_NONE = std.math.maxInt(usize);
+
+const SshField = enum(usize) {
+    name = 0,
+    ip = 1,
+    user = 2,
+    password = 3,
+    port = 4,
+};
+
+const SessionAction = enum {
+    powershell,
+    ssh,
+    wsl,
+    connect_selected,
+    new_ssh,
+    edit_selected,
+    delete_selected,
+    connect,
+    save,
+    cancel,
+};
+
+const SshProfile = struct {
+    fields: [SSH_FIELD_COUNT][SSH_FIELD_MAX]u8 = undefined,
+    lens: [SSH_FIELD_COUNT]usize = .{0} ** SSH_FIELD_COUNT,
+};
+
+const SessionLayout = struct {
+    box_x: f32,
+    box_top_px: f32,
+    box_w: f32,
+    box_h: f32,
+    first_row_top_px: f32,
+    row_h: f32,
+};
+
+pub threadlocal var g_session_launcher_visible: bool = false;
+threadlocal var g_ssh_list_visible: bool = false;
+threadlocal var g_ssh_form_visible: bool = false;
+threadlocal var g_ssh_focus: usize = @intFromEnum(SshField.name);
+threadlocal var g_ssh_bufs: [SSH_FIELD_COUNT][SSH_FIELD_MAX]u8 = undefined;
+threadlocal var g_ssh_lens: [SSH_FIELD_COUNT]usize = .{0} ** SSH_FIELD_COUNT;
+threadlocal var g_ssh_profiles: [SSH_PROFILE_MAX]SshProfile = undefined;
+threadlocal var g_ssh_profile_count: usize = 0;
+threadlocal var g_ssh_profiles_loaded: bool = false;
+threadlocal var g_ssh_list_selected: usize = 0;
+threadlocal var g_ssh_edit_index: usize = SSH_PROFILE_NONE;
+threadlocal var g_pending_ssh_password: [SSH_FIELD_MAX + 1]u8 = undefined;
+threadlocal var g_pending_ssh_password_len: usize = 0;
+threadlocal var g_pending_ssh_password_due_ms: i64 = 0;
+threadlocal var g_pending_ssh_surface: ?*Surface = null;
+
+pub fn sessionLauncherVisible() bool {
+    return g_session_launcher_visible or g_ssh_list_visible or g_ssh_form_visible;
+}
+
+pub fn sessionLauncherOpen() void {
+    g_session_launcher_visible = true;
+    g_ssh_list_visible = false;
+    g_ssh_form_visible = false;
+    g_command_palette_visible = false;
+    g_settings_visible = false;
+    g_startup_shortcuts_visible = false;
+}
+
+pub fn sessionLauncherClose() void {
+    g_session_launcher_visible = false;
+    g_ssh_list_visible = false;
+    g_ssh_form_visible = false;
+}
+
+pub fn sessionLauncherInsertChar(codepoint: u21) void {
+    if (!g_ssh_form_visible) return;
+    if (g_ssh_focus >= SSH_FIELD_COUNT) return;
+    if (codepoint < 0x20 or codepoint == 0x7f or codepoint > 0x7f) return;
+    const field = g_ssh_focus;
+    if (g_ssh_lens[field] >= SSH_FIELD_MAX) return;
+    g_ssh_bufs[field][g_ssh_lens[field]] = @intCast(codepoint);
+    g_ssh_lens[field] += 1;
+}
+
+pub fn sessionLauncherHandleKey(ev: win32_backend.KeyEvent) void {
+    if (ev.vk == win32_backend.VK_ESCAPE) {
+        sessionLauncherClose();
+        return;
+    }
+
+    if (!g_ssh_form_visible) {
+        if (g_ssh_list_visible) {
+            handleSshListKey(ev);
+            return;
+        }
+        if (ev.vk == 0x50) {
+            openPowerShellSession();
+        } else if (ev.vk == 0x53) {
+            openSshList();
+        } else if (ev.vk == 0x57) {
+            openWslSession();
+        }
+        return;
+    }
+
+    switch (ev.vk) {
+        win32_backend.VK_TAB, win32_backend.VK_DOWN => g_ssh_focus = (g_ssh_focus + 1) % (SSH_FIELD_COUNT + 3),
+        win32_backend.VK_UP => g_ssh_focus = if (g_ssh_focus == 0) SSH_FIELD_COUNT + 2 else g_ssh_focus - 1,
+        win32_backend.VK_BACK => {
+            if (g_ssh_focus < SSH_FIELD_COUNT and g_ssh_lens[g_ssh_focus] > 0) g_ssh_lens[g_ssh_focus] -= 1;
+        },
+        win32_backend.VK_RETURN => runSshFormFocusAction(),
+        else => {},
+    }
+}
+
+pub fn sessionLauncherContainsPoint(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
+    const layout = sessionLayout(window_width, window_height, top_offset);
+    const x: f32 = @floatCast(xpos);
+    const y: f32 = @floatCast(ypos);
+    return x >= layout.box_x and x <= layout.box_x + layout.box_w and
+        y >= layout.box_top_px and y <= layout.box_top_px + layout.box_h;
+}
+
+pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
+    const action = sessionHitTest(xpos, ypos, window_width, window_height, top_offset) orelse return false;
+    switch (action) {
+        .powershell => openPowerShellSession(),
+        .ssh => openSshList(),
+        .wsl => openWslSession(),
+        .connect_selected => runSshListRow(g_ssh_list_selected),
+        .new_ssh => openSshFormNew(),
+        .edit_selected => if (g_ssh_profile_count > 0) openSshFormEdit(@min(g_ssh_list_selected, g_ssh_profile_count - 1)),
+        .delete_selected => deleteSelectedSshProfile(),
+        .connect => connectSshFromForm(),
+        .save => saveSshFormOnly(),
+        .cancel => sessionLauncherClose(),
+    }
+    return true;
+}
+
+fn openPowerShellSession() void {
+    sessionLauncherClose();
+    _ = AppWindow.spawnTabWithCommandUtf8("powershell.exe -NoLogo -NoProfile");
+}
+
+fn openWslSession() void {
+    sessionLauncherClose();
+    _ = AppWindow.spawnTabWithCommandUtf8("wsl.exe ~");
+}
+
+fn openSshList() void {
+    loadSshProfiles();
+    g_session_launcher_visible = false;
+    g_ssh_list_visible = true;
+    g_ssh_form_visible = false;
+    g_ssh_list_selected = @min(g_ssh_list_selected, sshListRowCount() - 1);
+}
+
+fn openSshFormNew() void {
+    clearSshForm();
+    g_ssh_edit_index = SSH_PROFILE_NONE;
+    openSshForm();
+}
+
+fn openSshFormEdit(index: usize) void {
+    if (index >= g_ssh_profile_count) return;
+    clearSshForm();
+    for (0..SSH_FIELD_COUNT) |i| {
+        g_ssh_lens[i] = @min(g_ssh_profiles[index].lens[i], SSH_FIELD_MAX);
+        @memcpy(g_ssh_bufs[i][0..g_ssh_lens[i]], g_ssh_profiles[index].fields[i][0..g_ssh_lens[i]]);
+    }
+    g_ssh_edit_index = index;
+    openSshForm();
+}
+
+fn openSshForm() void {
+    g_ssh_list_visible = false;
+    g_session_launcher_visible = false;
+    g_ssh_form_visible = true;
+    g_ssh_focus = @intFromEnum(SshField.name);
+    if (g_ssh_lens[@intFromEnum(SshField.port)] == 0) {
+        g_ssh_bufs[@intFromEnum(SshField.port)][0] = '2';
+        g_ssh_bufs[@intFromEnum(SshField.port)][1] = '2';
+        g_ssh_lens[@intFromEnum(SshField.port)] = 2;
+    }
+}
+
+fn clearSshForm() void {
+    g_ssh_lens = .{0} ** SSH_FIELD_COUNT;
+    g_ssh_bufs[@intFromEnum(SshField.port)][0] = '2';
+    g_ssh_bufs[@intFromEnum(SshField.port)][1] = '2';
+    g_ssh_lens[@intFromEnum(SshField.port)] = 2;
+}
+
+fn handleSshListKey(ev: win32_backend.KeyEvent) void {
+    const row_count = sshListRowCount();
+    switch (ev.vk) {
+        win32_backend.VK_DOWN, win32_backend.VK_TAB => g_ssh_list_selected = (g_ssh_list_selected + 1) % row_count,
+        win32_backend.VK_UP => g_ssh_list_selected = if (g_ssh_list_selected == 0) row_count - 1 else g_ssh_list_selected - 1,
+        win32_backend.VK_RETURN => runSshListRow(g_ssh_list_selected),
+        else => {},
+    }
+}
+
+fn sshListRowCount() usize {
+    return g_ssh_profile_count + 4;
+}
+
+fn sshField(field: SshField) []const u8 {
+    const idx: usize = @intFromEnum(field);
+    return g_ssh_bufs[idx][0..g_ssh_lens[idx]];
+}
+
+fn profileField(profile: *const SshProfile, field: SshField) []const u8 {
+    const idx: usize = @intFromEnum(field);
+    return profile.fields[idx][0..profile.lens[idx]];
+}
+
+fn runSshListRow(row: usize) void {
+    if (row < g_ssh_profile_count) {
+        connectSshProfile(row);
+        return;
+    }
+    const action_row = row - g_ssh_profile_count;
+    switch (action_row) {
+        0 => openSshFormNew(),
+        1 => if (g_ssh_profile_count > 0) openSshFormEdit(@min(g_ssh_list_selected, g_ssh_profile_count - 1)),
+        2 => deleteSelectedSshProfile(),
+        else => sessionLauncherClose(),
+    }
+}
+
+fn deleteSelectedSshProfile() void {
+    if (g_ssh_profile_count == 0) return;
+    const idx = @min(g_ssh_list_selected, g_ssh_profile_count - 1);
+    var i = idx;
+    while (i + 1 < g_ssh_profile_count) : (i += 1) {
+        g_ssh_profiles[i] = g_ssh_profiles[i + 1];
+    }
+    g_ssh_profile_count -= 1;
+    g_ssh_list_selected = @min(g_ssh_list_selected, sshListRowCount() - 1);
+    if (AppWindow.g_allocator) |allocator| saveSshProfiles(allocator);
+}
+
+fn connectSshFromForm() void {
+    const idx = saveSshFormProfile() orelse return;
+    connectSshProfile(idx);
+}
+
+fn saveSshFormOnly() void {
+    _ = saveSshFormProfile() orelse return;
+    openSshList();
+}
+
+fn runSshFormFocusAction() void {
+    if (g_ssh_focus < SSH_FIELD_COUNT) {
+        g_ssh_focus = (g_ssh_focus + 1) % (SSH_FIELD_COUNT + 3);
+        return;
+    }
+    switch (g_ssh_focus - SSH_FIELD_COUNT) {
+        0 => connectSshFromForm(),
+        1 => saveSshFormOnly(),
+        else => openSshList(),
+    }
+}
+
+fn saveSshFormProfile() ?usize {
+    const allocator = AppWindow.g_allocator orelse return null;
+    const ip = sshField(.ip);
+    const user = sshField(.user);
+    const port = sshField(.port);
+    if (ip.len == 0 or user.len == 0) return null;
+    if (!isSshTokenSafe(ip) or !isSshTokenSafe(user)) return null;
+    if (port.len > 0 and !isPortTokenSafe(port)) return null;
+
+    const idx = if (g_ssh_edit_index != SSH_PROFILE_NONE)
+        g_ssh_edit_index
+    else blk: {
+        if (g_ssh_profile_count >= SSH_PROFILE_MAX) return null;
+        const next = g_ssh_profile_count;
+        g_ssh_profile_count += 1;
+        break :blk next;
+    };
+
+    for (0..SSH_FIELD_COUNT) |i| {
+        g_ssh_profiles[idx].lens[i] = g_ssh_lens[i];
+        @memcpy(g_ssh_profiles[idx].fields[i][0..g_ssh_lens[i]], g_ssh_bufs[i][0..g_ssh_lens[i]]);
+    }
+    if (g_ssh_profiles[idx].lens[@intFromEnum(SshField.name)] == 0) {
+        const host = sshField(.ip);
+        const len = @min(host.len, SSH_FIELD_MAX);
+        @memcpy(g_ssh_profiles[idx].fields[@intFromEnum(SshField.name)][0..len], host[0..len]);
+        g_ssh_profiles[idx].lens[@intFromEnum(SshField.name)] = len;
+    }
+
+    saveSshProfiles(allocator);
+    g_ssh_edit_index = idx;
+    return idx;
+}
+
+fn connectSshProfile(idx: usize) void {
+    if (idx >= g_ssh_profile_count) return;
+    const profile = &g_ssh_profiles[idx];
+    const ip = profileField(profile, .ip);
+    const user = profileField(profile, .user);
+    const port = profileField(profile, .port);
+    const password = profileField(profile, .password);
+    const server_name = profileField(profile, .name);
+    if (ip.len == 0 or user.len == 0) return;
+    if (!isSshTokenSafe(ip) or !isSshTokenSafe(user)) return;
+    if (port.len > 0 and !isPortTokenSafe(port)) return;
+
+    var command_buf: [512]u8 = undefined;
+    const auth_flags = if (password.len > 0)
+        "-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no "
+    else
+        "-o StrictHostKeyChecking=accept-new ";
+    const command = if (port.len > 0)
+        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}-p {s} {s}@{s}", .{ auth_flags, port, user, ip }) catch return
+    else
+        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}{s}@{s}", .{ auth_flags, user, ip }) catch return;
+
+    sessionLauncherClose();
+    if (AppWindow.spawnTabWithCommandUtf8ReturningSurface(command)) |surface| {
+        if (server_name.len > 0) {
+            surface.setTitleOverride(server_name);
+        }
+        if (password.len > 0) {
+            schedulePasswordForSurface(surface, password);
+        }
+    }
+}
+
+fn isSshTokenSafe(value: []const u8) bool {
+    if (value.len == 0) return false;
+    for (value) |ch| {
+        if (std.ascii.isAlphanumeric(ch) or ch == '.' or ch == '-' or ch == '_' or ch == '@') continue;
+        return false;
+    }
+    return true;
+}
+
+fn isPortTokenSafe(value: []const u8) bool {
+    if (value.len == 0) return true;
+    for (value) |ch| {
+        if (!std.ascii.isDigit(ch)) return false;
+    }
+    return true;
+}
+
+fn schedulePasswordForSurface(surface: *Surface, password: []const u8) void {
+    const len = @min(password.len, SSH_FIELD_MAX);
+    @memcpy(g_pending_ssh_password[0..len], password[0..len]);
+    g_pending_ssh_password[len] = '\r';
+    g_pending_ssh_password_len = len + 1;
+    g_pending_ssh_password_due_ms = std.time.milliTimestamp() + 1800;
+    g_pending_ssh_surface = surface;
+}
+
+pub fn tickSessionLauncher() void {
+    if (g_pending_ssh_password_len == 0) return;
+    if (std.time.milliTimestamp() < g_pending_ssh_password_due_ms) return;
+    if (g_pending_ssh_surface) |surface| {
+        AppWindow.input.writeTextToSurfacePty(surface, g_pending_ssh_password[0..g_pending_ssh_password_len]);
+    }
+    g_pending_ssh_password_len = 0;
+    g_pending_ssh_surface = null;
+}
+
+fn sshProfilesPath(allocator: std.mem.Allocator) ![]u8 {
+    if (std.process.getEnvVarOwned(allocator, "APPDATA")) |appdata| {
+        defer allocator.free(appdata);
+        return std.fs.path.join(allocator, &.{ appdata, "phantty", "ssh_hosts" });
+    } else |_| {}
+    return std.fs.path.join(allocator, &.{ ".", "ssh_hosts" });
+}
+
+fn loadSshProfiles() void {
+    if (g_ssh_profiles_loaded) return;
+    g_ssh_profiles_loaded = true;
+    g_ssh_profile_count = 0;
+    const allocator = AppWindow.g_allocator orelse return;
+    const path = sshProfilesPath(allocator) catch return;
+    defer allocator.free(path);
+    const content = std.fs.cwd().readFileAlloc(allocator, path, 1024 * 1024) catch return;
+    defer allocator.free(content);
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    while (lines.next()) |line_raw| {
+        if (g_ssh_profile_count >= SSH_PROFILE_MAX) break;
+        const line = std.mem.trimRight(u8, line_raw, "\r");
+        if (line.len == 0 or line[0] == '#') continue;
+        var profile = SshProfile{};
+        var parts = std.mem.splitScalar(u8, line, '\t');
+        var field_idx: usize = 0;
+        var ok = true;
+        while (field_idx < SSH_FIELD_COUNT) : (field_idx += 1) {
+            const part = parts.next() orelse {
+                ok = false;
+                break;
+            };
+            const decoded = decodeHexField(part, &profile.fields[field_idx]) orelse {
+                ok = false;
+                break;
+            };
+            profile.lens[field_idx] = decoded;
+        }
+        if (!ok) continue;
+        g_ssh_profiles[g_ssh_profile_count] = profile;
+        g_ssh_profile_count += 1;
+    }
+}
+
+fn saveSshProfiles(allocator: std.mem.Allocator) void {
+    const path = sshProfilesPath(allocator) catch return;
+    defer allocator.free(path);
+    if (std.fs.path.dirname(path)) |dir| {
+        std.fs.cwd().makePath(dir) catch return;
+    }
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    defer out.deinit(allocator);
+    out.appendSlice(allocator, "# Phantty SSH profiles. Fields are hex encoded: name, host, user, password, port.\n") catch return;
+    for (g_ssh_profiles[0..g_ssh_profile_count]) |profile| {
+        for (0..SSH_FIELD_COUNT) |i| {
+            if (i > 0) out.append(allocator, '\t') catch return;
+            appendHexField(allocator, &out, profile.fields[i][0..profile.lens[i]]) catch return;
+        }
+        out.append(allocator, '\n') catch return;
+    }
+
+    const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch return;
+    defer file.close();
+    file.writeAll(out.items) catch {};
+}
+
+fn appendHexField(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8), value: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (value) |ch| {
+        try out.append(allocator, hex[ch >> 4]);
+        try out.append(allocator, hex[ch & 0x0f]);
+    }
+}
+
+fn decodeHexField(value: []const u8, out: *[SSH_FIELD_MAX]u8) ?usize {
+    if (value.len % 2 != 0) return null;
+    const len = @min(value.len / 2, SSH_FIELD_MAX);
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        const hi = hexValue(value[i * 2]) orelse return null;
+        const lo = hexValue(value[i * 2 + 1]) orelse return null;
+        out[i] = (hi << 4) | lo;
+    }
+    return len;
+}
+
+fn hexValue(ch: u8) ?u8 {
+    if (ch >= '0' and ch <= '9') return ch - '0';
+    if (ch >= 'a' and ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' and ch <= 'F') return ch - 'A' + 10;
+    return null;
+}
+
+fn sessionLayout(window_width: f32, window_height: f32, top_offset: f32) SessionLayout {
+    const content_height = @max(1, window_height - top_offset);
+    const box_w: f32 = if (g_ssh_form_visible or g_ssh_list_visible) @round(@min(@max(460, window_width - 48), 760)) else 360;
+    const row_h: f32 = 38;
+    const row_count: usize = if (g_ssh_form_visible) SSH_FIELD_COUNT + 3 else if (g_ssh_list_visible) sshListRowCount() else 3;
+    const box_h = @round(74 + row_h * @as(f32, @floatFromInt(row_count)) + 28);
+    const box_x = @round(@max(16, (window_width - box_w) / 2));
+    const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
+    return .{
+        .box_x = box_x,
+        .box_top_px = box_top_px,
+        .box_w = box_w,
+        .box_h = box_h,
+        .first_row_top_px = box_top_px + 68,
+        .row_h = row_h,
+    };
+}
+
+fn sessionHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) ?SessionAction {
+    const layout = sessionLayout(window_width, window_height, top_offset);
+    const x: f32 = @floatCast(xpos);
+    const y: f32 = @floatCast(ypos);
+    if (x < layout.box_x or x > layout.box_x + layout.box_w) return null;
+    if (y < layout.first_row_top_px) return null;
+    const row: usize = @intFromFloat(@floor((y - layout.first_row_top_px) / layout.row_h));
+
+    if (g_ssh_list_visible) {
+        if (row >= sshListRowCount()) return null;
+        g_ssh_list_selected = row;
+        if (row < g_ssh_profile_count) return .connect_selected;
+        return switch (row - g_ssh_profile_count) {
+            0 => .new_ssh,
+            1 => .edit_selected,
+            2 => .delete_selected,
+            else => .cancel,
+        };
+    }
+
+    if (!g_ssh_form_visible) {
+        return switch (row) {
+            0 => .powershell,
+            1 => .ssh,
+            2 => .wsl,
+            else => null,
+        };
+    }
+
+    if (row < SSH_FIELD_COUNT) {
+        g_ssh_focus = row;
+        return null;
+    }
+    g_ssh_focus = row;
+    return switch (row) {
+        SSH_FIELD_COUNT => .connect,
+        SSH_FIELD_COUNT + 1 => .save,
+        SSH_FIELD_COUNT + 2 => .cancel,
+        else => null,
+    };
+}
+
+fn renderSessionRow(layout: SessionLayout, window_height: f32, row: usize, left: []const u8, right: []const u8, selected: bool) void {
+    const row_top = @round(layout.first_row_top_px + @as(f32, @floatFromInt(row)) * layout.row_h);
+    const row_y = @round(window_height - row_top - layout.row_h);
+    const x = layout.box_x + 18;
+    const w = layout.box_w - 36;
+    gl_init.renderQuadAlpha(x, row_y + 3, w, layout.row_h - 6, if (selected) .{ 0.18, 0.36, 0.74 } else .{ 1.0, 1.0, 1.0 }, if (selected) 0.72 else 0.045);
+    const text_y = row_y + 15;
+    renderTitlebarTextStrong(left, x + 12, text_y, .{ 0.96, 0.96, 0.96 });
+    if (right.len > 0) {
+        const right_w = measureTitlebarText(right);
+        renderTitlebarTextStrong(right, layout.box_x + layout.box_w - 34 - right_w, text_y, .{ 0.78, 0.78, 0.78 });
+    }
+}
+
+fn renderSessionField(layout: SessionLayout, window_height: f32, row: usize, label: []const u8, value: []const u8, masked: bool) void {
+    var display_buf: [SSH_FIELD_MAX]u8 = undefined;
+    const display = if (masked) blk: {
+        const len = @min(value.len, display_buf.len);
+        @memset(display_buf[0..len], '*');
+        break :blk display_buf[0..len];
+    } else value;
+    renderSessionRow(layout, window_height, row, label, display, g_ssh_focus == row);
+}
+
+fn renderSshProfileRow(layout: SessionLayout, window_height: f32, row: usize, profile: *const SshProfile, selected: bool) void {
+    var target_buf: [SSH_FIELD_MAX * 2]u8 = undefined;
+    const host = profileField(profile, .ip);
+    const user = profileField(profile, .user);
+    const port = profileField(profile, .port);
+    const target = if (port.len > 0)
+        std.fmt.bufPrint(&target_buf, "{s}@{s}:{s}", .{ user, host, port }) catch ""
+    else
+        std.fmt.bufPrint(&target_buf, "{s}@{s}", .{ user, host }) catch "";
+    renderSessionRow(layout, window_height, row, profileField(profile, .name), target, selected);
+}
+
+pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: f32) void {
+    if (!sessionLauncherVisible()) return;
+
+    const gl = &AppWindow.gl;
+    const layout = sessionLayout(window_width, window_height, top_offset);
+    const box_y = @round(window_height - layout.box_top_px - layout.box_h);
+
+    gl.Enable.?(c.GL_BLEND);
+    gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.ActiveTexture.?(c.GL_TEXTURE0);
+    gl.BindVertexArray.?(gl_init.vao);
+
+    gl_init.renderQuadAlpha(0, 0, window_width, window_height, .{ 0.0, 0.0, 0.0 }, 0.18);
+    renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, .{ 0.0, 0.0, 0.0 }, 0.88);
+
+    const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
+    const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Choose how to start";
+    const title_y = @round(window_height - layout.box_top_px - 34);
+    renderTitlebarTextStrong(title, layout.box_x + 24, title_y, .{ 1.0, 1.0, 1.0 });
+    renderTitlebarTextStrong(hint, layout.box_x + 24, title_y - 24, .{ 0.66, 0.66, 0.66 });
+
+    if (!g_ssh_form_visible) {
+        if (g_ssh_list_visible) {
+            var row: usize = 0;
+            while (row < g_ssh_profile_count) : (row += 1) {
+                renderSshProfileRow(layout, window_height, row, &g_ssh_profiles[row], g_ssh_list_selected == row);
+            }
+            renderSessionRow(layout, window_height, row, "New SSH Server", "add", g_ssh_list_selected == row);
+            row += 1;
+            renderSessionRow(layout, window_height, row, "Edit Selected", if (g_ssh_profile_count > 0) "edit" else "no server", g_ssh_list_selected == row);
+            row += 1;
+            renderSessionRow(layout, window_height, row, "Delete Selected", if (g_ssh_profile_count > 0) "delete" else "no server", g_ssh_list_selected == row);
+            row += 1;
+            renderSessionRow(layout, window_height, row, "Cancel", "Esc", g_ssh_list_selected == row);
+            return;
+        }
+        renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", false);
+        renderSessionRow(layout, window_height, 1, "SSH", "connect server", false);
+        renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", false);
+        return;
+    }
+
+    renderSessionField(layout, window_height, @intFromEnum(SshField.name), "Server name", sshField(.name), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.ip), "IP / host", sshField(.ip), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.user), "User", sshField(.user), false);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.password), "Password", sshField(.password), true);
+    renderSessionField(layout, window_height, @intFromEnum(SshField.port), "Port", sshField(.port), false);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT, "Save & Connect", "ssh.exe", g_ssh_focus == SSH_FIELD_COUNT);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 1, "Save", "profile", g_ssh_focus == SSH_FIELD_COUNT + 1);
+    renderSessionRow(layout, window_height, SSH_FIELD_COUNT + 2, "Cancel", "Esc", g_ssh_focus == SSH_FIELD_COUNT + 2);
 }
 
 // ============================================================================

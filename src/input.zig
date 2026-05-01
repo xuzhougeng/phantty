@@ -186,6 +186,10 @@ fn processSizeChange(win: *win32_backend.Window) void {
 
 fn handleChar(ev: win32_backend.CharEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.sessionLauncherVisible()) {
+        if (!ev.ctrl and !ev.alt) overlays.sessionLauncherInsertChar(ev.codepoint);
+        return;
+    }
     if (overlays.commandPaletteVisible()) {
         if (!ev.ctrl and !ev.alt) overlays.commandPaletteInsertChar(ev.codepoint);
         return;
@@ -218,6 +222,10 @@ fn handleChar(ev: win32_backend.CharEvent) void {
 
 fn handleKey(ev: win32_backend.KeyEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.sessionLauncherVisible()) {
+        overlays.sessionLauncherHandleKey(ev);
+        return;
+    }
     // Ctrl+Shift+P = command center (even during tab rename)
     if (ev.ctrl and ev.shift and ev.vk == 0x50) { // 'P'
         if (tab.g_tab_rename_active) tab.commitTabRename();
@@ -269,10 +277,10 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         }
         return;
     }
-    // Ctrl+Shift+T = new tab (even during tab rename)
+    // Ctrl+Shift+T = new session chooser (even during tab rename)
     if (ev.ctrl and ev.shift and ev.vk == 0x54) { // 'T'
         if (tab.g_tab_rename_active) tab.commitTabRename();
-        _ = AppWindow.spawnTab(AppWindow.g_allocator orelse return);
+        overlays.sessionLauncherOpen();
         return;
     }
     // Ctrl+Shift+O = new split right (vertical divider)
@@ -508,7 +516,7 @@ fn handleSidebarPress(xpos: f64, ypos: f64) void {
     if (tab.g_tab_rename_active) tab.commitTabRename();
 
     if (hitTestSidebarPlusButton(xpos, ypos)) {
-        plus_btn_pressed = true;
+        overlays.sessionLauncherOpen();
         return;
     }
 
@@ -523,6 +531,22 @@ fn handleSidebarPress(xpos: f64, ypos: f64) void {
 
 fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
     overlays.startupShortcutsDismiss();
+    if (overlays.sessionLauncherVisible()) {
+        if (ev.button == .left and ev.action == .press) {
+            const win = AppWindow.g_window orelse return;
+            const fb = win.getFramebufferSize();
+            const w_f: f32 = @floatFromInt(fb.width);
+            const h_f: f32 = @floatFromInt(fb.height);
+            const top_offset: f32 = @floatCast(titlebarHeight());
+            const xpos: f64 = @floatFromInt(ev.x);
+            const ypos: f64 = @floatFromInt(ev.y);
+            if (overlays.sessionLauncherExecuteAt(xpos, ypos, w_f, h_f, top_offset)) return;
+            if (!overlays.sessionLauncherContainsPoint(xpos, ypos, w_f, h_f, top_offset)) {
+                overlays.sessionLauncherClose();
+            }
+        }
+        return;
+    }
     if (overlays.settingsPageVisible()) {
         if (ev.button == .left and ev.action == .press) {
             const win = AppWindow.g_window orelse return;
@@ -728,7 +752,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 plus_btn_pressed = false;
                 // Only fire if still in the + button area
                 if (hitTestSidebarPlusButton(xpos, ypos)) {
-                    _ = AppWindow.spawnTab(AppWindow.g_allocator orelse return);
+                    overlays.sessionLauncherOpen();
                 }
                 return;
             }
@@ -1097,6 +1121,15 @@ pub fn pasteFromClipboard() void {
         std.debug.print("Pasting {} bytes from clipboard\n", .{len});
         writeToPty(surface, data[0..len]);
     }
+}
+
+pub fn writeTextToActivePty(text: []const u8) void {
+    const surface = AppWindow.activeSurface() orelse return;
+    writeToPty(surface, text);
+}
+
+pub fn writeTextToSurfacePty(surface: *Surface, text: []const u8) void {
+    writeToPty(surface, text);
 }
 
 // --- Fullscreen toggle (Win32 native) ---
