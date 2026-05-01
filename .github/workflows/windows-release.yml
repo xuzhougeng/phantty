@@ -12,6 +12,8 @@ jobs:
   build-windows:
     name: Build Windows
     runs-on: windows-latest
+    env:
+      ZIG_GLOBAL_CACHE_DIR: ${{ github.workspace }}\.zig-global-cache
 
     steps:
       - name: Checkout
@@ -21,9 +23,49 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      - name: Cache Zig packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache/p
+            .zig-global-cache
+          key: ${{ runner.os }}-zig-0.15.2-${{ hashFiles('build.zig', 'build.zig.zon', 'pkg/**/build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-0.15.2-
 
-      - name: Build release
-        run: zig build -Doptimize=ReleaseFast
+      - name: Fetch dependencies and build release
+        shell: pwsh
+        run: |
+          function Invoke-WithRetry {
+            param(
+              [Parameter(Mandatory = $true)][string]$Name,
+              [Parameter(Mandatory = $true)][scriptblock]$Command,
+              [int]$Attempts = 5
+            )
+
+            $exitCode = 1
+            for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+              Write-Host "::group::$Name (attempt $attempt/$Attempts)"
+              & $Command
+              $exitCode = if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } elseif ($?) { 0 } else { 1 }
+              Write-Host "::endgroup::"
+
+              if ($exitCode -eq 0) {
+                return
+              }
+
+              if ($attempt -lt $Attempts) {
+                $delay = [Math]::Min(120, 15 * $attempt)
+                Write-Warning "$Name failed with exit code $exitCode. Retrying in $delay seconds..."
+                Start-Sleep -Seconds $delay
+              }
+            }
+
+            exit $exitCode
+          }
+
+          Invoke-WithRetry -Name "zig dependency fetch" -Command { zig build -Doptimize=ReleaseFast --fetch }
+          Invoke-WithRetry -Name "zig release build" -Command { zig build -Doptimize=ReleaseFast }
 
       - name: Package Windows artifact
         shell: pwsh
