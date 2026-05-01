@@ -6,7 +6,7 @@ on:
       - 'v[0-9]*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -89,3 +89,25 @@ jobs:
           name: phantty-windows-${{ github.ref_name }}
           path: phantty-windows-${{ github.ref_name }}.zip
           if-no-files-found: error
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "phantty-windows-$tag.zip"
+
+          if (!(Test-Path $zip)) {
+            throw "Release asset not found: $zip"
+          }
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $zip --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag $zip `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Phantty $tag" `
+              --notes "Windows release for $tag."
+          }
