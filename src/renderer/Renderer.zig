@@ -17,7 +17,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ghostty_vt = @import("ghostty-vt");
-const Surface = @import("Surface.zig");
+const Surface = @import("../Surface.zig");
 
 const Renderer = @This();
 

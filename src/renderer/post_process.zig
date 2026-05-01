@@ -14,7 +14,7 @@ const std = @import("std");
 const AppWindow = @import("../AppWindow.zig");
 const gl_init = AppWindow.gl_init;
 const cell_renderer = AppWindow.cell_renderer;
-const Renderer = @import("../Renderer.zig");
+const Renderer = @import("Renderer.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");

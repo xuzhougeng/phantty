@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const Surface = @import("Surface.zig");
-const Renderer = @import("Renderer.zig");
+const Renderer = @import("renderer/Renderer.zig");
 
 const RendererThread = @This();
 

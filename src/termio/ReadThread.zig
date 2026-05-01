@@ -62,7 +62,7 @@ pub fn threadMain(surface: *Surface) void {
         surface.resetOscBatch();
         var stream = surface.vtStream();
         const data = buf[0..@intCast(bytes_read)];
-        stream.nextSlice(data) catch {};
+        stream.nextSlice(data);
         surface.scanForOscTitle(data);
         surface.dirty.store(true, .release);
     }

@@ -17,7 +17,7 @@ const win32 = @import("apprt/win32.zig");
 const renderer = @import("renderer.zig");
 const termio = @import("termio.zig");
 const Config = @import("config.zig");
-const Renderer = @import("Renderer.zig");
+const Renderer = @import("renderer/Renderer.zig");
 const RendererThread = @import("RendererThread.zig");
 
 const windows = std.os.windows;
@@ -72,12 +72,12 @@ pub const VtHandler = struct {
         self: *VtHandler,
         comptime action: ghostty_vt.StreamAction.Tag,
         value: ghostty_vt.StreamAction.Value(action),
-    ) !void {
+    ) void {
         if (action == .bell) {
             self.surface.bell_pending.store(true, .release);
             return;
         }
-        try self.inner.vt(action, value);
+        self.inner.vt(action, value);
     }
 };
 

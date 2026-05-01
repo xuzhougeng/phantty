@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const AppWindow = @import("../AppWindow.zig");
-const Renderer = @import("../Renderer.zig");
+const Renderer = @import("Renderer.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");

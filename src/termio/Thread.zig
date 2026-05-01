@@ -146,6 +146,6 @@ fn applyResize(surface: *Surface, grid: renderer.size.GridSize) void {
     defer surface.render_state.mutex.unlock();
 
     surface.terminal.resize(surface.allocator, grid.cols, grid.rows) catch {};
-    surface.terminal.scrollViewport(.{ .bottom = {} }) catch {};
+    surface.terminal.scrollViewport(.{ .bottom = {} });
     surface.dirty.store(true, .release);
 }

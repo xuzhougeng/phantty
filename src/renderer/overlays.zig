@@ -257,7 +257,7 @@ pub fn scrollbarDrag(ypos: f64, window_height: f32, top_padding: f32) void {
     if (delta != 0) {
         surface.render_state.mutex.lock();
         defer surface.render_state.mutex.unlock();
-        surface.terminal.scrollViewport(.{ .delta = delta }) catch {};
+        surface.terminal.scrollViewport(.{ .delta = delta });
     }
 }
 

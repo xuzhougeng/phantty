@@ -193,7 +193,7 @@ fn handleChar(ev: win32_backend.CharEvent) void {
     {
         surface.render_state.mutex.lock();
         defer surface.render_state.mutex.unlock();
-        surface.terminal.scrollViewport(.bottom) catch {};
+        surface.terminal.scrollViewport(.bottom);
     }
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(ev.codepoint, &buf) catch return;
@@ -352,7 +352,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         win32_backend.VK_PRIOR => blk: { // Page Up
             if (ev.shift) {
                 surface.render_state.mutex.lock();
-                surface.terminal.scrollViewport(.{ .delta = -@as(isize, AppWindow.term_rows / 2) }) catch {};
+                surface.terminal.scrollViewport(.{ .delta = -@as(isize, AppWindow.term_rows / 2) });
                 surface.render_state.mutex.unlock();
                 overlays.scrollbarShow();
                 break :blk null;
@@ -362,7 +362,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         win32_backend.VK_NEXT => blk: { // Page Down
             if (ev.shift) {
                 surface.render_state.mutex.lock();
-                surface.terminal.scrollViewport(.{ .delta = @as(isize, AppWindow.term_rows / 2) }) catch {};
+                surface.terminal.scrollViewport(.{ .delta = @as(isize, AppWindow.term_rows / 2) });
                 surface.render_state.mutex.unlock();
                 overlays.scrollbarShow();
                 break :blk null;
@@ -401,7 +401,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (wrote_to_pty) {
         AppWindow.resetCursorBlink();
         surface.render_state.mutex.lock();
-        surface.terminal.scrollViewport(.bottom) catch {};
+        surface.terminal.scrollViewport(.bottom);
         surface.render_state.mutex.unlock();
     }
 }
@@ -846,7 +846,7 @@ fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     // WHEEL_DELTA is 120 per notch. Convert to lines (3 lines per notch, like GLFW).
     const notches = @as(f64, @floatFromInt(ev.delta)) / 120.0;
     const delta: isize = @intFromFloat(-notches * 3);
-    surface.terminal.scrollViewport(.{ .delta = delta }) catch {};
+    surface.terminal.scrollViewport(.{ .delta = delta });
 
     // Show scrollbar for the scrolled surface
     surface.scrollbar_opacity = 1.0;
