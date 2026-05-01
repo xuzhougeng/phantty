@@ -49,6 +49,46 @@ threadlocal var saved_style: win32_backend.DWORD = 0;
 threadlocal var saved_rect: win32_backend.RECT = .{ .left = 0, .top = 0, .right = 0, .bottom = 0 };
 threadlocal var is_fullscreen: bool = false;
 
+fn titlebarHeight() f64 {
+    return if (AppWindow.g_window) |w| @floatFromInt(w.titlebar_height) else @as(f64, @floatFromInt(win32_backend.TITLEBAR_HEIGHT));
+}
+
+fn syncGridFromWindowSize(width: i32, height: i32) void {
+    const render_padding: f32 = 10;
+    const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const sidebar_w = titlebar.sidebarWidth();
+    const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
+    const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
+    const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
+    const explicit_bottom: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
+
+    const total_width_padding = sidebar_w + explicit_left + explicit_right;
+    const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
+
+    const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
+    const avail_height = @as(f32, @floatFromInt(height)) - total_height_padding;
+
+    const new_cols: u16 = @intFromFloat(@max(1, avail_width / font.cell_width));
+    const new_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
+
+    if (new_cols != AppWindow.term_cols or new_rows != AppWindow.term_rows) {
+        AppWindow.g_pending_resize = true;
+        AppWindow.g_pending_cols = new_cols;
+        AppWindow.g_pending_rows = new_rows;
+        AppWindow.g_last_resize_time = std.time.milliTimestamp();
+    }
+}
+
+fn toggleSidebar() void {
+    tab.g_sidebar_visible = !tab.g_sidebar_visible;
+    if (AppWindow.g_window) |win| {
+        syncGridFromWindowSize(win.width, win.height);
+        win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
 // ============================================================================
 // Shared helpers (used by input + cell_renderer)
 // ============================================================================
@@ -64,7 +104,8 @@ pub fn viewportOffset() usize {
 pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
     const padding_d: f64 = 10;
     const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const col_f = (xpos - padding_d) / @as(f64, font.cell_width);
+    const sidebar_d: f64 = @floatCast(titlebar.sidebarWidth());
+    const col_f = (xpos - sidebar_d - padding_d) / @as(f64, font.cell_width);
     const row_f = (ypos - padding_d - tb_d) / @as(f64, font.cell_height);
 
     const col = if (col_f < 0) 0 else if (col_f >= @as(f64, @floatFromInt(AppWindow.term_cols))) AppWindow.term_cols - 1 else @as(usize, @intFromFloat(col_f));
@@ -140,37 +181,7 @@ fn processSizeChange(win: *win32_backend.Window) void {
     if (!win.size_changed) return;
     win.size_changed = false;
 
-    const width = win.width;
-    const height = win.height;
-    // Match exactly what computeSplitLayout → setScreenSize computes for a
-    // root (full-window) surface.
-    //
-    // Width: render-loop subtracts 2*render_padding, but edge extensions
-    //        add it back for the root surface → only explicit L+R matter.
-    // Height: render-loop subtracts (render_padding+TB) top + render_padding
-    //         bottom, then setScreenSize subtracts explicit T+B.
-    const render_padding: f32 = 10;
-    const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
-    const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
-    const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
-    const explicit_bottom: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
-
-    const total_width_padding = explicit_left + explicit_right;
-    const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
-
-    const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
-    const avail_height = @as(f32, @floatFromInt(height)) - total_height_padding;
-
-    const new_cols: u16 = @intFromFloat(@max(1, avail_width / font.cell_width));
-    const new_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
-
-    if (new_cols != AppWindow.term_cols or new_rows != AppWindow.term_rows) {
-        AppWindow.g_pending_resize = true;
-        AppWindow.g_pending_cols = new_cols;
-        AppWindow.g_pending_rows = new_rows;
-        AppWindow.g_last_resize_time = std.time.milliTimestamp();
-    }
+    syncGridFromWindowSize(win.width, win.height);
 }
 
 fn handleChar(ev: win32_backend.CharEvent) void {
@@ -248,6 +259,12 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (ev.ctrl and ev.shift and ev.vk == 0x45) { // 'E'
         if (tab.g_tab_rename_active) tab.commitTabRename();
         AppWindow.splitFocused(.down);
+        return;
+    }
+    // Ctrl+Shift+B = show/hide tab sidebar
+    if (ev.ctrl and ev.shift and ev.vk == 0x42) { // 'B'
+        if (tab.g_tab_rename_active) tab.commitTabRename();
+        toggleSidebar();
         return;
     }
     // When tab rename is active, handle special keys
@@ -408,31 +425,69 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     }
 }
 
+fn hitTestSidebarTab(xpos: f64, ypos: f64) ?usize {
+    if (!tab.g_sidebar_visible) return null;
+    if (xpos < 0 or xpos >= @as(f64, titlebar.SIDEBAR_WIDTH)) return null;
+
+    const list_top = titlebarHeight() + @as(f64, titlebar.SIDEBAR_HEADER_H) + 6;
+    if (ypos < list_top) return null;
+
+    const idx_f = (ypos - list_top) / @as(f64, titlebar.SIDEBAR_ROW_H);
+    const idx: usize = @intFromFloat(@floor(idx_f));
+    if (idx >= tab.g_tab_count) return null;
+    return idx;
+}
+
+fn hitTestSidebarPlusButton(xpos: f64, ypos: f64) bool {
+    if (!tab.g_sidebar_visible) return false;
+    const top = titlebarHeight();
+    const plus_w: f64 = 42;
+    const plus_x = @as(f64, titlebar.SIDEBAR_WIDTH) - plus_w - 6;
+    return xpos >= plus_x and xpos < plus_x + plus_w and
+        ypos >= top and ypos < top + @as(f64, titlebar.SIDEBAR_HEADER_H);
+}
+
+fn hitTestSidebarTabCloseButton(xpos: f64, ypos: f64, tab_idx: usize) bool {
+    if (!tab.g_sidebar_visible or tab_idx >= tab.g_tab_count or tab.g_tab_count <= 1) return false;
+    const row = hitTestSidebarTab(xpos, ypos) orelse return false;
+    if (row != tab_idx) return false;
+    const close_x = @as(f64, titlebar.SIDEBAR_WIDTH - tab.TAB_CLOSE_BTN_W - 4);
+    return xpos >= close_x and xpos < close_x + @as(f64, tab.TAB_CLOSE_BTN_W);
+}
+
+fn handleTopbarPress(xpos: f64) void {
+    if (xpos >= 0 and xpos < @as(f64, titlebar.TITLEBAR_TOGGLE_W)) {
+        toggleSidebar();
+    }
+}
+
+fn handleSidebarPress(xpos: f64, ypos: f64) void {
+    if (tab.g_tab_rename_active) tab.commitTabRename();
+
+    if (hitTestSidebarPlusButton(xpos, ypos)) {
+        plus_btn_pressed = true;
+        return;
+    }
+
+    if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
+        if (tab.g_tab_count > 1 and tab.g_tab_close_opacity[tab_idx] > 0.1 and hitTestSidebarTabCloseButton(xpos, ypos, tab_idx)) {
+            tab.g_tab_close_pressed = tab_idx;
+            return;
+        }
+        AppWindow.switchTab(tab_idx);
+    }
+}
+
 fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
     overlays.startupShortcutsDismiss();
     // Double-click on tab text to rename, elsewhere to maximize
     if (ev.button == .left and ev.action == .double_click) {
         const xpos: f64 = @floatFromInt(ev.x);
         const xf: f32 = @floatFromInt(ev.x);
-        const titlebar_h: f64 = if (AppWindow.g_window) |w| @floatFromInt(w.titlebar_height) else 40;
+        const titlebar_h: f64 = titlebarHeight();
         const ypos: f64 = @floatFromInt(ev.y);
         if (ypos < titlebar_h) {
-            if (hitTestTab(xpos)) |tab_idx| {
-                // Only rename if clicking on the text itself
-                if (tab_idx < AppWindow.MAX_TABS and xf >= tab.g_tab_text_x_start[tab_idx] and xf <= tab.g_tab_text_x_end[tab_idx]) {
-                    tab.startTabRename(tab_idx);
-                } else {
-                    // Double-click on tab but not on text — maximize/restore
-                    if (AppWindow.g_window) |w| {
-                        if (win32_backend.IsZoomed(w.hwnd) != 0) {
-                            _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_RESTORE);
-                        } else {
-                            _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_MAXIMIZE);
-                        }
-                    }
-                }
-            } else {
-                // Double-click on empty titlebar area — maximize/restore
+            if (xpos >= @as(f64, titlebar.TITLEBAR_TOGGLE_W)) {
                 if (AppWindow.g_window) |w| {
                     if (win32_backend.IsZoomed(w.hwnd) != 0) {
                         _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_RESTORE);
@@ -440,6 +495,15 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                         _ = win32_backend.ShowWindow(w.hwnd, win32_backend.SW_MAXIMIZE);
                     }
                 }
+            }
+        } else if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
+            // Only rename if clicking on the rendered title text itself.
+            if (tab_idx < AppWindow.MAX_TABS and
+                xf >= tab.g_tab_text_x_start[tab_idx] and xf <= tab.g_tab_text_x_end[tab_idx] and
+                ypos >= @as(f64, @floatCast(tab.g_tab_text_y_start[tab_idx])) and
+                ypos <= @as(f64, @floatCast(tab.g_tab_text_y_end[tab_idx])))
+            {
+                tab.startTabRename(tab_idx);
             }
         }
         return;
@@ -449,14 +513,11 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
     if (ev.button == .middle and ev.action == .release) {
         const xpos: f64 = @floatFromInt(ev.x);
         const ypos: f64 = @floatFromInt(ev.y);
-        const titlebar_h: f64 = if (AppWindow.g_window) |w| @floatFromInt(w.titlebar_height) else 40;
-        if (ypos < titlebar_h) {
-            if (hitTestTab(xpos)) |tab_idx| {
-                if (tab.g_tab_count <= 1) {
-                    AppWindow.g_should_close = true;
-                } else {
-                    AppWindow.closeTab(tab_idx);
-                }
+        if (hitTestSidebarTab(xpos, ypos)) |tab_idx| {
+            if (tab.g_tab_count <= 1) {
+                AppWindow.g_should_close = true;
+            } else {
+                AppWindow.closeTab(tab_idx);
             }
         }
         return;
@@ -465,7 +526,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
     if (ev.button == .left) {
         const xpos: f64 = @floatFromInt(ev.x);
         const ypos: f64 = @floatFromInt(ev.y);
-        const titlebar_h: f64 = if (AppWindow.g_window) |w| @floatFromInt(w.titlebar_height) else 40;
+        const titlebar_h: f64 = titlebarHeight();
 
         if (ev.action == .press) {
             // Commit rename on any click
@@ -473,7 +534,12 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
 
             // Check if click is in the titlebar (tab bar area)
             if (ypos < titlebar_h) {
-                handleTabBarPress(xpos);
+                handleTopbarPress(xpos);
+                return;
+            }
+
+            if (tab.g_sidebar_visible and xpos < @as(f64, titlebar.SIDEBAR_WIDTH)) {
+                handleSidebarPress(xpos, ypos);
                 return;
             }
 
@@ -571,13 +637,11 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             // Handle close button release — close tab if still on the close button
             if (tab.g_tab_close_pressed) |pressed_idx| {
                 tab.g_tab_close_pressed = null;
-                if (ypos < titlebar_h and pressed_idx < tab.g_tab_count) {
-                    if (hitTestTabCloseButton(xpos, pressed_idx)) {
-                        if (tab.g_tab_count <= 1) {
-                            AppWindow.g_should_close = true;
-                        } else {
-                            AppWindow.closeTab(pressed_idx);
-                        }
+                if (pressed_idx < tab.g_tab_count and hitTestSidebarTabCloseButton(xpos, ypos, pressed_idx)) {
+                    if (tab.g_tab_count <= 1) {
+                        AppWindow.g_should_close = true;
+                    } else {
+                        AppWindow.closeTab(pressed_idx);
                     }
                 }
                 return;
@@ -586,7 +650,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             if (plus_btn_pressed) {
                 plus_btn_pressed = false;
                 // Only fire if still in the + button area
-                if (ypos < titlebar_h and hitTestPlusButton(xpos)) {
+                if (hitTestSidebarPlusButton(xpos, ypos)) {
                     _ = AppWindow.spawnTab(AppWindow.g_allocator orelse return);
                 }
                 return;
@@ -738,9 +802,10 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             // Get content area dimensions
             const win = AppWindow.g_window orelse return;
             const fb = win.getFramebufferSize();
-            const content_x: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
+            const sidebar_w = titlebar.sidebarWidth();
+            const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
             const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-            const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * split_layout.DEFAULT_PADDING)));
+            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
             const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(split_layout.DEFAULT_PADDING)));
 
             const slot = spatial.slots[handle.idx()];
@@ -826,8 +891,9 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 
     const threshold = font.cell_width * 0.6;
     const padding_d: f64 = 10;
-    const click_cell_x = g_click_x - padding_d - @as(f64, @floatFromInt(AppWindow.activeSelection().start_col)) * @as(f64, font.cell_width);
-    const drag_cell_x = xpos - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, font.cell_width);
+    const sidebar_d: f64 = @floatCast(titlebar.sidebarWidth());
+    const click_cell_x = g_click_x - sidebar_d - padding_d - @as(f64, @floatFromInt(AppWindow.activeSelection().start_col)) * @as(f64, font.cell_width);
+    const drag_cell_x = xpos - sidebar_d - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, font.cell_width);
 
     const same_cell = (AppWindow.activeSelection().start_col == cell_pos.col and AppWindow.activeSelection().start_row == abs_row);
     if (same_cell) {
@@ -841,6 +907,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
+    if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.SIDEBAR_WIDTH))) return;
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
     // Fall back to focused surface if mouse is not over any split.
     const surface = split_layout.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;
@@ -964,8 +1031,10 @@ pub fn toggleFullscreen() void {
         // Restore windowed mode
         _ = win32_backend.SetWindowLongW(win.hwnd, -16, @bitCast(saved_style)); // GWL_STYLE
         _ = win32_backend.SetWindowPos(
-            win.hwnd, null,
-            saved_rect.left, saved_rect.top,
+            win.hwnd,
+            null,
+            saved_rect.left,
+            saved_rect.top,
             saved_rect.right - saved_rect.left,
             saved_rect.bottom - saved_rect.top,
             0x0020 | 0x0040, // SWP_FRAMECHANGED | SWP_SHOWWINDOW
@@ -987,8 +1056,10 @@ pub fn toggleFullscreen() void {
         var mi = win32_backend.MONITORINFO{ .cbSize = @sizeOf(win32_backend.MONITORINFO) };
         if (win32_backend.GetMonitorInfoW(monitor, &mi) != 0) {
             _ = win32_backend.SetWindowPos(
-                win.hwnd, null,
-                mi.rcMonitor.left, mi.rcMonitor.top,
+                win.hwnd,
+                null,
+                mi.rcMonitor.left,
+                mi.rcMonitor.top,
                 mi.rcMonitor.right - mi.rcMonitor.left,
                 mi.rcMonitor.bottom - mi.rcMonitor.top,
                 0x0020 | 0x0040, // SWP_FRAMECHANGED | SWP_SHOWWINDOW

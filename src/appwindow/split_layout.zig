@@ -69,9 +69,10 @@ pub fn hitTestDivider(x: i32, y: i32) ?DividerHit {
     // Get content area dimensions
     const win = AppWindow.g_window orelse return null;
     const fb = win.getFramebufferSize();
-    const content_x: f32 = @floatFromInt(DEFAULT_PADDING);
+    const sidebar_w = AppWindow.titlebar.sidebarWidth();
+    const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(DEFAULT_PADDING));
     const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const content_w: f32 = @floatFromInt(@as(i32, @intCast(fb.width)) - @as(i32, @intCast(2 * DEFAULT_PADDING)));
+    const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - @as(f32, @floatFromInt(2 * DEFAULT_PADDING));
     const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(DEFAULT_PADDING)));
 
     const xf: f32 = @floatFromInt(x);

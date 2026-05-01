@@ -366,7 +366,6 @@ pub const GENERIC_WRITE: DWORD = 0x40000000;
 pub const OPEN_EXISTING: DWORD = 3;
 pub const FILE_ATTRIBUTE_NORMAL: DWORD = 0x00000080;
 
-
 // Wait constants
 pub const WAIT_OBJECT_0: DWORD = 0x00000000;
 pub const WAIT_TIMEOUT: DWORD = 0x00000102;
@@ -663,6 +662,8 @@ pub const Window = struct {
     pressed_button: CaptionButton = .none,
     /// Tab count (synced from main.zig each frame, used for hit-testing)
     tab_count: usize = 1,
+    /// Current sidebar width (synced from renderer/input, used for double-click routing)
+    sidebar_width: i32 = 220,
     /// Plus button x range (synced from renderer, used for double-click suppression)
     plus_btn_x_start: i32 = 0,
     plus_btn_x_end: i32 = 0,
@@ -742,8 +743,14 @@ pub const Window = struct {
             dummy_class,
             std.unicode.utf8ToUtf16LeStringLiteral(""),
             0, // not visible
-            0, 0, 1, 1,
-            null, null, hInstance, null,
+            0,
+            0,
+            1,
+            1,
+            null,
+            null,
+            hInstance,
+            null,
         ) orelse {
             std.debug.print("Win32: Failed to create dummy window\n", .{});
             return error.CreateWindowFailed;
@@ -803,7 +810,10 @@ pub const Window = struct {
             if (y) |yv| yv else CW_USEDEFAULT,
             width,
             height,
-            null, null, hInstance, null,
+            null,
+            null,
+            hInstance,
+            null,
         ) orelse {
             std.debug.print("Win32: Failed to create window\n", .{});
             return error.CreateWindowFailed;
@@ -1010,14 +1020,13 @@ pub const Window = struct {
         _ = SetWindowPos(
             self.hwnd,
             null,
-            0, 0,
+            0,
+            0,
             rect.right - rect.left,
             rect.bottom - rect.top,
             SWP_NOZORDER | SWP_NOMOVE,
         );
     }
-
-
 };
 
 /// OpenGL function loader for GLAD.
@@ -1217,22 +1226,12 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                     return HTMINBUTTON;
                 }
 
-                if (w.tab_count <= 1) {
-                    // Single tab: return HTCLIENT so all mouse events come through
-                    // (we handle drag-to-move via WM_LBUTTONDOWN → WM_NCLBUTTONDOWN)
+                // The top bar no longer contains tabs. Only the left sidebar
+                // toggle is client-handled; the rest is draggable caption area.
+                if (pt.x < 46) {
                     return HTCLIENT;
                 }
 
-                // Multiple tabs: tab area and + button are clickable for switching.
-                // Gap between + and caption buttons remains HTCAPTION for dragging.
-                const caption_area_w: i32 = 46 * 3;
-                const gap_w: i32 = 42;
-                const tab_plus_end = client_rect.right - caption_area_w - gap_w;
-                if (pt.x < tab_plus_end) {
-                    return HTCLIENT;
-                }
-
-                // Gap area — draggable
                 return HTCAPTION;
             }
 
@@ -1368,8 +1367,8 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const x: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
 
-            // Single tab: left-click in titlebar initiates window drag
-            if (w.tab_count <= 1 and y < w.titlebar_height) {
+            // Titlebar clicks outside the sidebar toggle initiate window drag.
+            if (y < w.titlebar_height and x >= 46) {
                 _ = ReleaseCapture();
                 _ = SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, lParam);
                 return 0;
@@ -1385,27 +1384,12 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
             // Double-click in titlebar
             if (y < w.titlebar_height) {
-                var client_rect: RECT = undefined;
-                _ = GetClientRect(hwnd, &client_rect);
-                const window_width = client_rect.right - client_rect.left;
-                const caption_x = window_width - getCaptionButtonWidth();
-
-                if (w.tab_count <= 1) {
-                    // Single tab: double-click on tab area = rename, on empty area = maximize
-                    // Send double_click event; AppWindow decides rename vs maximize
-                    w.mouse_button_events.push(.{ .button = .left, .action = .double_click, .x = x, .y = y });
-                    return 0;
-                } else {
-                    // Multi-tab: suppress on + button (and gap to its right), close buttons, and caption area
-                    if (x >= caption_x) return 0;
-                    if (x >= w.plus_btn_x_start) return 0;
-                    for (0..@min(w.tab_count, 16)) |i| {
-                        if (x >= w.close_btn_x_start[i] and x < w.close_btn_x_end[i]) return 0;
-                    }
-                    // On a tab — send double_click for rename
-                    w.mouse_button_events.push(.{ .button = .left, .action = .double_click, .x = x, .y = y });
-                    return 0;
-                }
+                w.mouse_button_events.push(.{ .button = .left, .action = .double_click, .x = x, .y = y });
+                return 0;
+            }
+            if (w.sidebar_width > 0 and x >= 0 and x < w.sidebar_width) {
+                w.mouse_button_events.push(.{ .button = .left, .action = .double_click, .x = x, .y = y });
+                return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         },

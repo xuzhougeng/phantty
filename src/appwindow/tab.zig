@@ -88,6 +88,13 @@ pub threadlocal var g_last_frame_time_ms: i64 = 0;
 
 pub threadlocal var g_tab_text_x_start: [MAX_TABS]f32 = .{0} ** MAX_TABS;
 pub threadlocal var g_tab_text_x_end: [MAX_TABS]f32 = .{0} ** MAX_TABS;
+pub threadlocal var g_tab_text_y_start: [MAX_TABS]f32 = .{0} ** MAX_TABS;
+pub threadlocal var g_tab_text_y_end: [MAX_TABS]f32 = .{0} ** MAX_TABS;
+
+// Sidebar tab navigation state. This lives beside the tab model because the
+// renderer and input layer both need to agree on whether tab navigation is
+// currently visible.
+pub threadlocal var g_sidebar_visible: bool = true;
 
 // ============================================================================
 // Tab rename state
@@ -596,4 +603,3 @@ pub fn handleRenameChar(codepoint: u21) void {
     g_tab_rename_len += len;
     g_tab_rename_cursor += len;
 }
-

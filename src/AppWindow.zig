@@ -296,7 +296,6 @@ pub fn equalizeSplits() void {
     }
 }
 
-
 // Embed the font
 // Embedded fallback font (JetBrains Mono, like Ghostty)
 const embedded = @import("font/embedded.zig");
@@ -391,7 +390,8 @@ fn onWin32Resize(width: i32, height: i32) void {
     const padding_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
     const render_padding: f32 = 10;
     const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-    const avail_w = @as(f32, @floatFromInt(width)) - padding_left - padding_right;
+    const sidebar_w = titlebar.sidebarWidth();
+    const avail_w = @as(f32, @floatFromInt(width)) - sidebar_w - padding_left - padding_right;
     const avail_h = @as(f32, @floatFromInt(height)) - (render_padding * 2 + tb) - padding_top - padding_bottom;
     if (avail_w <= 0 or avail_h <= 0) return;
 
@@ -422,9 +422,9 @@ fn onWin32Resize(width: i32, height: i32) void {
     if (activeTab()) |active_tab| {
         // Compute split layout — also calls setScreenSize on each surface,
         // which corrects the per-surface dimensions for splits.
-        const content_x: i32 = @intFromFloat(render_padding);
+        const content_x: i32 = @intFromFloat(sidebar_w + render_padding);
         const content_y: i32 = @intFromFloat(render_padding + tb);
-        const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(width)) - render_padding * 2);
+        const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(width)) - sidebar_w - render_padding * 2);
         const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(height)) - (render_padding + tb) - render_padding);
         const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
 
@@ -449,7 +449,8 @@ fn onWin32Resize(width: i32, height: i32) void {
                 const pad = surface.getPadding();
                 const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                 titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-                cell_renderer.drawCells(rend, @floatFromInt(fb_height), @floatFromInt(pad.left), pad_top);
+                titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                cell_renderer.drawCells(rend, @floatFromInt(fb_height), sidebar_w + @as(f32, @floatFromInt(pad.left)), pad_top);
                 overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
                 overlays.renderResizeOverlayWithOffset(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
             }
@@ -461,6 +462,7 @@ fn onWin32Resize(width: i32, height: i32) void {
             gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
 
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+            titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
 
             for (0..split_count) |i| {
                 const rect = split_layout.g_split_rects[i];
@@ -505,6 +507,7 @@ fn onWin32Resize(width: i32, height: i32) void {
         gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
         gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
         titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+        titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
     }
 
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
@@ -517,7 +520,7 @@ fn resizeWindowToGrid() void {
     const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const content_w: f32 = font.cell_width * @as(f32, @floatFromInt(term_cols));
     const content_h: f32 = font.cell_height * @as(f32, @floatFromInt(term_rows));
-    const win_w: i32 = @intFromFloat(content_w + padding * 2);
+    const win_w: i32 = @intFromFloat(content_w + titlebar.sidebarWidth() + padding * 2);
     const win_h: i32 = @intFromFloat(content_h + padding + (padding + tb));
     if (g_window) |w| w.setSize(win_w, win_h);
 }
@@ -926,9 +929,10 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
     const explicit_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
     const render_padding: f32 = 10;
-    
-    // For width: pw = fb_width, then subtract explicit_padding
-    const total_width_padding = explicit_left + explicit_right; // 32
+    const initial_sidebar_w: f32 = titlebar.sidebarWidth();
+
+    // For width: pw = fb_width - sidebar_w, then subtract explicit_padding
+    const total_width_padding = initial_sidebar_w + explicit_left + explicit_right;
     // For height: ph = fb_height - (render_padding + titlebar) - render_padding, then subtract explicit_padding
     const total_height_padding = (render_padding + titlebar_height) + render_padding + explicit_top + explicit_bottom; // 44 + 10 + 20 = 74
 
@@ -938,12 +942,12 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         // Calculate window size needed for desired grid
         const desired_grid_width = font.cell_width * @as(f32, @floatFromInt(term_cols));
         const desired_grid_height = font.cell_height * @as(f32, @floatFromInt(term_rows));
-        
+
         // Work backwards: fb_width = grid_width + total_width_padding
         //                 fb_height = grid_height + total_height_padding
         const target_fb_width: i32 = @intFromFloat(desired_grid_width + total_width_padding);
         const target_fb_height: i32 = @intFromFloat(desired_grid_height + total_height_padding);
-        
+
         win32_window.setSize(target_fb_width, target_fb_height);
     }
 
@@ -951,18 +955,18 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     const init_fb = win32_window.getFramebufferSize();
     const actual_width: f32 = @floatFromInt(init_fb.width);
     const actual_height: f32 = @floatFromInt(init_fb.height);
-    
+
     // Calculate grid that fits in this window
     const avail_width = actual_width - total_width_padding;
     const avail_height = actual_height - total_height_padding;
-    
+
     const computed_cols: u16 = @intFromFloat(@max(1, avail_width / font.cell_width));
     const computed_rows: u16 = @intFromFloat(@max(1, avail_height / font.cell_height));
-    
+
     // Update term_cols/term_rows to match what the window can actually display
     term_cols = computed_cols;
     term_rows = computed_rows;
-    
+
     // Now spawn the initial tab with the correct dimensions.
     // No resize will be needed because term_cols/term_rows match
     // what setScreenSize will compute from the window size.
@@ -1043,6 +1047,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
         // Sync tab count to win32 for hit-testing
         win.tab_count = tab.g_tab_count;
+        win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
 
         // Process all queued input events (keyboard, mouse, resize)
         input.processEvents(win);
@@ -1080,13 +1085,14 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         // Render padding constants - used for content area and titlebar positioning
         const padding: f32 = 10;
         const titlebar_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+        const sidebar_w = titlebar.sidebarWidth();
         const top_padding: f32 = padding + titlebar_offset;
 
         if (activeTab()) |active_tab| {
             // Compute split layout for the active tab
-            const content_x: i32 = @intFromFloat(padding);
+            const content_x: i32 = @intFromFloat(sidebar_w + padding);
             const content_y: i32 = @intFromFloat(top_padding);
-            const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - padding * 2);
+            const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - sidebar_w - padding * 2);
             const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_height)) - top_padding - padding);
             const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
 
@@ -1133,7 +1139,8 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                     const pad = surface.getPadding();
                     const pad_top = @as(f32, @floatFromInt(pad.top)) + titlebar_offset;
                     titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
-                    cell_renderer.drawCells(rend, @floatFromInt(fb_height), @floatFromInt(pad.left), pad_top);
+                    titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                    cell_renderer.drawCells(rend, @floatFromInt(fb_height), sidebar_w + @as(f32, @floatFromInt(pad.left)), pad_top);
                     overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
 
                     // Render resize overlay centered in content area (offset for titlebar)
@@ -1147,6 +1154,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                 gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
 
                 titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+                titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
 
                 // Render each split surface directly to screen using viewport
                 if (split_count > 0) {
@@ -1159,7 +1167,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
                         // OpenGL viewport: (x, y, width, height) where y is from bottom
                         const viewport_y = fb_height - rect.y - rect.height;
                         gl.Viewport.?(rect.x, viewport_y, rect.width, rect.height);
-                        
+
                         // Set projection for this viewport size
                         gl_init.setProjection(@floatFromInt(rect.width), @floatFromInt(rect.height));
 
@@ -1211,6 +1219,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             gl.ClearColor.?(g_theme.background[0], g_theme.background[1], g_theme.background[2], 1.0);
             gl.Clear.?(c.GL_COLOR_BUFFER_BIT);
             titlebar.renderTitlebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
+            titlebar.renderSidebar(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
         }
 
         gl.Viewport.?(0, 0, fb_width, fb_height);

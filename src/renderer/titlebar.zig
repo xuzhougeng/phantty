@@ -17,6 +17,100 @@ const c = @cImport({
 const Character = font.Character;
 
 pub const CaptionButtonType = enum { minimize, maximize, close };
+pub const SIDEBAR_WIDTH: f32 = 220;
+pub const SIDEBAR_ROW_H: f32 = 42;
+pub const SIDEBAR_HEADER_H: f32 = 46;
+pub const TITLEBAR_TOGGLE_W: f32 = 46;
+
+pub fn sidebarWidth() f32 {
+    return if (tab.g_sidebar_visible) SIDEBAR_WIDTH else 0;
+}
+
+fn lighten(color: [3]f32, amount: f32) [3]f32 {
+    return .{
+        @min(1.0, color[0] + amount),
+        @min(1.0, color[1] + amount),
+        @min(1.0, color[2] + amount),
+    };
+}
+
+fn darken(color: [3]f32, amount: f32) [3]f32 {
+    return .{
+        @max(0.0, color[0] - amount),
+        @max(0.0, color[1] - amount),
+        @max(0.0, color[2] - amount),
+    };
+}
+
+fn renderTextLimited(text: []const u8, x: f32, y: f32, color: [3]f32, max_w: f32) f32 {
+    if (max_w <= 0) return x;
+
+    var cursor_x = x;
+    var view = std.unicode.Utf8View.initUnchecked(text);
+    var it = view.iterator();
+    while (it.nextCodepoint()) |cp| {
+        const adv = titlebarGlyphAdvance(cp);
+        if (cursor_x + adv > x + max_w) {
+            const ellipsis: u32 = 0x2026;
+            const ellipsis_w = titlebarGlyphAdvance(ellipsis);
+            if (cursor_x + ellipsis_w <= x + max_w) {
+                renderTitlebarChar(ellipsis, cursor_x, y, color);
+                cursor_x += ellipsis_w;
+            }
+            break;
+        }
+        renderTitlebarChar(cp, cursor_x, y, color);
+        cursor_x += adv;
+    }
+    return cursor_x;
+}
+
+fn renderFallbackMenuIcon(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const line_w: f32 = 14;
+    const line_h: f32 = 1.5;
+    gl_init.renderQuad(cx - line_w / 2, cy - 5, line_w, line_h, color);
+    gl_init.renderQuad(cx - line_w / 2, cy, line_w, line_h, color);
+    gl_init.renderQuad(cx - line_w / 2, cy + 5, line_w, line_h, color);
+}
+
+fn renderPlusIcon(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
+    if (font.icon_face != null) {
+        if (font.loadIconGlyph(0xE948)) |ch| {
+            renderIconGlyph(ch, x, y, w, h, color, 1.1);
+            return;
+        }
+    }
+
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const arm: f32 = 5;
+    const t: f32 = 1.25;
+    gl_init.renderQuad(cx - arm, cy - t / 2, arm * 2, t, color);
+    gl_init.renderQuad(cx - t / 2, cy - arm, t, arm * 2, color);
+}
+
+fn renderCloseIcon(x: f32, y: f32, w: f32, h: f32, color: [3]f32) void {
+    if (font.icon_face != null) {
+        if (font.loadIconGlyph(0xE8BB)) |ch| {
+            renderIconGlyph(ch, x, y, w, h, color, 0.95);
+            return;
+        }
+    }
+
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    const arm: f32 = 4;
+    const t: f32 = 1;
+    const steps: usize = 20;
+    for (0..steps) |si| {
+        const frac = @as(f32, @floatFromInt(si)) / @as(f32, @floatFromInt(steps - 1));
+        const px = cx - arm + frac * arm * 2;
+        gl_init.renderQuad(px - t / 2, (cy + arm - frac * arm * 2) - t / 2, t, t, color);
+        gl_init.renderQuad(px - t / 2, (cy - arm + frac * arm * 2) - t / 2, t, t, color);
+    }
+}
 
 /// Render a titlebar glyph at 1:1 atlas size (no scaling).
 /// Supports both grayscale (titlebar atlas) and color emoji (color atlas).
@@ -55,8 +149,8 @@ pub fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
         const projection = [16]f32{
             2.0 / vp_w, 0.0,        0.0,  0.0,
             0.0,        2.0 / vp_h, 0.0,  0.0,
-            0.0,        0.0,         -1.0, 0.0,
-            -1.0,       -1.0,        0.0,  1.0,
+            0.0,        0.0,        -1.0, 0.0,
+            -1.0,       -1.0,       0.0,  1.0,
         };
         gl.UseProgram.?(gl_init.simple_color_shader);
         gl.UniformMatrix4fv.?(gl.GetUniformLocation.?(gl_init.simple_color_shader, "projection"), 1, c.GL_FALSE, &projection);
@@ -67,7 +161,8 @@ pub fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
+        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
+        gl_init.g_draw_call_count += 1;
         // Restore text shader and standard alpha blend
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
         gl.UseProgram.?(gl_init.shader_program);
@@ -95,7 +190,8 @@ pub fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
+        gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
+        gl_init.g_draw_call_count += 1;
     }
 }
 
@@ -146,8 +242,8 @@ pub fn renderBellEmoji(x: f32, y: f32, opacity: f32) void {
     const projection = [16]f32{
         2.0 / vp_w, 0.0,        0.0,  0.0,
         0.0,        2.0 / vp_h, 0.0,  0.0,
-        0.0,        0.0,         -1.0, 0.0,
-        -1.0,       -1.0,        0.0,  1.0,
+        0.0,        0.0,        -1.0, 0.0,
+        -1.0,       -1.0,       0.0,  1.0,
     };
 
     // Render with simple color shader (premultiplied alpha + opacity fade)
@@ -159,7 +255,8 @@ pub fn renderBellEmoji(x: f32, y: f32, opacity: f32) void {
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
+    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
+    gl_init.g_draw_call_count += 1;
 
     // Restore text shader and standard blend
     gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
@@ -193,7 +290,8 @@ pub fn renderIconGlyph(ch: Character, btn_x: f32, btn_y: f32, btn_w: f32, btn_h:
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.vbo);
     gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @sizeOf(@TypeOf(vertices)), &vertices);
     gl.BindBuffer.?(c.GL_ARRAY_BUFFER, 0);
-    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6); gl_init.g_draw_call_count += 1;
+    gl.DrawArrays.?(c.GL_TRIANGLES, 0, 6);
+    gl_init.g_draw_call_count += 1;
 }
 
 /// Render the Ghostty-style tab bar.
@@ -219,6 +317,66 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
 
     const tb_top = window_height - titlebar_h; // top of titlebar in GL coords
     const bg = AppWindow.g_theme.background;
+    if (AppWindow.g_window != null) {
+        const top_bg = lighten(bg, 0.025);
+        const hover_bg = lighten(bg, 0.08);
+        const border_color_simple = darken(bg, 0.035);
+        const icon_color = [3]f32{ 0.78, 0.78, 0.78 };
+
+        // Phantty keeps terminal tabs in the application UI layer, matching
+        // Ghostty's apprt action/tab-view split. The top bar now only hosts the
+        // sidebar toggle and native caption buttons; tab navigation is rendered by
+        // renderSidebar below.
+        gl_init.renderQuad(0, tb_top, window_width, titlebar_h, top_bg);
+        gl_init.renderQuad(0, tb_top, window_width, 1, border_color_simple);
+
+        const toggle_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_y < 0 or win.mouse_y >= @as(i32, @intFromFloat(titlebar_h))) break :blk false;
+            break :blk win.mouse_x >= 0 and win.mouse_x < @as(i32, @intFromFloat(TITLEBAR_TOGGLE_W));
+        };
+        if (toggle_hovered) {
+            gl_init.renderQuad(0, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, hover_bg);
+        }
+        if (font.icon_face != null) {
+            if (font.loadIconGlyph(0xE700)) |ch| {
+                renderIconGlyph(ch, 0, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color, 1.0);
+            } else {
+                renderFallbackMenuIcon(0, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
+            }
+        } else {
+            renderFallbackMenuIcon(0, tb_top, TITLEBAR_TOGGLE_W, titlebar_h, icon_color);
+        }
+
+        if (tab.activeTab()) |active_tab| {
+            const title = active_tab.getTitle();
+            const text_y = tb_top + (titlebar_h - font.g_titlebar_cell_height) / 2;
+            _ = renderTextLimited(title, TITLEBAR_TOGGLE_W + 10, text_y, .{ 0.64, 0.64, 0.64 }, window_width - TITLEBAR_TOGGLE_W - 160);
+        }
+
+        const top_caption_btn_w: f32 = 46;
+        const top_caption_area_w: f32 = top_caption_btn_w * 3;
+        const top_btn_h: f32 = titlebar_h;
+        const top_hovered: win32_backend.CaptionButton = if (AppWindow.g_window) |w| w.hovered_button else .none;
+
+        const top_caption_start = window_width - top_caption_area_w;
+        renderCaptionButton(top_caption_start, tb_top, top_caption_btn_w, top_btn_h, .minimize, top_hovered == .minimize);
+        renderCaptionButton(top_caption_start + top_caption_btn_w, tb_top, top_caption_btn_w, top_btn_h, .maximize, top_hovered == .maximize);
+        renderCaptionButton(top_caption_start + top_caption_btn_w * 2, tb_top, top_caption_btn_w, top_btn_h, .close, top_hovered == .close);
+
+        {
+            const is_focused = if (AppWindow.g_window) |w| w.focused else false;
+            const is_maximized = if (AppWindow.g_window) |w| win32_backend.IsZoomed(w.hwnd) != 0 else false;
+            if (is_focused and !is_maximized) {
+                const b: f32 = 1;
+                gl_init.renderQuad(0, 0, window_width, b, bg);
+                gl_init.renderQuad(0, window_height - b, window_width, b, bg);
+                gl_init.renderQuad(0, 0, b, window_height, bg);
+                gl_init.renderQuad(window_width - b, 0, b, window_height, bg);
+            }
+        }
+        return;
+    }
 
     // Colors — Ghostty style:
     // - Active tab: same as terminal bg, no border (merges with content)
@@ -715,6 +873,164 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             gl_init.renderQuad(0, 0, b, window_height, accent); // left
             gl_init.renderQuad(window_width - b, 0, b, window_height, accent); // right
         }
+    }
+}
+
+/// Render the left tab sidebar. The top titlebar remains separate so Windows
+/// caption hit-testing stays simple.
+pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) void {
+    _ = window_width;
+    if (!tab.g_sidebar_visible) return;
+
+    const gl = AppWindow.gl;
+    gl.UseProgram.?(gl_init.shader_program);
+    gl.ActiveTexture.?(c.GL_TEXTURE0);
+    gl.BindVertexArray.?(gl_init.vao);
+
+    const bg = AppWindow.g_theme.background;
+    const sidebar_bg = lighten(bg, 0.035);
+    const hover_bg = lighten(bg, 0.075);
+    const active_bg = lighten(bg, 0.105);
+    const border_color = darken(bg, 0.035);
+    const text_active = [3]f32{ 0.92, 0.92, 0.92 };
+    const text_inactive = [3]f32{ 0.62, 0.62, 0.62 };
+    const muted = [3]f32{ 0.46, 0.46, 0.46 };
+
+    const side_h = window_height - titlebar_h;
+    if (side_h <= 0) return;
+
+    gl_init.renderQuad(0, 0, SIDEBAR_WIDTH, side_h, sidebar_bg);
+    gl_init.renderQuad(SIDEBAR_WIDTH - 1, 0, 1, side_h, border_color);
+
+    const header_top_px = titlebar_h;
+    const header_y = window_height - header_top_px - SIDEBAR_HEADER_H;
+    const plus_btn_w: f32 = 42;
+    const plus_x = SIDEBAR_WIDTH - plus_btn_w - 6;
+    const plus_hovered = blk: {
+        const win = AppWindow.g_window orelse break :blk false;
+        if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+        const mx: f32 = @floatFromInt(win.mouse_x);
+        const my: f32 = @floatFromInt(win.mouse_y);
+        break :blk mx >= plus_x and mx < plus_x + plus_btn_w and my >= header_top_px and my < header_top_px + SIDEBAR_HEADER_H;
+    };
+    if (plus_hovered) {
+        gl_init.renderQuad(plus_x, header_y + 4, plus_btn_w, SIDEBAR_HEADER_H - 8, hover_bg);
+    }
+    _ = renderTextLimited("Tabs", 14, header_y + (SIDEBAR_HEADER_H - font.g_titlebar_cell_height) / 2, muted, SIDEBAR_WIDTH - plus_btn_w - 26);
+    renderPlusIcon(plus_x, header_y, plus_btn_w, SIDEBAR_HEADER_H, text_active);
+    gl_init.renderQuad(0, header_y, SIDEBAR_WIDTH, 1, border_color);
+
+    const now_ms = std.time.milliTimestamp();
+    const dt: f32 = if (tab.g_last_frame_time_ms > 0)
+        @as(f32, @floatFromInt(now_ms - tab.g_last_frame_time_ms)) / 1000.0
+    else
+        0.016;
+    tab.g_last_frame_time_ms = now_ms;
+
+    const list_top_px = titlebar_h + SIDEBAR_HEADER_H + 6;
+    for (0..tab.MAX_TABS) |tab_idx| {
+        tab.g_tab_text_x_start[tab_idx] = 0;
+        tab.g_tab_text_x_end[tab_idx] = 0;
+        tab.g_tab_text_y_start[tab_idx] = 0;
+        tab.g_tab_text_y_end[tab_idx] = 0;
+    }
+
+    for (0..tab.g_tab_count) |tab_idx| {
+        const row_top_px = list_top_px + @as(f32, @floatFromInt(tab_idx)) * SIDEBAR_ROW_H;
+        if (row_top_px >= window_height) break;
+        const row_h = @min(SIDEBAR_ROW_H, window_height - row_top_px);
+        const row_y = window_height - row_top_px - row_h;
+        const is_active = tab_idx == tab.g_active_tab;
+
+        const row_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+            const mx: f32 = @floatFromInt(win.mouse_x);
+            const my: f32 = @floatFromInt(win.mouse_y);
+            break :blk mx >= 0 and mx < SIDEBAR_WIDTH and my >= row_top_px and my < row_top_px + row_h;
+        };
+
+        if (is_active) {
+            gl_init.renderQuad(0, row_y, SIDEBAR_WIDTH, row_h, active_bg);
+            gl_init.renderQuad(0, row_y + 6, 3, row_h - 12, AppWindow.g_theme.cursor_color);
+        } else if (row_hovered) {
+            gl_init.renderQuad(0, row_y, SIDEBAR_WIDTH, row_h, hover_bg);
+        }
+
+        if (tab.g_tab_count > 1) {
+            if (row_hovered) {
+                tab.g_tab_close_opacity[tab_idx] = @min(1.0, tab.g_tab_close_opacity[tab_idx] + tab.TAB_CLOSE_FADE_SPEED * dt);
+            } else {
+                tab.g_tab_close_opacity[tab_idx] = @max(0.0, tab.g_tab_close_opacity[tab_idx] - tab.TAB_CLOSE_FADE_SPEED * dt);
+            }
+        } else {
+            tab.g_tab_close_opacity[tab_idx] = 0;
+        }
+
+        if (tab.g_tabs[tab_idx]) |tb| {
+            if (tb.focusedSurface()) |surface| {
+                if (surface.bell_indicator) {
+                    surface.bell_opacity = @min(1.0, surface.bell_opacity + tab.TAB_CLOSE_FADE_SPEED * dt);
+                    if (is_active and surface.bell_opacity >= 1.0 and now_ms - surface.bell_indicator_time >= 1000) {
+                        surface.bell_indicator = false;
+                    }
+                } else {
+                    surface.bell_opacity = @max(0.0, surface.bell_opacity - tab.TAB_CLOSE_FADE_SPEED * dt);
+                }
+            }
+        }
+
+        var prefix_buf: [4]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&prefix_buf, "{d}", .{tab_idx + 1}) catch "";
+        const text_y = row_y + (row_h - font.g_titlebar_cell_height) / 2;
+        const number_x: f32 = 14;
+        _ = renderTextLimited(prefix, number_x, text_y, if (is_active) text_active else muted, 24);
+
+        const title = if (tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx)
+            tab.g_tab_rename_buf[0..tab.g_tab_rename_len]
+        else if (tab.g_tabs[tab_idx]) |t|
+            t.getTitle()
+        else
+            "New Tab";
+
+        const close_opacity = tab.g_tab_close_opacity[tab_idx];
+        const close_btn_x = SIDEBAR_WIDTH - tab.TAB_CLOSE_BTN_W - 4;
+        const title_x: f32 = 42;
+        const title_max_w = close_btn_x - title_x - 8;
+        const title_color = if (is_active) text_active else text_inactive;
+        const text_end = renderTextLimited(title, title_x, text_y, title_color, title_max_w);
+
+        if (tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx and AppWindow.g_cursor_blink_visible) {
+            gl_init.renderQuad(@min(text_end + 1, title_x + title_max_w), text_y, 1, font.g_titlebar_cell_height, text_active);
+        }
+
+        const bell_opacity: f32 = if (tab.g_tabs[tab_idx]) |t| (if (t.focusedSurface()) |s| s.bell_opacity else 0) else 0;
+        if (bell_opacity > 0.01) {
+            renderBellEmoji(close_btn_x - 20, text_y, bell_opacity);
+        }
+
+        if (close_opacity > 0.01 and tab.g_tab_count > 1) {
+            const close_hovered = row_hovered and blk: {
+                const win = AppWindow.g_window orelse break :blk false;
+                const mx: f32 = @floatFromInt(win.mouse_x);
+                break :blk mx >= close_btn_x and mx < close_btn_x + tab.TAB_CLOSE_BTN_W;
+            };
+            const raw_color = if (close_hovered) text_active else muted;
+            const close_color = [3]f32{
+                raw_color[0] * close_opacity + sidebar_bg[0] * (1 - close_opacity),
+                raw_color[1] * close_opacity + sidebar_bg[1] * (1 - close_opacity),
+                raw_color[2] * close_opacity + sidebar_bg[2] * (1 - close_opacity),
+            };
+            if (close_hovered) {
+                gl_init.renderQuad(close_btn_x + 6, row_y + 10, 20, 20, lighten(bg, 0.12));
+            }
+            renderCloseIcon(close_btn_x, row_y, tab.TAB_CLOSE_BTN_W, row_h, close_color);
+        }
+
+        tab.g_tab_text_x_start[tab_idx] = title_x;
+        tab.g_tab_text_x_end[tab_idx] = text_end;
+        tab.g_tab_text_y_start[tab_idx] = row_top_px;
+        tab.g_tab_text_y_end[tab_idx] = row_top_px + row_h;
     }
 }
 
