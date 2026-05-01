@@ -76,9 +76,6 @@ jobs:
 
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item zig-out\bin\phantty.exe dist\phantty.exe
-          if (Test-Path zig-out\bin\phantty.pdb) {
-            Copy-Item zig-out\bin\phantty.pdb dist\phantty.pdb
-          }
 
           $zip = "phantty-windows-${{ github.ref_name }}.zip"
           Compress-Archive -Path dist\* -DestinationPath $zip -Force
