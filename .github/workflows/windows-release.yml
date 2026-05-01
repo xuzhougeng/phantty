@@ -1,0 +1,49 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build release
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Package Windows artifact
+        shell: pwsh
+        run: |
+          if (!(Test-Path zig-out\bin\phantty.exe)) {
+            throw "Build output not found: zig-out\bin\phantty.exe"
+          }
+
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item zig-out\bin\phantty.exe dist\phantty.exe
+          if (Test-Path zig-out\bin\phantty.pdb) {
+            Copy-Item zig-out\bin\phantty.pdb dist\phantty.pdb
+          }
+
+          $zip = "phantty-windows-${{ github.ref_name }}.zip"
+          Compress-Archive -Path dist\* -DestinationPath $zip -Force
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phantty-windows-${{ github.ref_name }}
+          path: phantty-windows-${{ github.ref_name }}.zip
+          if-no-files-found: error
