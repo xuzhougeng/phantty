@@ -89,6 +89,22 @@ pub fn toggleSidebar() void {
     AppWindow.g_cells_valid = false;
 }
 
+pub fn adjustFontSize(delta: i32) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    var cfg = Config.load(allocator) catch Config{};
+    defer cfg.deinit(allocator);
+
+    const current: i32 = @intCast(cfg.@"font-size");
+    var next = current + delta;
+    if (next < 6) next = 6;
+    if (next > 72) next = 72;
+    if (next == current) return;
+
+    var buf: [16]u8 = undefined;
+    const value = std.fmt.bufPrint(&buf, "{d}", .{next}) catch return;
+    Config.setConfigValue(allocator, "font-size", value) catch {};
+}
+
 // ============================================================================
 // Shared helpers (used by input + cell_renderer)
 // ============================================================================
@@ -305,6 +321,17 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == win32_backend.VK_RETURN) {
         if (tab.g_tab_rename_active) tab.commitTabRename();
         toggleMaximize();
+        return;
+    }
+    // Ctrl++ / Ctrl+- = adjust font size
+    if (ev.ctrl and !ev.alt and ev.vk == win32_backend.VK_OEM_PLUS) {
+        if (tab.g_tab_rename_active) tab.commitTabRename();
+        adjustFontSize(1);
+        return;
+    }
+    if (ev.ctrl and !ev.alt and ev.vk == win32_backend.VK_OEM_MINUS) {
+        if (tab.g_tab_rename_active) tab.commitTabRename();
+        adjustFontSize(-1);
         return;
     }
     // When tab rename is active, handle special keys

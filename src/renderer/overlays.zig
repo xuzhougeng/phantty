@@ -103,6 +103,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+Z", .action = "Equalize panels" },
     .{ .keys = "Ctrl+Shift+C/V", .action = "Copy / paste" },
     .{ .keys = "Ctrl+,", .action = "Open config" },
+    .{ .keys = "Ctrl++ / Ctrl+-", .action = "Font size" },
     .{ .keys = "Ctrl+Enter", .action = "Maximize / restore" },
 };
 
@@ -138,6 +139,8 @@ const CommandAction = enum {
     toggle_sidebar,
     show_shortcuts,
     open_config,
+    font_size_decrease,
+    font_size_increase,
     toggle_maximize,
 };
 
@@ -161,6 +164,8 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "Ctrl+Shift+B", .action = .toggle_sidebar },
     .{ .title = "Keyboard Shortcuts", .detail = "Show the shortcut reference overlay", .shortcut = "Ctrl+Shift+P", .action = .show_shortcuts },
     .{ .title = "Open Config", .detail = "Open the Phantty config file", .shortcut = "Ctrl+,", .action = .open_config },
+    .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "Ctrl+-", .action = .font_size_decrease },
+    .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "Ctrl++", .action = .font_size_increase },
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Ctrl+Enter", .action = .toggle_maximize },
 };
 
@@ -276,6 +281,8 @@ fn executeCommand(action: CommandAction) void {
         .toggle_sidebar => AppWindow.input.toggleSidebar(),
         .show_shortcuts => startupShortcutsShow(),
         .open_config => if (AppWindow.g_allocator) |alloc| Config.openConfigInEditor(alloc),
+        .font_size_decrease => AppWindow.input.adjustFontSize(-1),
+        .font_size_increase => AppWindow.input.adjustFontSize(1),
         .toggle_maximize => AppWindow.input.toggleMaximize(),
     }
 }

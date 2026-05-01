@@ -254,6 +254,8 @@ pub const VK_RCONTROL: WPARAM = 0xA3;
 pub const VK_LMENU: WPARAM = 0xA4; // Left Alt
 pub const VK_RMENU: WPARAM = 0xA5; // Right Alt
 pub const VK_OEM_COMMA: WPARAM = 0xBC;
+pub const VK_OEM_PLUS: WPARAM = 0xBB; // '+' / '=' key
+pub const VK_OEM_MINUS: WPARAM = 0xBD; // '-' / '_' key
 pub const VK_OEM_4: WPARAM = 0xDB; // '[' key
 pub const VK_OEM_6: WPARAM = 0xDD; // ']' key
 pub const VK_F11: WPARAM = 0x7A;
