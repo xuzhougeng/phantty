@@ -3,6 +3,7 @@ name: Publish Windows Release
 on:
   push:
     tags:
+      - '[0-9]*'
       - 'v[0-9]*'
 
 permissions:
@@ -23,8 +24,8 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "Release tag must match vX.Y.Z. Received: $tag"
+          if ($tag -notmatch '^(v\d+\.\d+\.\d+|\d+\.\d+(\.\d+)?)$') {
+            throw "Release tag must match vX.Y.Z, X.Y, or X.Y.Z. Received: $tag"
           }
 
       - name: Set up Zig
@@ -147,12 +148,16 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag $portableAsset $setupAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
+            $notes = @(
+              "Windows assets included in this release:",
+              "",
+              "- Portable: zip archive containing phantty.exe",
+              "- Installer: setup executable that installs Phantty into the current user profile and adds a Start menu shortcut"
+            ) -join "`n"
+
             gh release create $tag $portableAsset $setupAsset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `
-              --notes "Windows assets included in this release:
-
-- Portable: zip archive containing phantty.exe
-- Installer: setup executable that installs Phantty into the current user profile and adds a Start menu shortcut"
+              --notes $notes
           }
