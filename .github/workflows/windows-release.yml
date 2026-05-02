@@ -74,14 +74,13 @@ jobs:
           }
 
           Invoke-WithRetry -Name "zig dependency fetch" -Command { zig build -Doptimize=ReleaseFast --fetch }
-          Invoke-WithRetry -Name "windows packaging" -Command { powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1 -Version "${{ github.ref_name }}" }
+          Invoke-WithRetry -Name "windows packaging" -Command { powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1 -Version "${{ github.ref_name }}" -SkipInstaller }
 
       - name: Validate packaged outputs
         shell: pwsh
         run: |
           $portableExe = "zig-out\dist\portable\phantty.exe"
           $portableVersion = "zig-out\dist\portable\version.txt"
-          $setupExe = "zig-out\dist\installer\phantty-setup.exe"
 
           if (!(Test-Path $portableExe)) {
             throw "Portable executable not found: $portableExe"
@@ -91,40 +90,23 @@ jobs:
             throw "Portable version file not found: $portableVersion"
           }
 
-          if (!(Test-Path $setupExe)) {
-            throw "Installer executable not found: $setupExe"
-          }
-
       - name: Create release assets
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "phantty-windows-portable-$tag.zip"
-          $setupAsset = "phantty-windows-setup-$tag.exe"
 
           if (Test-Path $portableAsset) {
             Remove-Item $portableAsset -Force
           }
 
-          if (Test-Path $setupAsset) {
-            Remove-Item $setupAsset -Force
-          }
-
           Compress-Archive -Path zig-out\dist\portable\* -DestinationPath $portableAsset -Force
-          Copy-Item zig-out\dist\installer\phantty-setup.exe $setupAsset -Force
 
       - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
           name: phantty-windows-portable-${{ github.ref_name }}
           path: phantty-windows-portable-${{ github.ref_name }}.zip
-          if-no-files-found: error
-
-      - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: phantty-windows-setup-${{ github.ref_name }}
-          path: phantty-windows-setup-${{ github.ref_name }}.exe
           if-no-files-found: error
 
       - name: Publish GitHub release
@@ -134,28 +116,24 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $portableAsset = "phantty-windows-portable-$tag.zip"
-          $setupAsset = "phantty-windows-setup-$tag.exe"
 
           if (!(Test-Path $portableAsset)) {
             throw "Portable release asset not found: $portableAsset"
           }
 
-          if (!(Test-Path $setupAsset)) {
-            throw "Installer release asset not found: $setupAsset"
-          }
-
           gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $portableAsset $setupAsset --repo $env:GITHUB_REPOSITORY --clobber
+            gh release upload $tag $portableAsset --repo $env:GITHUB_REPOSITORY --clobber
           } else {
             $notes = @(
               "Windows assets included in this release:",
               "",
               "- Portable: zip archive containing phantty.exe",
-              "- Installer: setup executable that installs Phantty into the current user profile and adds a Start menu shortcut"
+              "",
+              "The unsigned IExpress setup executable is not published because Windows Defender can quarantine it as a false positive. Use the portable zip for now."
             ) -join "`n"
 
-            gh release create $tag $portableAsset $setupAsset `
+            gh release create $tag $portableAsset `
               --repo $env:GITHUB_REPOSITORY `
               --verify-tag `
               --generate-notes `

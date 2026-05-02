@@ -1,7 +1,8 @@
 param(
     [string]$Version,
     [string]$OutputDir = '.\zig-out\dist',
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$SkipInstaller
 )
 
 Set-StrictMode -Version Latest
@@ -57,10 +58,18 @@ $versionFile = Join-Path $stagingDir 'version.txt'
 $sedFile = Join-Path $installerDir 'phantty-installer.sed'
 
 Remove-Item -Path $portableDir, $installerDir -Recurse -Force -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Path $portableDir, $installerDir, $stagingDir -Force | Out-Null
+New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 
 Copy-Item -Path $binaryPath -Destination (Join-Path $portableDir 'phantty.exe') -Force
 Set-Content -Path (Join-Path $portableDir 'version.txt') -Value $releaseVersion -Encoding ASCII
+
+if ($SkipInstaller) {
+    Write-Host "Portable build: $(Join-Path $portableDir 'phantty.exe')"
+    Write-Host 'Installer build skipped. Unsigned IExpress installers are prone to Windows Defender false positives.'
+    exit 0
+}
+
+New-Item -ItemType Directory -Path $installerDir, $stagingDir -Force | Out-Null
 
 Copy-Item -Path $binaryPath -Destination (Join-Path $stagingDir 'phantty.exe') -Force
 Copy-Item -Path (Join-Path $PSScriptRoot 'Install-Phantty.ps1') -Destination (Join-Path $stagingDir 'Install-Phantty.ps1') -Force
