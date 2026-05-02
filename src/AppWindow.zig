@@ -267,14 +267,20 @@ pub fn switchTab(idx: usize) void {
 }
 
 pub fn splitFocused(direction: SplitTree.Split.Direction) void {
-    const allocator = g_allocator orelse return;
+    _ = splitFocusedReturningSurface(direction);
+}
+
+pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surface {
+    const allocator = g_allocator orelse return null;
     var cwd_buf: [260]u16 = undefined;
     const cwd = getActiveCwd(&cwd_buf);
-    if (tab.splitFocused(allocator, direction, font.cell_width, font.cell_height, g_cursor_style, g_cursor_blink, cwd)) {
+    const surface = tab.splitFocusedReturningSurface(allocator, direction, font.cell_width, font.cell_height, g_cursor_style, g_cursor_blink, cwd) orelse return null;
+    {
         overlays.g_resize_active = false;
         g_force_rebuild = true;
         g_cells_valid = false;
     }
+    return surface;
 }
 
 pub fn closeFocusedSplit() void {

@@ -261,8 +261,22 @@ pub fn splitFocused(
     cursor_blink: bool,
     cwd: ?[*:0]const u16,
 ) bool {
-    const t = activeTab() orelse return false;
-    const focused_surface = t.focusedSurface() orelse return false;
+    return splitFocusedReturningSurface(allocator, direction, cell_w, cell_h, cursor_style, cursor_blink, cwd) != null;
+}
+
+/// Split the focused surface and return the newly-created surface.
+/// Returns null on failure. The caller handles g_resize_active and rebuild flags.
+pub fn splitFocusedReturningSurface(
+    allocator: std.mem.Allocator,
+    direction: SplitTree.Split.Direction,
+    cell_w: f32,
+    cell_h: f32,
+    cursor_style: CursorStyle,
+    cursor_blink: bool,
+    cwd: ?[*:0]const u16,
+) ?*Surface {
+    const t = activeTab() orelse return null;
+    const focused_surface = t.focusedSurface() orelse return null;
 
     // Calculate exact dimensions for the new split surface
     const screen_w = focused_surface.size.screen.width;
@@ -302,7 +316,7 @@ pub fn splitFocused(
         cwd,
     ) catch {
         std.debug.print("Failed to create Surface for split\n", .{});
-        return false;
+        return null;
     };
 
     // Pre-initialize size state to match what computeSplitLayout will compute
@@ -315,7 +329,7 @@ pub fn splitFocused(
     var insert_tree = SplitTree.init(allocator, new_surface) catch {
         std.debug.print("Failed to create SplitTree for split\n", .{});
         new_surface.deinit(allocator);
-        return false;
+        return null;
     };
     new_surface.unref(allocator);
     defer insert_tree.deinit();
@@ -328,7 +342,7 @@ pub fn splitFocused(
         &insert_tree,
     ) catch {
         std.debug.print("Failed to split tree\n", .{});
-        return false;
+        return null;
     };
 
     const new_handle: SplitTree.Node.Handle = @enumFromInt(t.tree.nodes.len);
@@ -340,7 +354,7 @@ pub fn splitFocused(
     t.focused = new_handle;
 
     std.debug.print("Split created: initial size {}x{}, handle: {}, tree nodes: {}\n", .{ split_cols, split_rows, @intFromEnum(new_handle), t.tree.nodes.len });
-    return true;
+    return new_surface;
 }
 
 /// Result of closing the focused split.

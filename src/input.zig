@@ -18,6 +18,7 @@ const Surface = @import("Surface.zig");
 const SplitTree = @import("split_tree.zig");
 const windows = @import("std").os.windows;
 const Selection = Surface.Selection;
+const CellPos = struct { col: usize, row: usize };
 
 /// Write data to the PTY's input pipe (us -> child stdin).
 fn writeToPty(surface: *Surface, data: []const u8) void {
@@ -119,7 +120,7 @@ pub fn viewportOffset() usize {
 }
 
 /// Convert mouse position to terminal cell coordinates.
-pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
+pub fn mouseToCell(xpos: f64, ypos: f64) CellPos {
     const padding_d: f64 = 10;
     const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const sidebar_d: f64 = @floatCast(titlebar.sidebarWidth());
@@ -128,6 +129,33 @@ pub fn mouseToCell(xpos: f64, ypos: f64) struct { col: usize, row: usize } {
 
     const col = if (col_f < 0) 0 else if (col_f >= @as(f64, @floatFromInt(AppWindow.term_cols))) AppWindow.term_cols - 1 else @as(usize, @intFromFloat(col_f));
     const row = if (row_f < 0) 0 else if (row_f >= @as(f64, @floatFromInt(AppWindow.term_rows))) AppWindow.term_rows - 1 else @as(usize, @intFromFloat(row_f));
+
+    return .{ .col = col, .row = row };
+}
+
+fn splitRectForSurface(surface: *Surface) ?split_layout.SplitRect {
+    for (0..split_layout.g_split_rect_count) |i| {
+        const rect = split_layout.g_split_rects[i];
+        if (rect.surface == surface) return rect;
+    }
+    return null;
+}
+
+fn viewportOffsetForSurface(surface: *Surface) usize {
+    return surface.terminal.screens.active.pages.scrollbar().offset;
+}
+
+/// Convert a window mouse position to a cell in the clicked split surface.
+fn mouseToSurfaceCell(surface: *Surface, xpos: f64, ypos: f64) CellPos {
+    const rect = splitRectForSurface(surface) orelse return mouseToCell(xpos, ypos);
+    const pad = surface.getPadding();
+    const col_f = (xpos - @as(f64, @floatFromInt(rect.x)) - @as(f64, @floatFromInt(pad.left))) / @as(f64, @floatCast(font.cell_width));
+    const row_f = (ypos - @as(f64, @floatFromInt(rect.y)) - @as(f64, @floatFromInt(pad.top))) / @as(f64, @floatCast(font.cell_height));
+    const cols = @max(@as(usize, 1), @as(usize, @intCast(surface.size.grid.cols)));
+    const rows = @max(@as(usize, 1), @as(usize, @intCast(surface.size.grid.rows)));
+
+    const col = if (col_f < 0) 0 else if (col_f >= @as(f64, @floatFromInt(cols))) cols - 1 else @as(usize, @intFromFloat(col_f));
+    const row = if (row_f < 0) 0 else if (row_f >= @as(f64, @floatFromInt(rows))) rows - 1 else @as(usize, @intFromFloat(row_f));
 
     return .{ .col = col, .row = row };
 }
@@ -581,6 +609,159 @@ fn handleSidebarPress(xpos: f64, ypos: f64) void {
     }
 }
 
+fn viewportCellCodepoint(surface: *Surface, col: usize, row: usize) u21 {
+    const cell_data = surface.terminal.screens.active.pages.getCell(.{ .viewport = .{
+        .x = @intCast(col),
+        .y = @intCast(row),
+    } }) orelse return 0;
+    return @intCast(cell_data.cell.codepoint());
+}
+
+fn isPreviewTokenDelimiter(cp: u21) bool {
+    if (cp == 0 or cp <= 0x20) return true;
+    return switch (cp) {
+        '"', '\'', '`', '<', '>', '(', ')', '[', ']', '{', '}', '|', '\t', '\r', '\n' => true,
+        else => false,
+    };
+}
+
+fn isPreviewTokenTrimByte(ch: u8) bool {
+    return switch (ch) {
+        '.', ',', ';', ':', '!', '?', ')', ']', '}', '"' => true,
+        else => false,
+    };
+}
+
+fn trimPreviewToken(token: []const u8) []const u8 {
+    var start: usize = 0;
+    var end: usize = token.len;
+    while (start < end and (token[start] == '\'' or token[start] == '"' or token[start] == '`')) : (start += 1) {}
+    while (end > start and isPreviewTokenTrimByte(token[end - 1])) : (end -= 1) {}
+    return token[start..end];
+}
+
+fn endsWithIgnoreCase(text: []const u8, suffix: []const u8) bool {
+    if (text.len < suffix.len) return false;
+    return std.ascii.eqlIgnoreCase(text[text.len - suffix.len ..], suffix);
+}
+
+fn isPreviewImagePath(path: []const u8) bool {
+    return endsWithIgnoreCase(path, ".png") or
+        endsWithIgnoreCase(path, ".jpg") or
+        endsWithIgnoreCase(path, ".jpeg") or
+        endsWithIgnoreCase(path, ".gif") or
+        endsWithIgnoreCase(path, ".bmp") or
+        endsWithIgnoreCase(path, ".webp");
+}
+
+fn looksLikePreviewPath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (std.mem.startsWith(u8, path, "http://") or std.mem.startsWith(u8, path, "https://")) return false;
+    if (path[0] == '~') return true;
+    if (path.len >= 2 and path[1] == ':') return true;
+    if (std.mem.indexOfScalar(u8, path, '/') != null) return true;
+    if (std.mem.indexOfScalar(u8, path, '\\') != null) return true;
+    return endsWithIgnoreCase(path, ".pdf") or isPreviewImagePath(path);
+}
+
+fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?[]u8 {
+    const cols = @as(usize, @intCast(surface.size.grid.cols));
+    const rows = @as(usize, @intCast(surface.size.grid.rows));
+    if (cols == 0 or rows == 0 or cell_pos.row >= rows) return null;
+    const click_col = @min(cell_pos.col, cols - 1);
+
+    surface.render_state.mutex.lock();
+    defer surface.render_state.mutex.unlock();
+
+    if (isPreviewTokenDelimiter(viewportCellCodepoint(surface, click_col, cell_pos.row))) return null;
+
+    var start = click_col;
+    while (start > 0) {
+        const cp = viewportCellCodepoint(surface, start - 1, cell_pos.row);
+        if (isPreviewTokenDelimiter(cp)) break;
+        start -= 1;
+    }
+
+    var end = click_col + 1;
+    while (end < cols) : (end += 1) {
+        const cp = viewportCellCodepoint(surface, end, cell_pos.row);
+        if (isPreviewTokenDelimiter(cp)) break;
+    }
+
+    var token: std.ArrayListUnmanaged(u8) = .empty;
+    defer token.deinit(allocator);
+    var col = start;
+    while (col < end) : (col += 1) {
+        const cp = viewportCellCodepoint(surface, col, cell_pos.row);
+        if (isPreviewTokenDelimiter(cp)) break;
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cp, &buf) catch continue;
+        token.appendSlice(allocator, buf[0..len]) catch return null;
+    }
+
+    const trimmed = trimPreviewToken(token.items);
+    if (!looksLikePreviewPath(trimmed)) return null;
+    return allocator.dupe(u8, trimmed) catch null;
+}
+
+fn appendShellQuoted(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
+    try list.append(allocator, '\'');
+    for (text) |ch| {
+        if (ch == '\'') {
+            try list.appendSlice(allocator, "'\\''");
+        } else {
+            try list.append(allocator, ch);
+        }
+    }
+    try list.append(allocator, '\'');
+}
+
+fn buildPreviewCommand(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    var cmd: std.ArrayListUnmanaged(u8) = .empty;
+
+    if (endsWithIgnoreCase(path, ".pdf")) {
+        cmd.appendSlice(allocator, "pdfcat ") catch {
+            cmd.deinit(allocator);
+            return null;
+        };
+    } else if (isPreviewImagePath(path)) {
+        cmd.appendSlice(allocator, "imgcat ") catch {
+            cmd.deinit(allocator);
+            return null;
+        };
+    } else {
+        cmd.appendSlice(allocator, "less ") catch {
+            cmd.deinit(allocator);
+            return null;
+        };
+    }
+    appendShellQuoted(&cmd, allocator, path) catch {
+        cmd.deinit(allocator);
+        return null;
+    };
+    cmd.append(allocator, '\r') catch {
+        cmd.deinit(allocator);
+        return null;
+    };
+    return cmd.toOwnedSlice(allocator) catch {
+        cmd.deinit(allocator);
+        return null;
+    };
+}
+
+fn openPreviewPanelForCell(surface: *Surface, cell_pos: CellPos) bool {
+    const allocator = AppWindow.g_allocator orelse return false;
+    const path = extractPreviewPathAtCell(allocator, surface, cell_pos) orelse return false;
+    defer allocator.free(path);
+
+    const command = buildPreviewCommand(allocator, path) orelse return false;
+    defer allocator.free(command);
+
+    const preview_surface = AppWindow.splitFocusedReturningSurface(.right) orelse return false;
+    writeTextToSurfacePty(preview_surface, command);
+    return true;
+}
+
 fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
     overlays.startupShortcutsDismiss();
     if (overlays.sessionLauncherVisible()) {
@@ -756,8 +937,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 }
             }
 
-            const cell_pos = mouseToCell(xpos, ypos);
-            const abs_row = viewportOffset() + cell_pos.row;
+            const cell_pos = mouseToSurfaceCell(clicked_surface, xpos, ypos);
+            if (ev.ctrl and !ev.shift and !ev.alt and openPreviewPanelForCell(clicked_surface, cell_pos)) return;
+
+            const abs_row = viewportOffsetForSurface(clicked_surface) + cell_pos.row;
             // Start selection on the clicked surface
             clicked_surface.selection.start_col = cell_pos.col;
             clicked_surface.selection.start_row = abs_row;
@@ -1060,24 +1243,31 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     // Normal selection handling
     if (!g_selecting) return;
 
-    const cell_pos = mouseToCell(xpos, ypos);
-    const abs_row = viewportOffset() + cell_pos.row;
-    AppWindow.activeSelection().end_col = cell_pos.col;
-    AppWindow.activeSelection().end_row = abs_row;
+    const surface = AppWindow.activeSurface() orelse return;
+    const selection = &surface.selection;
+    const cell_pos = mouseToSurfaceCell(surface, xpos, ypos);
+    const abs_row = viewportOffsetForSurface(surface) + cell_pos.row;
+    selection.end_col = cell_pos.col;
+    selection.end_row = abs_row;
 
     const threshold = font.cell_width * 0.6;
-    const padding_d: f64 = 10;
-    const sidebar_d: f64 = @floatCast(titlebar.sidebarWidth());
-    const click_cell_x = g_click_x - sidebar_d - padding_d - @as(f64, @floatFromInt(AppWindow.activeSelection().start_col)) * @as(f64, font.cell_width);
-    const drag_cell_x = xpos - sidebar_d - padding_d - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, font.cell_width);
+    const grid_left = blk: {
+        if (splitRectForSurface(surface)) |rect| {
+            const pad = surface.getPadding();
+            break :blk @as(f64, @floatFromInt(rect.x)) + @as(f64, @floatFromInt(pad.left));
+        }
+        break :blk @as(f64, @floatCast(titlebar.sidebarWidth())) + 10;
+    };
+    const click_cell_x = g_click_x - grid_left - @as(f64, @floatFromInt(selection.start_col)) * @as(f64, @floatCast(font.cell_width));
+    const drag_cell_x = xpos - grid_left - @as(f64, @floatFromInt(cell_pos.col)) * @as(f64, @floatCast(font.cell_width));
 
-    const same_cell = (AppWindow.activeSelection().start_col == cell_pos.col and AppWindow.activeSelection().start_row == abs_row);
+    const same_cell = (selection.start_col == cell_pos.col and selection.start_row == abs_row);
     if (same_cell) {
         const moved_right = drag_cell_x >= threshold and click_cell_x < threshold;
         const moved_left = drag_cell_x < threshold and click_cell_x >= threshold;
-        AppWindow.activeSelection().active = moved_right or moved_left;
+        selection.active = moved_right or moved_left;
     } else {
-        AppWindow.activeSelection().active = true;
+        selection.active = true;
     }
 }
 

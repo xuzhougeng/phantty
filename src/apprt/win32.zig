@@ -593,12 +593,18 @@ pub const CharEvent = struct {
     alt: bool = false,
 };
 
+pub const MouseButton = enum { left, right, middle };
+pub const MouseButtonAction = enum { press, release, double_click };
+
 /// Mouse button events
 pub const MouseButtonEvent = struct {
-    button: enum { left, right, middle },
-    action: enum { press, release, double_click },
+    button: MouseButton,
+    action: MouseButtonAction,
     x: i32,
     y: i32,
+    ctrl: bool = false,
+    shift: bool = false,
+    alt: bool = false,
 };
 
 /// Mouse move events
@@ -1082,6 +1088,19 @@ fn getModifiers() struct { ctrl: bool, shift: bool, alt: bool } {
     };
 }
 
+fn pushMouseButtonEvent(w: *Window, button: MouseButton, action: MouseButtonAction, x: i32, y: i32) void {
+    const mods = getModifiers();
+    w.mouse_button_events.push(.{
+        .button = button,
+        .action = action,
+        .x = x,
+        .y = y,
+        .ctrl = mods.ctrl,
+        .shift = mods.shift,
+        .alt = mods.alt,
+    });
+}
+
 fn getResizeBorderThickness() i32 {
     // SM_CXSIZEFRAME + SM_CXPADDEDBORDER gives the total resize border width
     return GetSystemMetrics(SM_CXSIZEFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
@@ -1294,7 +1313,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 .y = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF)))),
             };
             _ = ScreenToClient(hwnd, &pt);
-            w.mouse_button_events.push(.{ .button = .middle, .action = .release, .x = pt.x, .y = pt.y });
+            pushMouseButtonEvent(w, .middle, .release, pt.x, pt.y);
             return 0;
         },
         WM_NCLBUTTONUP => {
@@ -1386,7 +1405,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
                 return 0;
             }
 
-            w.mouse_button_events.push(.{ .button = .left, .action = .press, .x = x, .y = y });
+            pushMouseButtonEvent(w, .left, .press, x, y);
             // Capture mouse so we get move events outside the window during drag
             _ = SetCapture(hwnd);
             return 0;
@@ -1396,11 +1415,11 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
             // Double-click in titlebar
             if (y < w.titlebar_height) {
-                w.mouse_button_events.push(.{ .button = .left, .action = .double_click, .x = x, .y = y });
+                pushMouseButtonEvent(w, .left, .double_click, x, y);
                 return 0;
             }
             if (w.sidebar_width > 0 and x >= 0 and x < w.sidebar_width) {
-                w.mouse_button_events.push(.{ .button = .left, .action = .double_click, .x = x, .y = y });
+                pushMouseButtonEvent(w, .left, .double_click, x, y);
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1408,32 +1427,32 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         WM_LBUTTONUP => {
             const x: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
-            w.mouse_button_events.push(.{ .button = .left, .action = .release, .x = x, .y = y });
+            pushMouseButtonEvent(w, .left, .release, x, y);
             _ = ReleaseCapture();
             return 0;
         },
         WM_RBUTTONDOWN => {
             const x: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
-            w.mouse_button_events.push(.{ .button = .right, .action = .press, .x = x, .y = y });
+            pushMouseButtonEvent(w, .right, .press, x, y);
             return 0;
         },
         WM_RBUTTONUP => {
             const x: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
-            w.mouse_button_events.push(.{ .button = .right, .action = .release, .x = x, .y = y });
+            pushMouseButtonEvent(w, .right, .release, x, y);
             return 0;
         },
         WM_MBUTTONDOWN => {
             const x: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
-            w.mouse_button_events.push(.{ .button = .middle, .action = .press, .x = x, .y = y });
+            pushMouseButtonEvent(w, .middle, .press, x, y);
             return 0;
         },
         WM_MBUTTONUP => {
             const x: i32 = @as(i16, @bitCast(@as(u16, @intCast(lParam & 0xFFFF))));
             const y: i32 = @as(i16, @bitCast(@as(u16, @intCast((lParam >> 16) & 0xFFFF))));
-            w.mouse_button_events.push(.{ .button = .middle, .action = .release, .x = x, .y = y });
+            pushMouseButtonEvent(w, .middle, .release, x, y);
             return 0;
         },
         WM_MOUSEMOVE => {
