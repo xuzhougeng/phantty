@@ -8,6 +8,7 @@ const std = @import("std");
 const Config = @import("config.zig");
 const directwrite = @import("directwrite.zig");
 const App = @import("App.zig");
+const image_decoder = @import("image_decoder.zig");
 
 // ============================================================================
 // Font Discovery Test Functions (use --list-fonts or --test-font-discovery)
@@ -75,6 +76,7 @@ fn testFontDiscovery(allocator: std.mem.Allocator) !void {
 
 pub fn main() !void {
     std.debug.print("Phantty starting...\n", .{});
+    image_decoder.install();
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

@@ -18,6 +18,9 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const ghostty_vt = @import("ghostty-vt");
 const Surface = @import("../Surface.zig");
+const c = @cImport({
+    @cInclude("glad/gl.h");
+});
 
 const Renderer = @This();
 
@@ -33,6 +36,7 @@ pub const MAX_CELLS: usize = 30000;
 
 /// Max codepoints per grapheme cluster (covers flags, ZWJ sequences, etc.)
 const MAX_GRAPHEME: usize = 8;
+pub const MAX_KITTY_PLACEMENTS: usize = 512;
 
 // ============================================================================
 // Cell Types
@@ -72,6 +76,44 @@ pub const SnapCell = struct {
     wide: enum(u2) { narrow = 0, wide = 1, spacer_tail = 2, spacer_head = 3 } = .narrow,
     grapheme: [MAX_GRAPHEME]u21 = .{0} ** MAX_GRAPHEME,
     grapheme_len: u4 = 0, // 0 = single codepoint, >0 = multi-codepoint cluster
+};
+
+pub const KittyTexture = struct {
+    image_id: u32,
+    width: u32,
+    height: u32,
+    transmit_time: std.time.Instant,
+    texture: GLuint,
+};
+
+pub const KittyPendingUpload = struct {
+    image_id: u32,
+    width: u32,
+    height: u32,
+    transmit_time: std.time.Instant,
+    rgba: []u8,
+};
+
+pub const KittyLayer = enum {
+    below_bg,
+    below_text,
+    above_text,
+};
+
+pub const KittyPlacement = struct {
+    image_id: u32,
+    grid_col: i32,
+    grid_row: i32,
+    offset_x: f32,
+    offset_y: f32,
+    width: f32,
+    height: f32,
+    uv_left: f32,
+    uv_top: f32,
+    uv_right: f32,
+    uv_bottom: f32,
+    z: i32,
+    layer: KittyLayer,
 };
 
 /// Cursor style enum matching ghostty's
@@ -115,6 +157,7 @@ last_cursor_x: usize,
 last_cols: usize,
 last_rows: usize,
 last_selection_active: bool,
+last_kitty_dirty: bool,
 
 /// Cached cursor state (for lock-free rendering)
 cached_cursor_x: usize,
@@ -154,6 +197,11 @@ fbo_height: u32,
 /// Whether FBO has been initialized
 fbo_initialized: bool,
 
+/// Kitty graphics renderer state.
+kitty_textures: std.ArrayListUnmanaged(KittyTexture),
+kitty_pending_uploads: std.ArrayListUnmanaged(KittyPendingUpload),
+kitty_placements: std.ArrayListUnmanaged(KittyPlacement),
+
 // ============================================================================
 // Lifecycle
 // ============================================================================
@@ -183,6 +231,7 @@ pub fn init(surface: *Surface) Renderer {
         .last_cols = 0,
         .last_rows = 0,
         .last_selection_active = false,
+        .last_kitty_dirty = false,
         .cached_cursor_x = 0,
         .cached_cursor_y = 0,
         .cached_cursor_style = .block,
@@ -199,12 +248,17 @@ pub fn init(surface: *Surface) Renderer {
         .fbo_width = 0,
         .fbo_height = 0,
         .fbo_initialized = false,
+        .kitty_textures = .empty,
+        .kitty_pending_uploads = .empty,
+        .kitty_placements = .empty,
     };
 }
 
 /// Clean up renderer resources.
 /// Note: FBO cleanup must be done by AppWindow which has GL context.
 pub fn deinit(self: *Renderer) void {
+    self.deinitKittyResources();
+
     // FBO resources are cleaned up by AppWindow.cleanupRendererFBO()
     // We just reset our state
     self.fbo = 0;
@@ -212,6 +266,16 @@ pub fn deinit(self: *Renderer) void {
     self.fbo_width = 0;
     self.fbo_height = 0;
     self.fbo_initialized = false;
+}
+
+fn deinitKittyResources(self: *Renderer) void {
+    self.kitty_textures.deinit(self.surface.allocator);
+
+    for (self.kitty_pending_uploads.items) |pending| {
+        self.surface.allocator.free(pending.rgba);
+    }
+    self.kitty_pending_uploads.deinit(self.surface.allocator);
+    self.kitty_placements.deinit(self.surface.allocator);
 }
 
 // ============================================================================

@@ -13,6 +13,7 @@ const AppWindow = @import("../AppWindow.zig");
 const font = AppWindow.font;
 const tab = AppWindow.tab;
 const gl_init = AppWindow.gl_init;
+const image_renderer = @import("image_renderer.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -113,6 +114,7 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         if (viewport_active != rend.last_viewport_active) break :blk true;
         if (terminal.rows != rend.last_rows or terminal.cols != rend.last_cols) break :blk true;
         if (selection_active != rend.last_selection_active) break :blk true;
+        if (screen.kitty_images.dirty != rend.last_kitty_dirty) break :blk true;
         if (AppWindow.input.g_selecting) break :blk true;
         // Cursor position changed — need to rebuild so cursor bg is at the right cell
         if (screen.cursor.x != rend.last_cursor_x or
@@ -164,6 +166,7 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         // Snapshot cell data under the lock — fast memcpy of resolved colors
         // and codepoints. Like Ghostty's RenderState.update() fastmem.copy.
         snapshotCells(rend, terminal);
+        image_renderer.snapshot(rend, terminal);
 
         // Debug: check for cursor/content mismatch
         if (rend.cached_cursor_y >= rend.snap_rows and rend.snap_rows > 0) {
@@ -185,6 +188,7 @@ pub fn updateTerminalCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) bool
         rend.last_rows = terminal.rows;
         rend.last_cols = terminal.cols;
         rend.last_selection_active = selection_active;
+        rend.last_kitty_dirty = screen.kitty_images.dirty;
 
         // Clear dirty flags after snapshot
         terminal.flags.dirty = .{};
@@ -210,6 +214,7 @@ pub fn rebuildCells(rend: *Renderer) void {
     rend.bg_cell_count = 0;
     rend.fg_cell_count = 0;
     rend.color_fg_cell_count = 0;
+    image_renderer.uploadPending(rend);
 
     for (0..render_rows) |row_idx| {
         const row_f: f32 = @floatFromInt(row_idx);
@@ -265,6 +270,7 @@ pub fn rebuildCells(rend: *Renderer) void {
             }
 
             const char = sc.codepoint;
+            if (char == ghostty_vt.kitty.graphics.unicode.placeholder) continue;
             if (char != 0 and char != ' ') {
                 // Track if we composed a regional indicator pair (for 2-cell width)
                 var composed_ri_pair = false;
@@ -371,6 +377,8 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
     const gl = AppWindow.gl;
     const g_theme = AppWindow.g_theme;
 
+    image_renderer.draw(rend, window_height, offset_x, offset_y, .below_bg);
+
     // --- Draw BG cells ---
     if (rend.bg_cell_count > 0 and gl_init.bg_shader != 0) {
         gl.UseProgram.?(gl_init.bg_shader);
@@ -384,6 +392,8 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
         gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), &rend.bg_cells);
         gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count)); gl_init.g_draw_call_count += 1;
     }
+
+    image_renderer.draw(rend, window_height, offset_x, offset_y, .below_text);
 
     // --- Draw FG cells ---
     if (rend.fg_cell_count > 0 and gl_init.fg_shader != 0) {
@@ -427,6 +437,8 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
         // Restore normal blend mode for subsequent draws (cursor, titlebar, etc.)
         gl.BlendFunc.?(c.GL_SRC_ALPHA, c.GL_ONE_MINUS_SRC_ALPHA);
     }
+
+    image_renderer.draw(rend, window_height, offset_x, offset_y, .above_text);
 
     // --- Cursor overlay from cached state ---
     if (rend.cached_viewport_at_bottom and rend.cached_cursor_visible) {

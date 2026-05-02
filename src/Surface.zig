@@ -236,6 +236,8 @@ pub fn init(
         .rows = rows,
         .max_scrollback = scrollback_limit,
         .default_modes = .{ .grapheme_cluster = true },
+        .kitty_image_storage_limit = 50 * 1024 * 1024,
+        .kitty_image_loading_limits = .all,
     }) catch |err| {
         return err;
     };
@@ -458,6 +460,8 @@ pub fn setScreenSize(
     self.size.screen.height = screen_height;
     self.size.cell.width = cell_width;
     self.size.cell.height = cell_height;
+    self.terminal.width_px = @intFromFloat(@as(f32, @floatFromInt(self.size.grid.cols)) * cell_width);
+    self.terminal.height_px = @intFromFloat(@as(f32, @floatFromInt(self.size.grid.rows)) * cell_height);
 
     // Store explicit padding (used for rendering offset)
     self.size.padding = explicit_padding;
@@ -478,6 +482,8 @@ pub fn setScreenSize(
     const changed = (self.size.grid.cols != new_cols or self.size.grid.rows != new_rows);
     self.size.grid.cols = new_cols;
     self.size.grid.rows = new_rows;
+    self.terminal.width_px = @intFromFloat(@as(f32, @floatFromInt(new_cols)) * cell_width);
+    self.terminal.height_px = @intFromFloat(@as(f32, @floatFromInt(new_rows)) * cell_height);
 
     // Queue resize to IO thread if grid dimensions changed
     if (changed) {

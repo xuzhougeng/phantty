@@ -8,6 +8,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "tools",
         "pkg",
         "vendor",
     },

@@ -25,6 +25,11 @@ pub fn build(b: *std.Build) void {
         .simd = false,
     })) |dep| {
         exe_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+        exe_mod.addIncludePath(dep.path("src/stb"));
+        exe_mod.addCSourceFile(.{
+            .file = dep.path("src/stb/stb.c"),
+            .flags = &.{},
+        });
     }
 
     // Add libxev dependency (xev event loop for IO thread)

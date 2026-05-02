@@ -90,6 +90,31 @@ Options:
   --help                       Show help
 ```
 
+## Remote Image Viewing
+
+Phantty now accepts Kitty Graphics protocol image output, so remote shells can
+display inline images if they emit `imgcat`/`pdfcat` style escape sequences.
+
+This repository includes two helper scripts for server-side use:
+
+- `tools/imgcat.py` — send an image file to the terminal
+- `tools/pdfcat.py` — rasterize one or more PDF pages and send them to the terminal
+
+Examples:
+
+```bash
+python3 tools/imgcat.py screenshot.png
+python3 tools/imgcat.py diagram.jpg --cols 100
+python3 tools/pdfcat.py paper.pdf --page 1
+python3 tools/pdfcat.py slides.pdf --page 2 --page 3 --cols 120
+```
+
+Notes:
+
+- `imgcat.py` sends PNG directly. Non-PNG inputs require Pillow or ImageMagick.
+- `pdfcat.py` requires one of `pdftoppm`, `mutool`, or ImageMagick on the server.
+- The scripts are meant to run on the remote machine inside Phantty, not on Windows host side.
+
 ## Configuration
 
 Phantty uses a Ghostty-compatible config file format (`key = value` pairs). The config file is loaded from `%APPDATA%\phantty\config`.
