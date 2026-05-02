@@ -182,6 +182,13 @@ pub const FontWeight = enum {
 /// Font family name.
 @"font-family": []const u8 = "JetBrains Mono",
 
+/// Preferred family for CJK fallback glyphs. Used before generic system fallback.
+@"font-family-cjk": ?[]const u8 = null,
+
+/// Comma-separated fallback family priority list. These are tried before
+/// generic system-wide fallback scanning.
+@"font-family-fallback": ?[]const u8 = null,
+
 /// Font weight/style. Ghostty default: regular (default).
 @"font-style": FontWeight = .regular,
 
@@ -435,6 +442,10 @@ fn parseContent(self: *Config, allocator: std.mem.Allocator, content: []const u8
 fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, value: []const u8, base_dir: []const u8) void {
     if (std.mem.eql(u8, key, "font-family")) {
         self.@"font-family" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "font-family-cjk")) {
+        self.@"font-family-cjk" = self.dupeString(allocator, value) orelse return;
+    } else if (std.mem.eql(u8, key, "font-family-fallback")) {
+        self.@"font-family-fallback" = self.dupeString(allocator, value) orelse return;
     } else if (std.mem.eql(u8, key, "font-style")) {
         if (FontWeight.parse(value)) |w| {
             self.@"font-style" = w;
@@ -792,6 +803,8 @@ pub fn printHelp() void {
         \\Options:
         \\  --font-family <name>         Font family (default: embedded fallback)
         \\  -f <name>                    Alias for --font-family
+        \\  --font-family-cjk <name>     Preferred font for Chinese/Japanese/Korean glyphs
+        \\  --font-family-fallback <csv> Comma-separated fallback family priority list
         \\  --font-style <style>         Font weight (default: regular)
         \\                               Values: thin, extra-light, light, regular, medium,
         \\                                       semi-bold, bold, extra-bold, black
@@ -837,6 +850,8 @@ pub fn printHelp() void {
         \\Config file uses Ghostty's key = value format. Example:
         \\
         \\  font-family = Cascadia Code
+        \\  font-family-cjk = Sarasa Mono SC
+        \\  font-family-fallback = Sarasa Mono SC, Noto Sans Mono CJK SC, Microsoft YaHei UI
         \\  font-size = 16
         \\  theme = Catppuccin Mocha
         \\  cursor-style = bar
@@ -1037,6 +1052,8 @@ const default_config_template =
     \\
     \\# Font
     \\# font-family = JetBrains Mono
+    \\# font-family-cjk = Sarasa Mono SC
+    \\# font-family-fallback = Sarasa Mono SC, Noto Sans Mono CJK SC, Microsoft YaHei UI
     \\# font-style = regular
     \\# font-size = 13
     \\

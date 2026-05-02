@@ -104,6 +104,8 @@ pub threadlocal var g_font_discovery: ?*directwrite.FontDiscovery = null;
 pub threadlocal var g_fallback_faces: std.AutoHashMapUnmanaged(u32, freetype.Face) = .empty; // codepoint -> fallback face
 pub threadlocal var g_no_fallback: std.AutoHashMapUnmanaged(u32, void) = .empty; // codepoints with no fallback (negative cache)
 pub threadlocal var g_font_size: u32 = DEFAULT_FONT_SIZE;
+pub threadlocal var g_cjk_font_family: ?[]const u8 = null;
+pub threadlocal var g_fallback_font_families: ?[]const u8 = null;
 
 // HarfBuzz shaping state
 pub threadlocal var g_hb_buf: ?harfbuzz.Buffer = null;
@@ -121,6 +123,239 @@ pub threadlocal var g_bell_emoji_face: ?freetype.Face = null;
 /// Convert FreeType 26.6 fixed-point to f64 (like Ghostty)
 fn f26dot6ToF64(v: anytype) f64 {
     return @as(f64, @floatFromInt(v)) / 64.0;
+}
+
+const MeasuredFaceMetrics = struct {
+    cell_width: f64,
+    ascent: f64,
+    descent: f64,
+    line_gap: f64,
+    cap_height: f64,
+    ex_height: f64,
+    ascii_height: f64,
+    ic_width: f64,
+
+    fn lineHeight(self: MeasuredFaceMetrics) f64 {
+        return self.ascent - self.descent + self.line_gap;
+    }
+};
+
+fn glyphBitmapHeight(face: freetype.Face, codepoint: u32) ?f64 {
+    const glyph_index = face.getCharIndex(codepoint) orelse return null;
+    face.loadGlyph(glyph_index, .{ .target = .normal }) catch return null;
+    face.renderGlyph(.normal) catch return null;
+    return @floatFromInt(face.handle.*.glyph.*.bitmap.rows);
+}
+
+fn measureAsciiHeight(face: freetype.Face) f64 {
+    var top: i32 = std.math.maxInt(i32);
+    var bottom: i32 = std.math.minInt(i32);
+    var found = false;
+
+    for (32..127) |cp| {
+        const glyph_index = face.getCharIndex(@intCast(cp)) orelse continue;
+        face.loadGlyph(glyph_index, .{ .target = .normal }) catch continue;
+        face.renderGlyph(.normal) catch continue;
+
+        const glyph = face.handle.*.glyph;
+        const glyph_top = glyph.*.bitmap_top;
+        const glyph_bottom = glyph_top - @as(i32, @intCast(glyph.*.bitmap.rows));
+        top = @min(top, glyph_top);
+        bottom = @max(bottom, glyph_bottom);
+        found = true;
+    }
+
+    if (!found) return 0;
+    return @floatFromInt(top - bottom);
+}
+
+fn measureFaceMetrics(face: freetype.Face) MeasuredFaceMetrics {
+    const size_metrics = face.handle.*.size.*.metrics;
+    const px_per_em: f64 = @floatFromInt(size_metrics.y_ppem);
+    const units_per_em: f64 = blk: {
+        if (face.getSfntTable(.head)) |head| break :blk @floatFromInt(head.Units_Per_EM);
+        if (face.handle.*.face_flags & freetype.c.FT_FACE_FLAG_SCALABLE != 0) {
+            break :blk @floatFromInt(face.handle.*.units_per_EM);
+        }
+        break :blk @floatFromInt(size_metrics.y_ppem);
+    };
+    const px_per_unit = px_per_em / units_per_em;
+
+    const ascent: f64, const descent: f64, const line_gap: f64 = vertical_metrics: {
+        const hhea_ = face.getSfntTable(.hhea);
+        const os2_ = face.getSfntTable(.os2);
+
+        const hhea = hhea_ orelse {
+            const ft_ascender = f26dot6ToF64(size_metrics.ascender);
+            const ft_descender = f26dot6ToF64(size_metrics.descender);
+            const ft_height = f26dot6ToF64(size_metrics.height);
+            break :vertical_metrics .{
+                ft_ascender,
+                ft_descender,
+                ft_height + ft_descender - ft_ascender,
+            };
+        };
+
+        const hhea_ascent: f64 = @floatFromInt(hhea.Ascender);
+        const hhea_descent: f64 = @floatFromInt(hhea.Descender);
+        const hhea_line_gap: f64 = @floatFromInt(hhea.Line_Gap);
+
+        const os2 = os2_ orelse break :vertical_metrics .{
+            hhea_ascent * px_per_unit,
+            hhea_descent * px_per_unit,
+            hhea_line_gap * px_per_unit,
+        };
+
+        if (os2.version == 0xFFFF) break :vertical_metrics .{
+            hhea_ascent * px_per_unit,
+            hhea_descent * px_per_unit,
+            hhea_line_gap * px_per_unit,
+        };
+
+        const os2_ascent: f64 = @floatFromInt(os2.sTypoAscender);
+        const os2_descent: f64 = @floatFromInt(os2.sTypoDescender);
+        const os2_line_gap: f64 = @floatFromInt(os2.sTypoLineGap);
+
+        if (os2.fsSelection & (1 << 7) != 0) break :vertical_metrics .{
+            os2_ascent * px_per_unit,
+            os2_descent * px_per_unit,
+            os2_line_gap * px_per_unit,
+        };
+
+        if (hhea.Ascender != 0 or hhea.Descender != 0) break :vertical_metrics .{
+            hhea_ascent * px_per_unit,
+            hhea_descent * px_per_unit,
+            hhea_line_gap * px_per_unit,
+        };
+
+        if (os2_ascent != 0 or os2_descent != 0) break :vertical_metrics .{
+            os2_ascent * px_per_unit,
+            os2_descent * px_per_unit,
+            os2_line_gap * px_per_unit,
+        };
+
+        const win_ascent: f64 = @floatFromInt(os2.usWinAscent);
+        const win_descent: f64 = @floatFromInt(os2.usWinDescent);
+        break :vertical_metrics .{
+            win_ascent * px_per_unit,
+            -win_descent * px_per_unit,
+            0.0,
+        };
+    };
+
+    var max_advance: f64 = 0;
+    for (32..127) |cp| {
+        const glyph_index = face.getCharIndex(@intCast(cp)) orelse continue;
+        face.loadGlyph(glyph_index, .{ .target = .normal }) catch continue;
+        const advance = f26dot6ToF64(face.handle.*.glyph.*.advance.x);
+        max_advance = @max(max_advance, advance);
+    }
+
+    const cap_height = glyphBitmapHeight(face, 'H') orelse (0.75 * ascent);
+    const ex_height = glyphBitmapHeight(face, 'x') orelse (0.75 * cap_height);
+    const ascii_height = blk: {
+        const measured = measureAsciiHeight(face);
+        break :blk if (measured > 0) measured else 1.5 * cap_height;
+    };
+    const ic_width = blk: {
+        const glyph_index = face.getCharIndex(0x6C34) orelse break :blk @min(ascii_height, 2.0 * max_advance);
+        face.loadGlyph(glyph_index, .{ .target = .normal }) catch break :blk @min(ascii_height, 2.0 * max_advance);
+        break :blk f26dot6ToF64(face.handle.*.glyph.*.advance.x);
+    };
+
+    return .{
+        .cell_width = max_advance,
+        .ascent = ascent,
+        .descent = descent,
+        .line_gap = line_gap,
+        .cap_height = cap_height,
+        .ex_height = ex_height,
+        .ascii_height = ascii_height,
+        .ic_width = ic_width,
+    };
+}
+
+fn isCjkCodepoint(codepoint: u32) bool {
+    return (codepoint >= 0x2E80 and codepoint <= 0x2FDF) or
+        (codepoint >= 0x3000 and codepoint <= 0x30FF) or
+        (codepoint >= 0x31C0 and codepoint <= 0x31EF) or
+        (codepoint >= 0x3400 and codepoint <= 0x4DBF) or
+        (codepoint >= 0x4E00 and codepoint <= 0x9FFF) or
+        (codepoint >= 0xAC00 and codepoint <= 0xD7AF) or
+        (codepoint >= 0xF900 and codepoint <= 0xFAFF) or
+        (codepoint >= 0xFE30 and codepoint <= 0xFE6F) or
+        (codepoint >= 0xFF00 and codepoint <= 0xFFEF) or
+        (codepoint >= 0x20000 and codepoint <= 0x2FA1F);
+}
+
+fn preferredFallbackFamilies(codepoint: u32) []const []const u8 {
+    if (isCjkCodepoint(codepoint)) {
+        return &.{
+            "Maple Mono NF CN",
+            "Sarasa Mono SC",
+            "Sarasa Fixed SC",
+            "LXGW WenKai Mono",
+            "Noto Sans Mono CJK SC",
+            "Noto Sans CJK SC",
+            "Microsoft YaHei UI",
+            "Microsoft YaHei",
+            "DengXian",
+            "NSimSun",
+            "SimSun",
+        };
+    }
+
+    return &.{};
+}
+
+fn trimAsciiSpaces(value: []const u8) []const u8 {
+    return std.mem.trim(u8, value, " \t\r");
+}
+
+fn findConfiguredFallbackFont(dw: *directwrite.FontDiscovery, codepoint: u32) ?*directwrite.IDWriteFont {
+    if (isCjkCodepoint(codepoint)) {
+        if (g_cjk_font_family) |family_name| {
+            const trimmed = trimAsciiSpaces(family_name);
+            if (trimmed.len > 0) {
+                const maybe_font = dw.findFont(trimmed, .NORMAL, .NORMAL) catch null;
+                if (maybe_font) |font| {
+                    if (font.hasCharacter(codepoint)) return font;
+                    font.release();
+                }
+            }
+        }
+    }
+
+    if (g_fallback_font_families) |csv| {
+        var it = std.mem.splitScalar(u8, csv, ',');
+        while (it.next()) |family_name| {
+            const trimmed = trimAsciiSpaces(family_name);
+            if (trimmed.len == 0) continue;
+            const maybe_font = dw.findFont(trimmed, .NORMAL, .NORMAL) catch null;
+            if (maybe_font) |font| {
+                if (font.hasCharacter(codepoint)) return font;
+                font.release();
+            }
+        }
+    }
+
+    return null;
+}
+
+fn fallbackScaleFactor(primary: freetype.Face, fallback: freetype.Face, codepoint: u32) f64 {
+    const primary_metrics = measureFaceMetrics(primary);
+    const fallback_metrics = measureFaceMetrics(fallback);
+
+    const raw = if (isCjkCodepoint(codepoint))
+        primary_metrics.ic_width / @max(0.01, fallback_metrics.ic_width)
+    else
+        primary_metrics.ex_height / @max(0.01, fallback_metrics.ex_height);
+
+    return std.math.clamp(raw, 0.75, 1.35);
+}
+
+fn glyphTargetForCodepoint(codepoint: u32) freetype.LoadFlags.Target {
+    return if (isCjkCodepoint(codepoint)) .normal else .light;
 }
 
 /// Returns true if the codepoint is a Regional Indicator Symbol (used for flag emoji).
@@ -408,11 +643,12 @@ pub fn loadGlyph(codepoint: u32) ?Character {
     // Detect if this face has color glyphs (emoji fonts like Segoe UI Emoji, Noto Color Emoji).
     // Like Ghostty, we set FT_LOAD_COLOR so FreeType renders BGRA bitmaps for color glyphs.
     const is_color_face = face_to_use.hasColor();
+    const target = glyphTargetForCodepoint(codepoint);
     face_to_use.loadGlyph(@intCast(glyph_index), .{
-        .target = .light,
+        .target = target,
         .color = is_color_face,
     }) catch return null;
-    face_to_use.renderGlyph(.light) catch return null;
+    face_to_use.renderGlyph(if (isCjkCodepoint(codepoint)) .normal else .light) catch return null;
 
     const glyph = face_to_use.handle.*.glyph;
     const bitmap = glyph.*.bitmap;
@@ -601,11 +837,12 @@ pub fn loadGraphemeGlyph(base_cp: u21, extra_cps: []const u21) ?Character {
 
     // Render the glyph via FreeType using the glyph index from HarfBuzz
     const is_color_face = face_to_use.hasColor();
+    const target = glyphTargetForCodepoint(@intCast(base_cp));
     face_to_use.loadGlyph(@intCast(shaped_glyph_index), .{
-        .target = .light,
+        .target = target,
         .color = is_color_face,
     }) catch return null;
-    face_to_use.renderGlyph(.light) catch return null;
+    face_to_use.renderGlyph(if (isCjkCodepoint(@intCast(base_cp))) .normal else .light) catch return null;
 
     const glyph = face_to_use.handle.*.glyph;
     const bitmap = glyph.*.bitmap;
@@ -746,8 +983,9 @@ pub fn loadTitlebarGlyph(codepoint: u32) ?Character {
         }
     }
 
-    face_to_use.loadGlyph(@intCast(glyph_index), .{ .target = .light }) catch return null;
-    face_to_use.renderGlyph(.light) catch return null;
+    const target = glyphTargetForCodepoint(codepoint);
+    face_to_use.loadGlyph(@intCast(glyph_index), .{ .target = target }) catch return null;
+    face_to_use.renderGlyph(if (isCjkCodepoint(codepoint)) .normal else .light) catch return null;
 
     const glyph = face_to_use.handle.*.glyph;
     const bitmap = glyph.*.bitmap;
@@ -891,14 +1129,16 @@ pub fn findOrLoadFallbackFace(codepoint: u32, alloc: std.mem.Allocator) ?freetyp
     const dw = g_font_discovery orelse return null;
     const ft_lib = g_ft_lib orelse return null;
 
+    const preferred_families = preferredFallbackFamilies(codepoint);
+    const maybe_font = findConfiguredFallbackFont(dw, codepoint) orelse if (preferred_families.len > 0)
+        ((dw.findPreferredFallbackFont(codepoint, preferred_families) catch null) orelse
+            (dw.findFallbackFont(codepoint) catch null))
+    else
+        (dw.findFallbackFont(codepoint) catch null);
+
     // Use DirectWrite to find a font with this codepoint
-    const maybe_font = dw.findFallbackFont(codepoint) catch {
-        // Cache the negative result to avoid repeated DirectWrite queries
-        g_no_fallback.put(alloc, codepoint, {}) catch {};
-        return null;
-    };
     const font = maybe_font orelse {
-        // Cache the negative result
+        // Cache the negative result to avoid repeated DirectWrite queries
         g_no_fallback.put(alloc, codepoint, {}) catch {};
         return null;
     };
@@ -942,11 +1182,24 @@ pub fn findOrLoadFallbackFace(codepoint: u32, alloc: std.mem.Allocator) ?freetyp
     // Load with FreeType
     const ft_face = ft_lib.initFace(utf8_path, @intCast(face_index)) catch return null;
 
-    // Set size to match primary font
+    // Start from the primary point size, then normalize fallback metrics to
+    // the active terminal face. This follows Ghostty's overall approach of
+    // making fallback fonts interchangeable rather than same-point-size only.
     ft_face.setCharSize(0, @as(i32, @intCast(g_font_size)) * 64, 96, 96) catch {
         ft_face.deinit();
         return null;
     };
+
+    if (glyph_face) |primary_face| {
+        const scale = fallbackScaleFactor(primary_face, ft_face, codepoint);
+        if (@abs(scale - 1.0) > 0.01) {
+            const scaled_size = @max(8.0, @round(@as(f64, @floatFromInt(g_font_size)) * scale));
+            ft_face.setCharSize(0, @intFromFloat(scaled_size * 64.0), 96, 96) catch {
+                ft_face.deinit();
+                return null;
+            };
+        }
+    }
 
     // Cache the fallback face for this codepoint
     g_fallback_faces.put(alloc, codepoint, ft_face) catch {
@@ -998,118 +1251,35 @@ pub fn preloadCharacters(face: freetype.Face) void {
     }
 
     if (loadGlyph('M')) |_| {
-
-        // Get metrics like Ghostty does - from font tables with fallback to FreeType
-        const size_metrics = face.handle.*.size.*.metrics;
-        const px_per_em: f64 = @floatFromInt(size_metrics.y_ppem);
-
-        // Get units_per_em from head table or FreeType
-        const units_per_em: f64 = blk: {
-            if (face.getSfntTable(.head)) |head| {
-                break :blk @floatFromInt(head.Units_Per_EM);
-            }
-            if (face.handle.*.face_flags & freetype.c.FT_FACE_FLAG_SCALABLE != 0) {
-                break :blk @floatFromInt(face.handle.*.units_per_EM);
-            }
-            break :blk @floatFromInt(size_metrics.y_ppem);
-        };
-        const px_per_unit = px_per_em / units_per_em;
-
-        // Get vertical metrics from font tables (like Ghostty)
-        const ascent: f64, const descent: f64, const line_gap: f64 = vertical_metrics: {
-            const hhea_ = face.getSfntTable(.hhea);
-            const os2_ = face.getSfntTable(.os2);
-
-            // If no hhea table, fall back to FreeType metrics
-            const hhea = hhea_ orelse {
-                const ft_ascender = f26dot6ToF64(size_metrics.ascender);
-                const ft_descender = f26dot6ToF64(size_metrics.descender);
-                const ft_height = f26dot6ToF64(size_metrics.height);
-                break :vertical_metrics .{
-                    ft_ascender,
-                    ft_descender,
-                    ft_height + ft_descender - ft_ascender,
-                };
-            };
-
-            const hhea_ascent: f64 = @floatFromInt(hhea.Ascender);
-            const hhea_descent: f64 = @floatFromInt(hhea.Descender);
-            const hhea_line_gap: f64 = @floatFromInt(hhea.Line_Gap);
-
-            // If no OS/2 table, use hhea metrics
-            const os2 = os2_ orelse break :vertical_metrics .{
-                hhea_ascent * px_per_unit,
-                hhea_descent * px_per_unit,
-                hhea_line_gap * px_per_unit,
-            };
-
-            // Check for invalid OS/2 table
-            if (os2.version == 0xFFFF) break :vertical_metrics .{
-                hhea_ascent * px_per_unit,
-                hhea_descent * px_per_unit,
-                hhea_line_gap * px_per_unit,
-            };
-
-            const os2_ascent: f64 = @floatFromInt(os2.sTypoAscender);
-            const os2_descent: f64 = @floatFromInt(os2.sTypoDescender);
-            const os2_line_gap: f64 = @floatFromInt(os2.sTypoLineGap);
-
-            // If USE_TYPO_METRICS bit is set (bit 7), use OS/2 typo metrics
-            if (os2.fsSelection & (1 << 7) != 0) {
-                break :vertical_metrics .{
-                    os2_ascent * px_per_unit,
-                    os2_descent * px_per_unit,
-                    os2_line_gap * px_per_unit,
-                };
-            }
-
-            // Otherwise prefer hhea if available
-            if (hhea.Ascender != 0 or hhea.Descender != 0) {
-                break :vertical_metrics .{
-                    hhea_ascent * px_per_unit,
-                    hhea_descent * px_per_unit,
-                    hhea_line_gap * px_per_unit,
-                };
-            }
-
-            // Fall back to OS/2 sTypo metrics
-            if (os2_ascent != 0 or os2_descent != 0) {
-                break :vertical_metrics .{
-                    os2_ascent * px_per_unit,
-                    os2_descent * px_per_unit,
-                    os2_line_gap * px_per_unit,
-                };
-            }
-
-            // Last resort: OS/2 usWin metrics
-            const win_ascent: f64 = @floatFromInt(os2.usWinAscent);
-            const win_descent: f64 = @floatFromInt(os2.usWinDescent);
-            break :vertical_metrics .{
-                win_ascent * px_per_unit,
-                -win_descent * px_per_unit, // usWinDescent is positive, flip sign
-                0.0,
-            };
-        };
-
-        // Calculate cell dimensions like Ghostty
-        const face_height = ascent - descent + line_gap;
+        const metrics = measureFaceMetrics(face);
+        const face_height = metrics.lineHeight();
         cell_height = @floatCast(@round(face_height));
 
         // Split line gap in half for top/bottom padding (like Ghostty)
-        const half_line_gap = line_gap / 2.0;
+        const half_line_gap = metrics.line_gap / 2.0;
 
         // Calculate baseline from bottom of cell (like Ghostty)
         // face_baseline = half_line_gap - descent (descent is negative, so this adds)
-        const face_baseline = half_line_gap - descent;
+        const face_baseline = half_line_gap - metrics.descent;
         // Center the baseline by accounting for rounding difference
         const baseline_centered = face_baseline - (cell_height - face_height) / 2.0;
         cell_baseline = @floatCast(@round(baseline_centered));
 
         // Cursor height is the ascender
-        cursor_height = @floatCast(@round(ascent));
+        cursor_height = @floatCast(@round(metrics.ascent));
 
         // Get underline thickness from post table for box drawing (like Ghostty)
         const underline_thickness: f64 = ul_thick: {
+            const size_metrics = face.handle.*.size.*.metrics;
+            const px_per_em: f64 = @floatFromInt(size_metrics.y_ppem);
+            const units_per_em: f64 = blk: {
+                if (face.getSfntTable(.head)) |head| break :blk @floatFromInt(head.Units_Per_EM);
+                if (face.handle.*.face_flags & freetype.c.FT_FACE_FLAG_SCALABLE != 0) {
+                    break :blk @floatFromInt(face.handle.*.units_per_EM);
+                }
+                break :blk @floatFromInt(size_metrics.y_ppem);
+            };
+            const px_per_unit = px_per_em / units_per_em;
             if (face.getSfntTable(.post)) |post| {
                 if (post.underlineThickness != 0) {
                     break :ul_thick @as(f64, @floatFromInt(post.underlineThickness)) * px_per_unit;
@@ -1122,7 +1292,7 @@ pub fn preloadCharacters(face: freetype.Face) void {
         box_thickness = @max(1, @as(u32, @intFromFloat(@ceil(underline_thickness))));
 
         std.debug.print("Cell dimensions: {d:.0}x{d:.0} (ascent={d:.1}, descent={d:.1}, line_gap={d:.1}, baseline={d:.0}, box_thick={})\n", .{
-            cell_width, cell_height, ascent, descent, line_gap, cell_baseline, box_thickness,
+            cell_width, cell_height, metrics.ascent, metrics.descent, metrics.line_gap, cell_baseline, box_thickness,
         });
     } else {
         std.debug.print("ERROR: Could not load 'M' glyph!\n", .{});

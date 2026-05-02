@@ -688,6 +688,22 @@ pub const FontDiscovery = struct {
         return null;
     }
 
+    /// Try a preferred family list first before falling back to a blind
+    /// system-wide scan. This helps keep CJK fallback stable on Windows.
+    pub fn findPreferredFallbackFont(
+        self: *FontDiscovery,
+        codepoint: u32,
+        families: []const []const u8,
+    ) !?*IDWriteFont {
+        for (families) |family_name| {
+            const font = (try self.findFont(family_name, .NORMAL, .NORMAL)) orelse continue;
+            if (font.hasCharacter(codepoint)) return font;
+            font.release();
+        }
+
+        return null;
+    }
+
     /// List all font families (for debugging)
     pub fn listFontFamilies(self: *FontDiscovery, allocator: Allocator) ![][]const u8 {
         const count = self.system_collection.getFontFamilyCount();

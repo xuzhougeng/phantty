@@ -27,6 +27,8 @@ shell_cmd_len: usize,
 // Config values (read-only after init)
 scrollback_limit: u32,
 font_family: []const u8,
+font_family_cjk: ?[]const u8,
+font_family_fallback: ?[]const u8,
 font_weight: directwrite.DWRITE_FONT_WEIGHT,
 font_size: u32,
 cursor_style: Config.CursorStyle,
@@ -77,6 +79,8 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .shell_cmd_len = 0,
         .scrollback_limit = cfg.@"scrollback-limit",
         .font_family = cfg.@"font-family",
+        .font_family_cjk = cfg.@"font-family-cjk",
+        .font_family_fallback = cfg.@"font-family-fallback",
         .font_weight = cfg.@"font-style".toDwriteWeight(),
         .font_size = cfg.@"font-size",
         .cursor_style = cfg.@"cursor-style",
@@ -158,6 +162,8 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
 
     self.scrollback_limit = cfg.@"scrollback-limit";
     self.font_family = cfg.@"font-family";
+    self.font_family_cjk = cfg.@"font-family-cjk";
+    self.font_family_fallback = cfg.@"font-family-fallback";
     self.font_weight = cfg.@"font-style".toDwriteWeight();
     self.font_size = cfg.@"font-size";
     self.cursor_style = cfg.@"cursor-style";

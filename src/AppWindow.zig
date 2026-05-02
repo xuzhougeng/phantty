@@ -81,6 +81,8 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
 
     // Store config values we need for init
     g_requested_font = app.font_family;
+    font.g_cjk_font_family = app.font_family_cjk;
+    font.g_fallback_font_families = app.font_family_fallback;
     g_requested_weight = app.font_weight;
     font.g_font_size = app.font_size;
     g_shader_path = app.shader_path;
@@ -606,6 +608,8 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     const new_font_size = cfg.@"font-size";
     const new_weight = cfg.@"font-style".toDwriteWeight();
     const new_family = cfg.@"font-family";
+    font.g_cjk_font_family = cfg.@"font-family-cjk";
+    font.g_fallback_font_families = cfg.@"font-family-fallback";
 
     // Reload font: clear caches, load new face, recalculate metrics
     if (font.loadFontFromConfig(allocator, new_family, new_weight, new_font_size, ft_lib)) |new_face| {
