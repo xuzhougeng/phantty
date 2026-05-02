@@ -23,22 +23,51 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 
 ## Building
 
-```bash
-# Debug build (console subsystem, debug output visible)
-make debug
-
-# Release build (GUI subsystem, no background console window)
-make release
-
-# Clean build artifacts
-make clean
+```powershell
+zig build                         # Debug build for development
+zig build -Doptimize=ReleaseFast  # ReleaseFast build for distribution
+Remove-Item -Recurse -Force .\zig-out, .\.zig-cache -ErrorAction SilentlyContinue
 ```
 
-Or directly with zig:
-```bash
-zig build                          # debug
-zig build -Doptimize=ReleaseFast   # release
+The `Makefile` may still exist as a convenience wrapper, but normal Windows
+development should use PowerShell and direct `zig` commands.
+
+## Packaging
+
+Phantty now supports two Windows distribution formats:
+
+- `phantty.exe` — portable build, run directly without installation
+- `phantty-setup.exe` — installer build, installs to the current user's profile and creates a Start menu shortcut
+
+Build both artifacts with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\package.ps1
 ```
+
+This produces:
+
+```text
+zig-out\dist\portable\phantty.exe
+zig-out\dist\installer\phantty-setup.exe
+```
+
+The installer does not require administrator rights. It installs Phantty to
+`%LOCALAPPDATA%\Programs\Phantty`, adds a Start menu entry, and registers an
+uninstall entry for the current user.
+
+## GitHub Releases
+
+The GitHub Actions workflow at `.github/workflows/windows-release.yml`
+publishes Windows release assets whenever a tag matching `vX.Y.Z` is pushed.
+
+Each tagged release uploads:
+
+- `phantty-windows-portable-vX.Y.Z.zip`
+- `phantty-windows-setup-vX.Y.Z.exe`
+
+GitHub generates the release notes automatically, and the workflow prepends a
+short asset summary for the portable and installer builds.
 
 ## Usage
 
