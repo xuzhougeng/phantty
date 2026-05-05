@@ -157,7 +157,7 @@ pub threadlocal var g_allocator: ?std.mem.Allocator = null;
 // Selection is defined in Surface.zig
 const Selection = Surface.Selection;
 
-pub threadlocal var g_should_close: bool = false; // Set by Ctrl+W with 1 tab
+pub threadlocal var g_should_close: bool = false; // Set when the final tab closes
 
 // Tab model — see appwindow/tab.zig
 const TabState = tab.TabState;

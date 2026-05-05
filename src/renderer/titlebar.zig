@@ -1193,7 +1193,7 @@ pub fn renderPlaceholderTab(window_width: f32, window_height: f32, top_pad: f32)
     gl.BindVertexArray.?(gl_init.vao);
 
     const msg = "Tabs not yet implemented";
-    const hint = "Press Ctrl+Shift+T to open, Ctrl+W to close";
+    const hint = "Press Ctrl+Shift+T to open";
     const text_color = [3]f32{ 0.4, 0.4, 0.4 };
 
     // Center the message vertically and horizontally

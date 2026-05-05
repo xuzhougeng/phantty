@@ -637,11 +637,6 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         return;
     }
     // Ctrl+Shift+T and Ctrl+Shift+N are handled above (before rename guard)
-    // Ctrl+W = close focused split (or tab if no splits, or app if last tab)
-    if (ev.ctrl and ev.vk == 0x57) { // 'W'
-        AppWindow.closeFocusedSplit();
-        return;
-    }
     // Ctrl+Alt+Arrows = goto split (spatial navigation)
     if (ev.ctrl and ev.alt and !ev.shift) {
         const dir: ?SplitTree.Spatial.Direction = switch (ev.vk) {
