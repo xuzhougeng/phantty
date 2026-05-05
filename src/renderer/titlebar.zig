@@ -227,6 +227,9 @@ pub fn renderTitlebarChar(codepoint: u32, x: f32, y: f32, color: [3]f32) void {
     }
 }
 
+/// Prefix glyph for Alt+1…Alt+9 tab-switch hint (Unicode « ⌥ » OPTION KEY).
+pub const tab_shortcut_modifier_cp: u32 = 0x2325;
+
 /// Get the advance width of a titlebar glyph.
 pub fn titlebarGlyphAdvance(codepoint: u32) f32 {
     if (font.loadTitlebarGlyph(codepoint)) |g| {
@@ -537,7 +540,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
         }
 
         // Tab title text — rendered at native 14pt via titlebar font (no scaling)
-        // Shortcut label (^1 through ^0) rendered right-aligned, only for tabs 1–10 in multi-tab
+        // Shortcut label (⌥1 through ⌥0) rendered right-aligned, only for tabs 1–10 in multi-tab
         const is_renaming = tab.g_tab_rename_active and tab_idx == tab.g_tab_rename_idx;
         const title = if (is_renaming)
             tab.g_tab_rename_buf[0..tab.g_tab_rename_len]
@@ -550,7 +553,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             const shortcut_color = [3]f32{ 0.45, 0.45, 0.45 };
             const tab_pad: f32 = 12;
 
-            // Shortcut label: "^1" through "^9", "^0" for tab 10
+            // Shortcut label: "⌥1" through "⌥9", "⌥0" for tab 10
             const has_shortcut = num_tabs > 1 and tab_idx < 10;
             const shortcut_digit: u8 = if (has_shortcut)
                 (if (tab_idx == 9) '0' else @as(u8, @intCast('1' + tab_idx)))
@@ -560,7 +563,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
             // Measure shortcut width
             var shortcut_w: f32 = 0;
             if (has_shortcut) {
-                shortcut_w += titlebarGlyphAdvance('^');
+                shortcut_w += titlebarGlyphAdvance(tab_shortcut_modifier_cp);
                 shortcut_w += titlebarGlyphAdvance(@intCast(shortcut_digit));
             }
 
@@ -782,8 +785,8 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                     sc_base[2] * shortcut_opacity + bg[2] * close_opacity,
                 };
                 var sx = sc_x;
-                renderTitlebarChar('^', sx, sc_y, sc_faded);
-                sx += titlebarGlyphAdvance('^');
+                renderTitlebarChar(tab_shortcut_modifier_cp, sx, sc_y, sc_faded);
+                sx += titlebarGlyphAdvance(tab_shortcut_modifier_cp);
                 renderTitlebarChar(@intCast(shortcut_digit), sx, sc_y, sc_faded);
             }
 
@@ -846,7 +849,7 @@ pub fn renderTitlebar(window_width: f32, window_height: f32, titlebar_h: f32) vo
                 // Close button is centered on shortcut position at right edge of tab
                 const tp: f32 = 12; // tab_pad
                 const digit: u32 = if (tab_idx == 9) '0' else @as(u32, @intCast('1' + tab_idx));
-                const sc_w = titlebarGlyphAdvance('^') + titlebarGlyphAdvance(digit);
+                const sc_w = titlebarGlyphAdvance(tab_shortcut_modifier_cp) + titlebarGlyphAdvance(digit);
                 const re = cursor_x + tab_w - tp;
                 const sc_center = re - sc_w / 2;
                 const cb_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;

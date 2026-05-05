@@ -747,8 +747,8 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         return;
     }
     // Ctrl+Shift+T and Ctrl+Shift+N are handled above (before rename guard)
-    // Ctrl+Alt+Arrows = goto split (spatial navigation)
-    if (ev.ctrl and ev.alt and !ev.shift) {
+    // Alt+Arrows = goto split (spatial navigation)
+    if (ev.alt and !ev.ctrl and !ev.shift) {
         const dir: ?SplitTree.Spatial.Direction = switch (ev.vk) {
             win32_backend.VK_LEFT => .left,
             win32_backend.VK_RIGHT => .right,
@@ -786,8 +786,8 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         }
         return;
     }
-    // Ctrl+1-9 = switch to tab N
-    if (ev.ctrl and !ev.shift and ev.vk >= 0x31 and ev.vk <= 0x39) { // '1'-'9'
+    // Alt+1-9 = switch to tab N
+    if (ev.alt and !ev.ctrl and !ev.shift and ev.vk >= 0x31 and ev.vk <= 0x39) { // '1'-'9'
         const tab_idx = @as(usize, @intCast(ev.vk - 0x31));
         if (tab_idx < tab.g_tab_count) AppWindow.switchTab(tab_idx);
         return;
@@ -1606,7 +1606,7 @@ fn handleTabBarPress(xpos: f64) void {
         if (xpos >= cursor and xpos < cursor + tab_w) {
             // Check if the close button was clicked (centered on shortcut position)
             if (num_tabs > 1 and tab.g_tab_close_opacity[tab_idx] > 0.1) {
-                const sc_w: f64 = @floatCast(titlebar.titlebarGlyphAdvance('^') + titlebar.titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
+                const sc_w: f64 = @floatCast(titlebar.titlebarGlyphAdvance(titlebar.tab_shortcut_modifier_cp) + titlebar.titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
                 const sc_center = cursor + tab_w - 12 - sc_w / 2;
                 const close_btn_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
                 if (xpos >= close_btn_x and xpos < close_btn_x + tab.TAB_CLOSE_BTN_W) {
@@ -1675,7 +1675,7 @@ fn hitTestTabCloseButton(xpos: f64, tab_idx: usize) bool {
     const tab_w: f64 = if (num_tabs > 0) tab_area_w / @as(f64, @floatFromInt(num_tabs)) else tab_area_w;
 
     const tab_x = tab_w * @as(f64, @floatFromInt(tab_idx));
-    const sc_w: f64 = @floatCast(titlebar.titlebarGlyphAdvance('^') + titlebar.titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
+    const sc_w: f64 = @floatCast(titlebar.titlebarGlyphAdvance(titlebar.tab_shortcut_modifier_cp) + titlebar.titlebarGlyphAdvance(if (tab_idx == 9) @as(u32, '0') else @as(u32, @intCast('1' + tab_idx))));
     const sc_center = tab_x + tab_w - 12 - sc_w / 2;
     const close_btn_x = sc_center - tab.TAB_CLOSE_BTN_W / 2;
     return xpos >= close_btn_x and xpos < close_btn_x + tab.TAB_CLOSE_BTN_W;

@@ -281,6 +281,13 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
     var cwd_buf: [260]u16 = undefined;
     const cwd = getActiveCwd(&cwd_buf);
     const surface = tab.splitFocusedReturningSurface(allocator, direction, font.cell_width, font.cell_height, g_cursor_style, g_cursor_blink, cwd) orelse return null;
+    if (surface.ssh_connection) |conn| {
+        if (conn.password_auth) {
+            const pw = conn.password();
+            if (pw.len > 0)
+                overlays.scheduleSshPasswordForSurface(surface, pw);
+        }
+    }
     {
         overlays.g_resize_active = false;
         g_force_rebuild = true;

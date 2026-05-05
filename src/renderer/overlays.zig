@@ -99,7 +99,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+O", .action = "Split right" },
     .{ .keys = "Ctrl+Shift+E", .action = "Split down" },
     .{ .keys = "Ctrl+Shift+[ / ]", .action = "Previous / next panel" },
-    .{ .keys = "Ctrl+Alt+Arrows", .action = "Focus panel" },
+    .{ .keys = "Alt+Arrows", .action = "Focus panel" },
     .{ .keys = "Ctrl+Shift+Z", .action = "Equalize panels" },
     .{ .keys = "Ctrl+Shift+W", .action = "Close panel / tab" },
     .{ .keys = "Ctrl+Shift+C/V", .action = "Copy / paste" },
@@ -933,7 +933,7 @@ fn connectSshProfile(idx: usize) void {
             surface.setTitleOverride(server_name);
         }
         if (password.len > 0) {
-            schedulePasswordForSurface(surface, password);
+            scheduleSshPasswordForSurface(surface, password);
         }
     }
 }
@@ -955,7 +955,8 @@ fn isPortTokenSafe(value: []const u8) bool {
     return true;
 }
 
-fn schedulePasswordForSurface(surface: *Surface, password: []const u8) void {
+/// Queue password entry for a new SSH surface (delayed PTY inject), same path as launcher connect.
+pub fn scheduleSshPasswordForSurface(surface: *Surface, password: []const u8) void {
     const len = @min(password.len, SSH_FIELD_MAX);
     @memcpy(g_pending_ssh_password[0..len], password[0..len]);
     g_pending_ssh_password[len] = '\r';
