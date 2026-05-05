@@ -90,6 +90,32 @@ Options:
   --help                       Show help
 ```
 
+## Keyboard shortcuts
+
+Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys are handled first when a modal overlay is open (command center, session launcher, settings, and similar).
+
+| Shortcut | Action |
+|----------|--------|
+| **Ctrl+Shift+P** | Open command center |
+| **Ctrl+Shift+T** | New session (session launcher) |
+| **Ctrl+Shift+N** | New window |
+| **Ctrl+Shift+B** | Toggle tab sidebar |
+| **Ctrl+Shift+O** | Split to the right |
+| **Ctrl+Shift+E** | Toggle file explorer sidebar |
+| **Ctrl+Shift+W** | Close focused panel, tab, or window |
+| **Ctrl+Enter** | Maximize or restore window |
+| **Ctrl++** / **Ctrl+-** | Increase / decrease font size |
+| **Ctrl+Shift+C** | Copy selection |
+| **Ctrl+Shift+V** | Paste |
+| **Alt** + arrow keys | Move focus to adjacent panel (spatial) |
+| **Ctrl+Shift+[** | Focus previous panel (cycle) |
+| **Ctrl+Shift+]** | Focus next panel (cycle) |
+| **Ctrl+Shift+Z** | Equalize split sizes |
+| **Ctrl+Tab** | Next tab |
+| **Ctrl+Shift+Tab** | Previous tab |
+| **Alt+1**–**9** | Switch to tab 1–9 (when that tab exists) |
+| **Ctrl+,** | Open config file in the default editor |
+
 ## Remote Image Viewing
 
 Phantty now accepts Kitty Graphics protocol image output, so remote shells can

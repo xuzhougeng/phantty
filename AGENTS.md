@@ -8,6 +8,8 @@ This is a **Windows-only** project. Development is expected to happen on Windows
 
 ## Hard Rules
 
+When changing application **keyboard shortcuts** (bindings in `src/input.zig` and related input paths), **update `README.md`** so the [Keyboard shortcuts](README.md#keyboard-shortcuts) section stays accurate. Also update user-visible shortcut text in `src/renderer/overlays.zig` (startup overlay, command palette entries) when those strings describe the same bindings.
+
 When working on implementing a plan from the plans directory:
  * never deviate from the plan without asking for clear consent
  * never deem something too big and choosing not to do it in the name of pragmatism
