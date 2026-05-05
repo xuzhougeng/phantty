@@ -47,6 +47,8 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("dwmapi", .{});
     exe_mod.linkSystemLibrary("ws2_32", .{});
     exe_mod.linkSystemLibrary("mswsock", .{});
+    exe_mod.linkSystemLibrary("comdlg32", .{});
+    exe_mod.linkSystemLibrary("shell32", .{});
 
     // Add FreeType dependency (shared between main and harfbuzz)
     const freetype_dep = b.lazyDependency("freetype", .{
@@ -128,6 +130,36 @@ pub fn build(b: *std.Build) void {
     exe.subsystem = if (optimize == .Debug) .Console else .Windows;
 
     b.installArtifact(exe);
+
+    // Unit tests (zig build test)
+    const test_mod = b.createModule(.{
+        .root_source_file = b.path("src/test_main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    if (b.lazyDependency("ghostty", .{
+        .target = target,
+        .optimize = optimize,
+        .simd = false,
+    })) |dep| {
+        test_mod.addImport("ghostty-vt", dep.module("ghostty-vt"));
+    }
+
+    if (b.lazyDependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    })) |dep| {
+        test_mod.addImport("xev", dep.module("xev"));
+    }
+
+    const tests = b.addTest(.{
+        .root_module = test_mod,
+    });
+
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
 }
 
 /// Build HarfBuzz as a static C library, linking against our shared FreeType.

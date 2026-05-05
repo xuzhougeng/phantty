@@ -12,6 +12,7 @@ const font = AppWindow.font;
 const overlays = AppWindow.overlays;
 const split_layout = AppWindow.split_layout;
 const window_state = AppWindow.window_state;
+const file_explorer = AppWindow.file_explorer;
 const win32_backend = @import("apprt/win32.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
@@ -204,6 +205,7 @@ fn ensureSshAskPassScript(allocator: std.mem.Allocator) ?[]u8 {
 }
 
 fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surface, local_path: []const u8) ?[]u8 {
+    const scp = @import("scp.zig");
     const conn = surface.ssh_connection orelse {
         std.debug.print("SSH image paste skipped: no SSH profile metadata for this surface\n", .{});
         return null;
@@ -213,90 +215,12 @@ fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surf
     var keep_remote_path = false;
     defer if (!keep_remote_path) allocator.free(remote_path);
 
-    const destination = std.fmt.allocPrint(allocator, "{s}@{s}:{s}", .{ conn.user(), conn.host(), remote_path }) catch return null;
-    defer allocator.free(destination);
+    var spec_buf: [512]u8 = undefined;
+    const destination = scp.remoteSpec(&spec_buf, &conn, remote_path);
 
-    var askpass_path: ?[]u8 = null;
-    defer if (askpass_path) |path| allocator.free(path);
-    var env_map: ?std.process.EnvMap = null;
-    defer if (env_map) |*map| map.deinit();
-
-    if (conn.password_auth) {
-        askpass_path = ensureSshAskPassScript(allocator) orelse return null;
-        env_map = std.process.getEnvMap(allocator) catch return null;
-        if (env_map) |*map| {
-            map.put("SSH_ASKPASS", askpass_path.?) catch return null;
-            map.put("SSH_ASKPASS_REQUIRE", "force") catch return null;
-            map.put("DISPLAY", "phantty") catch return null;
-            map.put("PHANTTY_SSH_PASSWORD", conn.password()) catch return null;
-        }
-    }
-
-    var argv_buf: [18][]const u8 = undefined;
-    var argc: usize = 0;
-    argv_buf[argc] = "scp.exe";
-    argc += 1;
-    argv_buf[argc] = "-q";
-    argc += 1;
-    argv_buf[argc] = "-o";
-    argc += 1;
-    argv_buf[argc] = "StrictHostKeyChecking=accept-new";
-    argc += 1;
-    argv_buf[argc] = "-o";
-    argc += 1;
-    argv_buf[argc] = "ConnectTimeout=8";
-    argc += 1;
-    if (conn.password_auth) {
-        argv_buf[argc] = "-o";
-        argc += 1;
-        argv_buf[argc] = "PreferredAuthentications=password,keyboard-interactive";
-        argc += 1;
-        argv_buf[argc] = "-o";
-        argc += 1;
-        argv_buf[argc] = "PubkeyAuthentication=no";
-        argc += 1;
-        argv_buf[argc] = "-o";
-        argc += 1;
-        argv_buf[argc] = "NumberOfPasswordPrompts=1";
-        argc += 1;
-    } else {
-        argv_buf[argc] = "-o";
-        argc += 1;
-        argv_buf[argc] = "BatchMode=yes";
-        argc += 1;
-    }
-    if (conn.port().len > 0) {
-        argv_buf[argc] = "-P";
-        argc += 1;
-        argv_buf[argc] = conn.port();
-        argc += 1;
-    }
-    argv_buf[argc] = local_path;
-    argc += 1;
-    argv_buf[argc] = destination;
-    argc += 1;
-
-    std.debug.print("Uploading clipboard image over SSH: {s} -> {s}\n", .{ local_path, destination });
-    var child = std.process.Child.init(argv_buf[0..argc], allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    if (env_map) |*map| child.env_map = map;
-    child.spawn() catch |err| {
-        std.debug.print("SSH image upload failed to start: {}\n", .{err});
-        return null;
-    };
-
-    const term = child.wait() catch |err| {
-        std.debug.print("SSH image upload wait failed: {}\n", .{err});
-        return null;
-    };
-    const ok = switch (term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-    if (!ok) {
-        std.debug.print("SSH image upload failed; not pasting unreachable path\n", .{});
+    const result = scp.transfer(allocator, &conn, local_path, destination);
+    if (result != .ok) {
+        std.debug.print("SSH image upload failed\n", .{});
         return null;
     }
 
@@ -424,6 +348,8 @@ pub threadlocal var g_divider_drag_handle: ?SplitTree.Node.Handle = null; // Han
 pub threadlocal var g_divider_drag_layout: ?SplitTree.Split.Layout = null; // horizontal or vertical
 pub threadlocal var g_sidebar_resize_hover: bool = false; // Mouse is over the sidebar resize edge
 pub threadlocal var g_sidebar_resize_dragging: bool = false; // Currently dragging the sidebar edge
+pub threadlocal var g_explorer_resize_hover: bool = false; // Mouse is over the file explorer resize edge
+pub threadlocal var g_explorer_resize_dragging: bool = false; // Currently dragging the file explorer edge
 
 // Internal state (moved from win32_input struct)
 threadlocal var plus_btn_pressed: bool = false;
@@ -439,12 +365,13 @@ fn syncGridFromWindowSize(width: i32, height: i32) void {
     const render_padding: f32 = 10;
     const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
     const sidebar_w = titlebar.sidebarWidth();
+    const explorer_w = file_explorer.width();
     const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_right: f32 = @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
     const explicit_bottom: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
 
-    const total_width_padding = sidebar_w + explicit_left + explicit_right;
+    const total_width_padding = sidebar_w + explorer_w + explicit_left + explicit_right;
     const total_height_padding = render_padding * 2 + tb_offset + explicit_top + explicit_bottom;
 
     const avail_width = @as(f32, @floatFromInt(width)) - total_width_padding;
@@ -466,6 +393,39 @@ pub fn toggleSidebar() void {
     if (AppWindow.g_window) |win| {
         syncGridFromWindowSize(win.width, win.height);
         win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
+    }
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
+pub fn toggleFileExplorer() void {
+    file_explorer.toggle();
+    // Set root to active surface CWD if not already set
+    if (file_explorer.g_visible and file_explorer.g_root_path_len == 0) {
+        if (tab.activeSurface()) |surface| {
+            if (surface.launch_kind == .ssh) {
+                // SSH session: enter remote mode
+                if (surface.ssh_connection) |conn| {
+                    const cwd = surface.getCwd() orelse "/home";
+                    file_explorer.enterRemoteMode(&conn, cwd);
+                }
+            } else {
+                if (surface.getCwd()) |unix_path| {
+                    var wpath: [260]u16 = undefined;
+                    if (AppWindow.wsl_paths.unixPathToWindows(unix_path, &wpath)) |wlen| {
+                        var utf8_buf: [260]u8 = undefined;
+                        const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, wpath[0..wlen]) catch 0;
+                        if (utf8_len > 0) {
+                            file_explorer.enterLocalMode();
+                            file_explorer.setRoot(utf8_buf[0..utf8_len]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (AppWindow.g_window) |win| {
+        syncGridFromWindowSize(win.width, win.height);
     }
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
@@ -624,6 +584,11 @@ fn handleChar(ev: win32_backend.CharEvent) void {
         if (!ev.ctrl and !ev.alt) overlays.commandPaletteInsertChar(ev.codepoint);
         return;
     }
+    // File explorer inline editing
+    if (file_explorer.g_focused and file_explorer.g_visible and file_explorer.g_op_mode != .none and file_explorer.g_op_mode != .confirm_delete) {
+        if (!ev.ctrl and !ev.alt) file_explorer.inputChar(ev.codepoint);
+        return;
+    }
     // When tab rename is active, route chars to the rename buffer
     if (tab.g_tab_rename_active) {
         AppWindow.g_cursor_blink_visible = true;
@@ -678,6 +643,10 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         overlays.settingsPageHandleKey(ev);
         return;
     }
+    // File explorer key handling (when focused and in operation mode)
+    if (file_explorer.g_focused and file_explorer.g_visible) {
+        if (handleFileExplorerKey(ev)) return;
+    }
     // Ctrl+Shift+N = new window (even during tab rename)
     if (ev.ctrl and ev.shift and ev.vk == 0x4E) { // 'N'
         if (tab.g_tab_rename_active) tab.commitTabRename();
@@ -719,10 +688,10 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         AppWindow.splitFocused(.right);
         return;
     }
-    // Ctrl+Shift+E = new split down (horizontal divider)
+    // Ctrl+Shift+E = toggle file explorer sidebar
     if (ev.ctrl and ev.shift and ev.vk == 0x45) { // 'E'
         if (tab.g_tab_rename_active) tab.commitTabRename();
-        AppWindow.splitFocused(.down);
+        toggleFileExplorer();
         return;
     }
     // Ctrl+Shift+B = show/hide tab sidebar
@@ -953,6 +922,208 @@ fn applySidebarWidthFromMouse(xpos: f64) void {
     win.sidebar_width = @intFromFloat(titlebar.sidebarWidth());
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
+}
+
+fn hitTestFileExplorer(xpos: f64, ypos: f64) bool {
+    if (!file_explorer.g_visible) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
+    return xpos >= panel_x;
+}
+
+fn hitTestFileExplorerResizeHandle(xpos: f64, ypos: f64) bool {
+    if (!file_explorer.g_visible) return false;
+    if (ypos < titlebarHeight()) return false;
+    const win = AppWindow.g_window orelse return false;
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
+    const half_hit: f64 = @as(f64, @floatCast(file_explorer.RESIZE_HIT_WIDTH)) / 2;
+    return xpos >= panel_x - half_hit and xpos <= panel_x + half_hit;
+}
+
+fn applyExplorerWidthFromMouse(xpos: f64) void {
+    const win = AppWindow.g_window orelse return;
+    const new_width = @as(f64, @floatFromInt(win.width)) - xpos;
+    if (!file_explorer.setWidth(@floatCast(new_width), @floatFromInt(win.width))) return;
+    syncGridFromWindowSize(win.width, win.height);
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
+}
+
+fn handleFileExplorerKey(ev: win32_backend.KeyEvent) bool {
+    const VK_ESCAPE = win32_backend.VK_ESCAPE;
+    const VK_RETURN = win32_backend.VK_RETURN;
+    const VK_BACK = win32_backend.VK_BACK;
+    const VK_UP = win32_backend.VK_UP;
+    const VK_DOWN = win32_backend.VK_DOWN;
+
+    // In input mode (rename/new file/new dir)
+    if (file_explorer.g_op_mode != .none) {
+        switch (ev.vk) {
+            VK_ESCAPE => {
+                file_explorer.cancelOp();
+                return true;
+            },
+            VK_RETURN => {
+                file_explorer.commitOp();
+                return true;
+            },
+            VK_BACK => {
+                file_explorer.inputBackspace();
+                return true;
+            },
+            else => return false,
+        }
+    }
+
+    // Normal navigation mode
+    switch (ev.vk) {
+        VK_ESCAPE => {
+            file_explorer.g_focused = false;
+            return true;
+        },
+        VK_UP => {
+            file_explorer.moveSelection(-1);
+            return true;
+        },
+        VK_DOWN => {
+            file_explorer.moveSelection(1);
+            return true;
+        },
+        VK_RETURN => {
+            // Enter on directory = toggle expand
+            if (file_explorer.g_selected) |sel| {
+                if (sel < file_explorer.g_entry_count and file_explorer.g_entries[sel].is_dir) {
+                    file_explorer.toggleExpand(sel);
+                }
+            }
+            return true;
+        },
+        0x52 => { // 'R' key = rename
+            if (!ev.ctrl and !ev.alt) {
+                file_explorer.startRename();
+                return true;
+            }
+            return false;
+        },
+        0x4E => { // 'N' key = new file, Shift+N = new dir
+            if (!ev.ctrl and !ev.alt) {
+                if (ev.shift) {
+                    file_explorer.startNewDir();
+                } else {
+                    file_explorer.startNewFile();
+                }
+                return true;
+            }
+            return false;
+        },
+        0x44 => { // 'D' key = delete
+            if (!ev.ctrl and !ev.alt and !ev.shift) {
+                file_explorer.startDelete();
+                return true;
+            }
+            return false;
+        },
+        0x53 => { // 'S' key: Ctrl+S = download selected file
+            if (ev.ctrl and !ev.alt and !ev.shift) {
+                if (file_explorer.g_mode == .remote) {
+                    // Download to user's Downloads folder
+                    var dl_buf: [260]u8 = undefined;
+                    const dl_path = getDownloadsFolder(&dl_buf);
+                    if (dl_path.len > 0) {
+                        file_explorer.downloadSelected(dl_path);
+                    }
+                    return true;
+                }
+            }
+            return false;
+        },
+        0x55 => { // 'U' key = upload local file to remote
+            if (!ev.ctrl and !ev.alt and !ev.shift) {
+                if (file_explorer.g_mode == .remote) {
+                    openFileDialogAndUpload();
+                    return true;
+                }
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
+fn getDownloadsFolder(buf: *[260]u8) []const u8 {
+    // Use %USERPROFILE%\Downloads
+    const userprofile = std.process.getEnvVarOwned(std.heap.page_allocator, "USERPROFILE") catch return "";
+    defer std.heap.page_allocator.free(userprofile);
+    const suffix = "\\Downloads";
+    if (userprofile.len + suffix.len > buf.len) return "";
+    @memcpy(buf[0..userprofile.len], userprofile);
+    @memcpy(buf[userprofile.len..][0..suffix.len], suffix);
+    return buf[0 .. userprofile.len + suffix.len];
+}
+
+fn openFileDialogAndUpload() void {
+    // Use Win32 GetOpenFileNameA for simplicity
+    var filename_buf: [260]u8 = .{0} ** 260;
+
+    var ofn: win32_backend.OPENFILENAMEA = .{
+        .lStructSize = @sizeOf(win32_backend.OPENFILENAMEA),
+        .hwndOwner = if (AppWindow.g_window) |w| w.hwnd else null,
+        .lpstrFile = &filename_buf,
+        .nMaxFile = 260,
+        .lpstrFilter = "All Files\x00*.*\x00\x00",
+        .nFilterIndex = 1,
+        .lpstrTitle = "Upload file to remote",
+        .Flags = 0x00001000 | 0x00000800, // OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST
+    };
+
+    if (win32_backend.GetOpenFileNameA(&ofn) != 0) {
+        // Find null terminator
+        var len: usize = 0;
+        while (len < 260 and filename_buf[len] != 0) len += 1;
+        if (len > 0) {
+            file_explorer.uploadFile(filename_buf[0..len]);
+        }
+    }
+}
+
+fn handleFileExplorerPress(xpos: f64, ypos: f64) void {
+    file_explorer.g_focused = true;
+
+    // Check resize handle first
+    if (hitTestFileExplorerResizeHandle(xpos, ypos)) {
+        g_explorer_resize_dragging = true;
+        g_explorer_resize_hover = true;
+        _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+        return;
+    }
+
+    // Cancel any active op on click elsewhere in the panel
+    if (file_explorer.g_op_mode != .none) {
+        file_explorer.cancelOp();
+    }
+
+    // Click on a file entry
+    const win = AppWindow.g_window orelse return;
+    const panel_x: f64 = @as(f64, @floatFromInt(win.width)) - @as(f64, @floatCast(file_explorer.width()));
+    if (xpos < panel_x) return;
+
+    const titlebar_h = titlebarHeight();
+    const header_h: f64 = @floatCast(file_explorer.HEADER_HEIGHT);
+    const list_top = titlebar_h + header_h;
+    if (ypos < list_top) return;
+
+    const row_h: f64 = @floatCast(file_explorer.ROW_HEIGHT);
+    const scroll: f64 = @floatCast(file_explorer.g_scroll_offset);
+    const row_idx: usize = @intFromFloat((ypos - list_top + scroll) / row_h);
+
+    if (row_idx < file_explorer.g_entry_count) {
+        file_explorer.g_selected = row_idx;
+        if (file_explorer.g_entries[row_idx].is_dir) {
+            file_explorer.toggleExpand(row_idx);
+        }
+        AppWindow.g_force_rebuild = true;
+    }
 }
 
 fn hitTestConfigButton(xpos: f64, ypos: f64) bool {
@@ -1263,6 +1434,16 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 return;
             }
 
+            // File explorer right sidebar click
+            if (hitTestFileExplorer(xpos, ypos)) {
+                handleFileExplorerPress(xpos, ypos);
+                return;
+            }
+
+            // Clicking outside file explorer unfocuses it
+            file_explorer.g_focused = false;
+            if (file_explorer.g_op_mode != .none) file_explorer.cancelOp();
+
             // Click in terminal content area: update split focus
             updateFocusFromMouse(@intFromFloat(xpos), @intFromFloat(ypos));
 
@@ -1343,6 +1524,13 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 g_sidebar_resize_dragging = false;
                 g_sidebar_resize_hover = hitTestSidebarResizeHandle(xpos, ypos);
                 const cursor_id = if (g_sidebar_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
+                _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
+                return;
+            }
+            if (g_explorer_resize_dragging) {
+                g_explorer_resize_dragging = false;
+                g_explorer_resize_hover = hitTestFileExplorerResizeHandle(xpos, ypos);
+                const cursor_id = if (g_explorer_resize_hover) win32_backend.IDC_SIZEWE else win32_backend.IDC_ARROW;
                 _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, cursor_id));
                 return;
             }
@@ -1522,6 +1710,11 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
         return;
     }
+    if (g_explorer_resize_dragging) {
+        applyExplorerWidthFromMouse(xpos);
+        _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+        return;
+    }
 
     // Handle divider dragging
     if (g_divider_dragging) {
@@ -1537,9 +1730,10 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             const win = AppWindow.g_window orelse return;
             const fb = win.getFramebufferSize();
             const sidebar_w = titlebar.sidebarWidth();
+            const fe_w = file_explorer.width();
             const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
             const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
-            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
+            const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - fe_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
             const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(split_layout.DEFAULT_PADDING)));
 
             const slot = spatial.slots[handle.idx()];
@@ -1580,6 +1774,15 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
         } else if (g_sidebar_resize_hover) {
             _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
             g_sidebar_resize_hover = false;
+        }
+        const over_explorer_resize = hitTestFileExplorerResizeHandle(xpos, ypos);
+        if (over_explorer_resize) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_SIZEWE));
+            g_explorer_resize_hover = true;
+            return;
+        } else if (g_explorer_resize_hover) {
+            _ = win32_backend.SetCursor(win32_backend.LoadCursor(null, win32_backend.IDC_ARROW));
+            g_explorer_resize_hover = false;
         }
     }
 
@@ -1660,6 +1863,16 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
     overlays.startupShortcutsDismiss();
     if (tab.g_sidebar_visible and ev.xpos >= 0 and ev.xpos < @as(i32, @intFromFloat(titlebar.sidebarWidth()))) return;
+    // Scroll in file explorer
+    if (file_explorer.g_visible) {
+        const win = AppWindow.g_window orelse return;
+        const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width()));
+        if (ev.xpos >= panel_x) {
+            const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * file_explorer.ROW_HEIGHT * 3 / 120.0;
+            file_explorer.scrollBy(delta);
+            return;
+        }
+    }
     // Scroll the surface under the mouse cursor (like Ghostty), not the focused surface.
     // Fall back to focused surface if mouse is not over any split.
     const surface = split_layout.surfaceAtPoint(ev.xpos, ev.ypos) orelse AppWindow.activeSurface() orelse return;

@@ -56,7 +56,7 @@ fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
     };
 }
 
-fn renderTextLimited(text: []const u8, x: f32, y: f32, color: [3]f32, max_w: f32) f32 {
+pub fn renderTextLimited(text: []const u8, x: f32, y: f32, color: [3]f32, max_w: f32) f32 {
     if (max_w <= 0) return x;
 
     var cursor_x = x;

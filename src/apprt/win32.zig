@@ -201,6 +201,7 @@ pub const WM_NCMOUSELEAVE: UINT = 0x02A2;
 pub const WM_MOUSELEAVE: UINT = 0x02A3;
 pub const WM_ACTIVATE: UINT = 0x0006;
 pub const WM_GETMINMAXINFO: UINT = 0x0024;
+pub const WM_DROPFILES: UINT = 0x0233;
 
 // TrackMouseEvent
 pub const TME_LEAVE: DWORD = 0x00000002;
@@ -336,6 +337,39 @@ pub extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.win
 pub extern "kernel32" fn GlobalLock(hMem: *anyopaque) callconv(.winapi) ?*anyopaque;
 pub extern "kernel32" fn GlobalUnlock(hMem: *anyopaque) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GlobalSize(hMem: *anyopaque) callconv(.winapi) usize;
+
+// Open File Dialog (comdlg32)
+pub const OPENFILENAMEA = extern struct {
+    lStructSize: DWORD = @sizeOf(OPENFILENAMEA),
+    hwndOwner: ?HWND = null,
+    hInstance: ?HINSTANCE = null,
+    lpstrFilter: ?[*:0]const u8 = null,
+    lpstrCustomFilter: ?[*]u8 = null,
+    nMaxCustFilter: DWORD = 0,
+    nFilterIndex: DWORD = 0,
+    lpstrFile: ?[*]u8 = null,
+    nMaxFile: DWORD = 0,
+    lpstrFileTitle: ?[*]u8 = null,
+    nMaxFileTitle: DWORD = 0,
+    lpstrInitialDir: ?[*:0]const u8 = null,
+    lpstrTitle: ?[*:0]const u8 = null,
+    Flags: DWORD = 0,
+    nFileOffset: WORD = 0,
+    nFileExtension: WORD = 0,
+    lpstrDefExt: ?[*:0]const u8 = null,
+    lCustData: usize = 0,
+    lpfnHook: ?*const anyopaque = null,
+    lpTemplateName: ?[*:0]const u8 = null,
+};
+
+pub extern "comdlg32" fn GetOpenFileNameA(lpofn: *OPENFILENAMEA) callconv(.winapi) BOOL;
+
+// Shell drag-drop
+pub const HDROP = *opaque {};
+pub extern "shell32" fn DragAcceptFiles(hWnd: HWND, fAccept: BOOL) callconv(.winapi) void;
+pub extern "shell32" fn DragQueryFileW(hDrop: HDROP, iFile: UINT, lpszFile: ?[*]WCHAR, cch: UINT) callconv(.winapi) UINT;
+pub extern "shell32" fn DragFinish(hDrop: HDROP) callconv(.winapi) void;
+pub extern "shell32" fn DragQueryPoint(hDrop: HDROP, lppt: *POINT) callconv(.winapi) BOOL;
 
 // GDI+ image encoding
 pub const GpImage = opaque {};
@@ -890,6 +924,9 @@ pub const Window = struct {
         // Without this, the native titlebar may still appear until the window is resized.
         _ = SetWindowPos(hwnd, null, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER);
 
+        // Accept drag-and-drop files
+        DragAcceptFiles(hwnd, 1);
+
         const hdc = GetDC(hwnd) orelse {
             _ = DestroyWindow(hwnd);
             return error.GetDCFailed;
@@ -1239,6 +1276,11 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             return 1;
         },
 
+        WM_DROPFILES => {
+            handleDropFiles(wParam, w);
+            return 0;
+        },
+
         // WM_NCCALCSIZE is handled before the switch (to work during CreateWindowExW)
 
         // --- Custom title bar: hit testing ---
@@ -1520,4 +1562,34 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         else => {},
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn handleDropFiles(wParam: WPARAM, w: *Window) void {
+    const file_explorer = @import("../file_explorer.zig");
+    const hDrop: HDROP = @ptrFromInt(wParam);
+    defer DragFinish(hDrop);
+
+    // Check if drop is in the file explorer panel
+    var pt: POINT = undefined;
+    _ = DragQueryPoint(hDrop, &pt);
+    const panel_x: i32 = w.width - @as(i32, @intFromFloat(file_explorer.width()));
+    if (!file_explorer.g_visible or pt.x < panel_x) return;
+    if (file_explorer.g_mode != .remote) return;
+
+    const file_count = DragQueryFileW(hDrop, 0xFFFFFFFF, null, 0);
+    if (file_count == 0) return;
+
+    var i: UINT = 0;
+    while (i < file_count) : (i += 1) {
+        var wpath: [260]WCHAR = undefined;
+        const len = DragQueryFileW(hDrop, i, &wpath, 260);
+        if (len == 0) continue;
+
+        // Convert UTF-16 to UTF-8
+        var utf8_buf: [520]u8 = undefined;
+        const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, wpath[0..len]) catch continue;
+        if (utf8_len == 0) continue;
+
+        file_explorer.uploadFile(utf8_buf[0..utf8_len]);
+    }
 }
