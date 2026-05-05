@@ -13,7 +13,6 @@ const gl_init = AppWindow.gl_init;
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const renderer = @import("../renderer.zig");
-const win32_backend = @import("../apprt/win32.zig");
 
 const TabState = tab.TabState;
 pub const MAX_SPLITS_PER_TAB = tab.MAX_SPLITS_PER_TAB;
@@ -72,9 +71,9 @@ pub fn hitTestDivider(x: i32, y: i32) ?DividerHit {
     const sidebar_w = AppWindow.titlebar.sidebarWidth();
     const explorer_w = AppWindow.file_explorer.width();
     const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(DEFAULT_PADDING));
-    const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const content_y = AppWindow.currentTitlebarHeight();
     const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - explorer_w - @as(f32, @floatFromInt(2 * DEFAULT_PADDING));
-    const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(DEFAULT_PADDING)));
+    const content_h: f32 = @as(f32, @floatFromInt(fb.height)) - content_y - @as(f32, @floatFromInt(DEFAULT_PADDING));
 
     const xf: f32 = @floatFromInt(x);
     const yf: f32 = @floatFromInt(y);

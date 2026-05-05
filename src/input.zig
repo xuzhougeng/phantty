@@ -358,12 +358,12 @@ threadlocal var saved_rect: win32_backend.RECT = .{ .left = 0, .top = 0, .right 
 threadlocal var is_fullscreen: bool = false;
 
 fn titlebarHeight() f64 {
-    return if (AppWindow.g_window) |w| @floatFromInt(w.titlebar_height) else @as(f64, @floatFromInt(win32_backend.TITLEBAR_HEIGHT));
+    return @floatCast(AppWindow.currentTitlebarHeight());
 }
 
 fn syncGridFromWindowSize(width: i32, height: i32) void {
     const render_padding: f32 = 10;
-    const tb_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const tb_offset: f32 = @floatCast(titlebarHeight());
     const sidebar_w = titlebar.sidebarWidth();
     const explorer_w = file_explorer.width();
     const explicit_left: f32 = @floatFromInt(split_layout.DEFAULT_PADDING);
@@ -469,7 +469,7 @@ pub fn viewportOffset() usize {
 /// Convert mouse position to terminal cell coordinates.
 pub fn mouseToCell(xpos: f64, ypos: f64) CellPos {
     const padding_d: f64 = 10;
-    const tb_d: f64 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const tb_d = titlebarHeight();
     const sidebar_d: f64 = @floatCast(titlebar.sidebarWidth());
     const col_f = (xpos - sidebar_d - padding_d) / @as(f64, font.cell_width);
     const row_f = (ypos - padding_d - tb_d) / @as(f64, font.cell_height);
@@ -1460,7 +1460,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             const fb = win.getFramebufferSize();
             const w_f: f32 = @floatFromInt(fb.width);
             const h_f: f32 = @floatFromInt(fb.height);
-            const tb_f: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+            const tb_f: f32 = @floatCast(titlebarHeight());
             const top_pad: f32 = 10 + tb_f;
             const sb_opacity = if (AppWindow.activeSurface()) |s| s.scrollbar_opacity else 0;
             if (sb_opacity > 0 and overlays.scrollbarHitTest(xpos, ypos, w_f, h_f, top_pad)) {
@@ -1740,9 +1740,9 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
             const sidebar_w = titlebar.sidebarWidth();
             const fe_w = file_explorer.width();
             const content_x: f32 = sidebar_w + @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
-            const content_y: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+            const content_y: f32 = @floatCast(titlebarHeight());
             const content_w: f32 = @as(f32, @floatFromInt(fb.width)) - sidebar_w - fe_w - @as(f32, @floatFromInt(2 * split_layout.DEFAULT_PADDING));
-            const content_h: f32 = @floatFromInt(@as(i32, @intCast(fb.height)) - win32_backend.TITLEBAR_HEIGHT - @as(i32, @intCast(split_layout.DEFAULT_PADDING)));
+            const content_h: f32 = @as(f32, @floatFromInt(fb.height)) - content_y - @as(f32, @floatFromInt(split_layout.DEFAULT_PADDING));
 
             const slot = spatial.slots[handle.idx()];
             const layout = g_divider_drag_layout orelse return;
@@ -1804,7 +1804,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     const fb = win.getFramebufferSize();
     const w_f: f32 = @floatFromInt(fb.width);
     const h_f: f32 = @floatFromInt(fb.height);
-    const tb_f: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const tb_f: f32 = @floatCast(titlebarHeight());
     const top_pad: f32 = 10 + tb_f;
 
     const was_hover = overlays.g_scrollbar_hover;

@@ -200,8 +200,12 @@ const CommandPaletteLayout = struct {
     box_top_px: f32,
     box_w: f32,
     box_h: f32,
+    header_h: f32,
+    filter_h: f32,
+    footer_h: f32,
     row_top_px: f32,
     row_h: f32,
+    rendered_rows: usize,
 };
 
 pub fn commandPaletteVisible() bool {
@@ -402,29 +406,74 @@ fn commandPaletteClampSelection() void {
     }
 }
 
+fn overlayTextHeight() f32 {
+    return @max(1.0, font.g_titlebar_cell_height);
+}
+
+fn overlayLineHeight() f32 {
+    return @round(@max(24.0, overlayTextHeight() + 8.0));
+}
+
+fn overlayRowHeight(min_h: f32) f32 {
+    return @round(@max(min_h, overlayTextHeight() + 14.0));
+}
+
+fn overlayControlHeight(min_h: f32) f32 {
+    return @round(@max(min_h, overlayTextHeight() + 12.0));
+}
+
+fn textYFromTop(window_height: f32, top_px: f32) f32 {
+    return @round(window_height - top_px - overlayTextHeight());
+}
+
+fn rowTextY(row_y: f32, row_h: f32) f32 {
+    return @round(row_y + (row_h - overlayTextHeight()) / 2.0);
+}
+
+fn commandPaletteRowCapacity(content_height: f32, base_h: f32, row_h: f32) usize {
+    const usable_h = @max(row_h, content_height - 32.0 - base_h);
+    if (usable_h <= row_h) return 1;
+    const count_f = @floor(usable_h / row_h);
+    const count: usize = @intFromFloat(@max(1.0, count_f));
+    return @min(count, COMMAND_PALETTE_MAX_VISIBLE_ROWS);
+}
+
+fn commandPaletteFirstVisibleIndex(rendered_rows: usize) usize {
+    if (rendered_rows == 0 or g_palette_scratch_len <= rendered_rows) return 0;
+    const selected = @min(g_command_palette_selected, g_palette_scratch_len - 1);
+    if (selected < rendered_rows) return 0;
+    return @min(selected - rendered_rows + 1, g_palette_scratch_len - rendered_rows);
+}
+
 fn commandPaletteLayout(window_width: f32, window_height: f32, top_offset: f32) CommandPaletteLayout {
     const content_height = @max(1, window_height - top_offset);
     const visible_count = commandPaletteVisibleCount();
-    const rendered_rows = @min(visible_count, COMMAND_PALETTE_MAX_VISIBLE_ROWS);
 
     const box_w = @round(@min(@max(520, window_width - 64), 760));
-    const row_h: f32 = 38;
-    const header_h: f32 = 48;
-    const filter_h: f32 = 42;
-    const footer_h: f32 = 30;
+    const row_h = overlayRowHeight(38);
+    const header_h = @round(@max(48.0, overlayTextHeight() + 30.0));
+    const filter_h = overlayControlHeight(42);
+    const footer_h = @round(@max(34.0, overlayTextHeight() + 18.0));
+    const base_h = header_h + filter_h + 12 + footer_h;
+    const max_rows = commandPaletteRowCapacity(content_height, base_h, row_h);
+    const rendered_rows = @min(visible_count, max_rows);
     const row_area_h = row_h * @as(f32, @floatFromInt(@max(rendered_rows, 1)));
-    const box_h = @round(header_h + filter_h + row_area_h + footer_h + 28);
+    const box_h = @round(base_h + row_area_h);
     const box_x = @round(@max(16, (window_width - box_w) / 2));
     const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
-    const row_top_px = @round(box_top_px + header_h + filter_h + 10);
+    const row_top_px = @round(box_top_px + header_h + filter_h + 12);
 
     return .{
         .box_x = box_x,
         .box_top_px = box_top_px,
         .box_w = box_w,
         .box_h = box_h,
+        .header_h = header_h,
+        .filter_h = filter_h,
+        .footer_h = footer_h,
         .row_top_px = row_top_px,
         .row_h = row_h,
+        .rendered_rows = rendered_rows,
     };
 }
 
@@ -439,9 +488,10 @@ fn commandPaletteHitTest(xpos: f64, ypos: f64, window_width: f32, window_height:
     if (row_f < 0) return null;
     const row: usize = @intFromFloat(@floor(row_f));
     rebuildPaletteScratch();
-    if (row >= g_palette_scratch_len) return null;
-    if (row >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) return null;
-    return g_palette_scratch[row];
+    if (row >= layout.rendered_rows) return null;
+    const item_idx = commandPaletteFirstVisibleIndex(layout.rendered_rows) + row;
+    if (item_idx >= g_palette_scratch_len) return null;
+    return g_palette_scratch[item_idx];
 }
 
 fn renderTitlebarText(text: []const u8, x_start: f32, y: f32, color: [3]f32) void {
@@ -479,6 +529,14 @@ fn renderTitlebarTextLimited(text: []const u8, x_start: f32, y: f32, color: [3]f
     }
 }
 
+fn renderTitlebarTextStrongLimited(text: []const u8, x_start: f32, y: f32, color: [3]f32, max_w: f32) void {
+    if (max_w <= 0) return;
+    const x = @round(x_start);
+    const y_aligned = @round(y);
+    renderTitlebarTextLimited(text, x, y_aligned, color, max_w);
+    renderTitlebarTextLimited(text, x + 1, y_aligned, color, max_w - 1);
+}
+
 /// Render the command center overlay.
 pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f32) void {
     if (!g_command_palette_visible) return;
@@ -511,34 +569,39 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 8, panel_color, 0.98);
 
     const pad_x: f32 = 24;
-    const title_y = @round(window_height - layout.box_top_px - 31);
+    const title_y = textYFromTop(window_height, layout.box_top_px + 16);
     renderTitlebarText("Command Center", layout.box_x + pad_x, title_y, title_color);
     renderTitlebarText("Esc closes", layout.box_x + layout.box_w - pad_x - measureTitlebarText("Esc closes"), title_y, muted);
 
     const filter_x = @round(layout.box_x + pad_x);
-    const filter_y = @round(window_height - (layout.box_top_px + 80));
+    const filter_box_y = @round(window_height - (layout.box_top_px + layout.header_h + layout.filter_h));
     const filter_w = layout.box_w - pad_x * 2;
-    renderRoundedQuadAlpha(filter_x - 1, filter_y - 9, filter_w + 2, 32, 6, field_border, 0.42);
-    renderRoundedQuadAlpha(filter_x, filter_y - 8, filter_w, 30, 5, field_color, 0.92);
+    renderRoundedQuadAlpha(filter_x - 1, filter_box_y - 1, filter_w + 2, layout.filter_h + 2, 6, field_border, 0.42);
+    renderRoundedQuadAlpha(filter_x, filter_box_y, filter_w, layout.filter_h, 5, field_color, 0.92);
 
+    const filter_text_y = rowTextY(filter_box_y, layout.filter_h);
     const filter = commandPaletteFilter();
     if (filter.len > 0) {
-        renderTitlebarText(filter, filter_x + 12, filter_y, fg);
+        renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
     } else {
-        renderTitlebarText("Filter commands (type to pick a built-in theme too)", filter_x + 12, filter_y, dim);
+        renderTitlebarTextLimited("Filter commands or themes", filter_x + 12, filter_text_y, dim, filter_w - 24);
     }
 
     rebuildPaletteScratch();
     if (g_palette_scratch_len == 0) {
         const empty_text = "No matching commands or themes";
-        renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, window_height - layout.row_top_px - 26, muted);
+        const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
+        renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
     } else {
-        var row: usize = 0;
-        while (row < g_palette_scratch_len and row < COMMAND_PALETTE_MAX_VISIBLE_ROWS) : (row += 1) {
-            const item = g_palette_scratch[row];
-            const selected = row == g_command_palette_selected;
+        const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
+        var display_row: usize = 0;
+        while (display_row < layout.rendered_rows) : (display_row += 1) {
+            const item_idx = first_row + display_row;
+            if (item_idx >= g_palette_scratch_len) break;
+            const item = g_palette_scratch[item_idx];
+            const selected = item_idx == g_command_palette_selected;
 
-            const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(row)) * layout.row_h);
+            const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
             const row_y = @round(window_height - row_top - layout.row_h);
             if (selected) {
                 renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
@@ -548,7 +611,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
             const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
             const shortcut_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
 
-            const text_y = @round(row_y + (layout.row_h - font.g_titlebar_cell_height) / 2);
+            const text_y = rowTextY(row_y, layout.row_h);
             const title_x = @round(layout.box_x + pad_x + 2);
 
             switch (item) {
@@ -575,7 +638,7 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     }
 
     const footer = "Up/Down + Enter applies";
-    renderTitlebarText(footer, layout.box_x + pad_x, box_y + 17, muted);
+    renderTitlebarTextLimited(footer, layout.box_x + pad_x, rowTextY(box_y, layout.footer_h), muted, layout.box_w - pad_x * 2);
 }
 
 // ============================================================================
@@ -619,6 +682,7 @@ const SessionLayout = struct {
     box_top_px: f32,
     box_w: f32,
     box_h: f32,
+    header_h: f32,
     first_row_top_px: f32,
     row_h: f32,
 };
@@ -1072,12 +1136,65 @@ fn hexValue(ch: u8) ?u8 {
     return null;
 }
 
+fn sessionTwoColumnWidth(left: []const u8, right: []const u8) f32 {
+    const right_w = if (right.len > 0) measureTitlebarText(right) + 36.0 else 0.0;
+    return measureTitlebarText(left) + right_w + 80.0;
+}
+
+fn sessionDesiredBoxWidth() f32 {
+    const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
+    const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Up/Down select, Enter starts";
+    var desired = @max(measureTitlebarText(title), measureTitlebarText(hint)) + 48.0;
+
+    if (g_ssh_form_visible) {
+        desired = @max(desired, sessionTwoColumnWidth("Server name", sshField(.name)));
+        desired = @max(desired, sessionTwoColumnWidth("IP / host", sshField(.ip)));
+        desired = @max(desired, sessionTwoColumnWidth("User", sshField(.user)));
+        desired = @max(desired, sessionTwoColumnWidth("Password", sshField(.password)));
+        desired = @max(desired, sessionTwoColumnWidth("Port", sshField(.port)));
+        desired = @max(desired, sessionTwoColumnWidth("Save & Connect", "ssh.exe"));
+        desired = @max(desired, sessionTwoColumnWidth("Save", "profile"));
+        desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+        return desired;
+    }
+
+    if (g_ssh_list_visible) {
+        var row: usize = 0;
+        while (row < g_ssh_profile_count) : (row += 1) {
+            var target_buf: [SSH_FIELD_MAX * 2]u8 = undefined;
+            const profile = &g_ssh_profiles[row];
+            const host = profileField(profile, .ip);
+            const user = profileField(profile, .user);
+            const port = profileField(profile, .port);
+            const target = if (port.len > 0)
+                std.fmt.bufPrint(&target_buf, "{s}@{s}:{s}", .{ user, host, port }) catch ""
+            else
+                std.fmt.bufPrint(&target_buf, "{s}@{s}", .{ user, host }) catch "";
+            desired = @max(desired, sessionTwoColumnWidth(profileField(profile, .name), target));
+        }
+        desired = @max(desired, sessionTwoColumnWidth("New SSH Server", "add"));
+        desired = @max(desired, sessionTwoColumnWidth("Edit Selected", if (g_ssh_profile_count > 0) "edit" else "no server"));
+        desired = @max(desired, sessionTwoColumnWidth("Delete Selected", if (g_ssh_profile_count > 0) "delete" else "no server"));
+        desired = @max(desired, sessionTwoColumnWidth("Cancel", "Esc"));
+        return desired;
+    }
+
+    desired = @max(desired, sessionTwoColumnWidth("PowerShell", "new terminal"));
+    desired = @max(desired, sessionTwoColumnWidth("SSH", "connect server"));
+    desired = @max(desired, sessionTwoColumnWidth("WSL", "wsl.exe ~"));
+    return desired;
+}
+
 fn sessionLayout(window_width: f32, window_height: f32, top_offset: f32) SessionLayout {
     const content_height = @max(1, window_height - top_offset);
-    const box_w: f32 = if (g_ssh_form_visible or g_ssh_list_visible) @round(@min(@max(460, window_width - 48), 760)) else 360;
-    const row_h: f32 = 38;
+    const min_box_w: f32 = if (g_ssh_form_visible or g_ssh_list_visible) 460 else 360;
+    const max_box_w = @max(260.0, @min(760.0, window_width - 48.0));
+    const box_w: f32 = @round(@min(@max(min_box_w, sessionDesiredBoxWidth()), max_box_w));
+    const row_h = overlayRowHeight(38);
+    const header_h = @round(18 + overlayLineHeight() * 2 + 12);
+    const bottom_pad = @round(@max(20.0, overlayTextHeight() * 0.55));
     const row_count: usize = if (g_ssh_form_visible) SSH_FIELD_COUNT + 3 else if (g_ssh_list_visible) sshListRowCount() else SESSION_LAUNCHER_ROW_COUNT;
-    const box_h = @round(74 + row_h * @as(f32, @floatFromInt(row_count)) + 28);
+    const box_h = @round(header_h + row_h * @as(f32, @floatFromInt(row_count)) + bottom_pad);
     const box_x = @round(@max(16, (window_width - box_w) / 2));
     const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
     return .{
@@ -1085,7 +1202,8 @@ fn sessionLayout(window_width: f32, window_height: f32, top_offset: f32) Session
         .box_top_px = box_top_px,
         .box_w = box_w,
         .box_h = box_h,
-        .first_row_top_px = box_top_px + 68,
+        .header_h = header_h,
+        .first_row_top_px = box_top_px + header_h,
         .row_h = row_h,
     };
 }
@@ -1145,13 +1263,20 @@ fn renderSessionRow(layout: SessionLayout, window_height: f32, row: usize, left:
     const row_color = if (selected) mixColor(bg, accent, 0.34) else mixColor(bg, fg, 0.055);
     gl_init.renderQuadAlpha(x, row_y + 3, w, layout.row_h - 6, row_color, if (selected) 0.82 else 0.78);
     if (selected) gl_init.renderQuadAlpha(x, row_y + 3, 3, layout.row_h - 6, accent, 0.86);
-    const text_y = row_y + 15;
+    const text_y = rowTextY(row_y, layout.row_h);
     const left_color = if (selected) mixColor(fg, accent, 0.12) else mixColor(bg, fg, 0.88);
-    renderTitlebarTextStrong(left, x + 12, text_y, left_color);
+    const left_x = x + 12;
+    const right_edge = layout.box_x + layout.box_w - 34;
     if (right.len > 0) {
         const right_w = measureTitlebarText(right);
         const right_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.56);
-        renderTitlebarTextStrong(right, layout.box_x + layout.box_w - 34 - right_w, text_y, right_color);
+        const right_max_w = @max(0.0, right_edge - left_x - 96);
+        const right_draw_w = @min(right_w, right_max_w);
+        const right_x = @round(right_edge - right_draw_w);
+        renderTitlebarTextStrongLimited(left, left_x, text_y, left_color, right_x - left_x - 18);
+        renderTitlebarTextStrongLimited(right, right_x, text_y, right_color, right_draw_w);
+    } else {
+        renderTitlebarTextStrongLimited(left, left_x, text_y, left_color, w - 24);
     }
 }
 
@@ -1203,9 +1328,10 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
 
     const title = if (g_ssh_form_visible) "SSH Server" else if (g_ssh_list_visible) "SSH Servers" else "New Session";
     const hint = if (g_ssh_form_visible) "Tab changes field, Enter connects" else if (g_ssh_list_visible) "Enter connects, New/Edit/Delete manage" else "Up/Down select, Enter starts";
-    const title_y = @round(window_height - layout.box_top_px - 34);
+    const title_y = textYFromTop(window_height, layout.box_top_px + 18);
+    const hint_y = textYFromTop(window_height, layout.box_top_px + 18 + overlayLineHeight());
     renderTitlebarTextStrong(title, layout.box_x + 24, title_y, title_color);
-    renderTitlebarTextStrong(hint, layout.box_x + 24, title_y - 24, muted_color);
+    renderTitlebarTextStrongLimited(hint, layout.box_x + 24, hint_y, muted_color, layout.box_w - 48);
 
     if (!g_ssh_form_visible) {
         if (g_ssh_list_visible) {
@@ -1277,6 +1403,8 @@ const SettingsLayout = struct {
     box_top_px: f32,
     box_w: f32,
     box_h: f32,
+    header_h: f32,
+    footer_h: f32,
     row_top_px: f32,
     row_h: f32,
 };
@@ -1328,9 +1456,9 @@ pub fn settingsPageExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_hei
 fn settingsLayout(window_width: f32, window_height: f32, top_offset: f32) SettingsLayout {
     const content_height = @max(1, window_height - top_offset);
     const box_w = @round(@min(@max(420, window_width - 48), 760));
-    const row_h: f32 = 42;
-    const header_h: f32 = 70;
-    const footer_h: f32 = 52;
+    const row_h = overlayRowHeight(42);
+    const header_h = @round(18 + overlayLineHeight() * 2 + 12);
+    const footer_h = @round(@max(52.0, overlayTextHeight() + 28.0));
     const box_h = @round(header_h + row_h * SETTINGS_ROW_COUNT + footer_h);
     const box_x = @round(@max(16, (window_width - box_w) / 2));
     const box_top_px = @round(top_offset + @max(16, (content_height - box_h) / 2));
@@ -1340,6 +1468,8 @@ fn settingsLayout(window_width: f32, window_height: f32, top_offset: f32) Settin
         .box_top_px = box_top_px,
         .box_w = box_w,
         .box_h = box_h,
+        .header_h = header_h,
+        .footer_h = footer_h,
         .row_top_px = row_top_px,
         .row_h = row_h,
     };
@@ -1552,19 +1682,33 @@ fn renderSettingsRow(layout: SettingsLayout, window_height: f32, row: usize, tit
         if (selected) gl_init.renderQuadAlpha(x, gl_y + 3, 3, layout.row_h - 6, accent, 0.82);
     }
 
-    const text_y = gl_y + 15;
+    const text_y = rowTextY(gl_y, layout.row_h);
     const title_color = if (selected or active) mixColor(fg, accent, 0.18) else fg;
-    renderTitlebarText(title, x + 12, text_y, title_color);
+    const title_x = x + 12;
+    const right_edge = layout.box_x + layout.box_w - 36;
+    var title_max_w = w - 24;
+    var value_x = right_edge;
 
     if (value.len > 0) {
         const value_w = measureTitlebarText(value);
+        const value_max_w = @min(value_w, @max(0.0, right_edge - title_x - 150));
+        value_x = @round(right_edge - value_max_w);
+        title_max_w = @min(title_max_w, value_x - title_x - 18);
         const value_color = if (selected or active) accent else mixColor(bg, fg, 0.78);
-        renderTitlebarText(value, layout.box_x + layout.box_w - 36 - value_w, text_y, value_color);
+        renderTitlebarTextLimited(value, value_x, text_y, value_color, value_max_w);
     }
 
     if (hint.len > 0) {
-        renderTitlebarText(hint, x + 210, text_y, mixColor(bg, fg, 0.55));
+        const preferred_hint_x = title_x + @max(160.0, measureTitlebarText(title) + 28.0);
+        const hint_x = @min(preferred_hint_x, value_x - 60);
+        const hint_max_w = value_x - hint_x - 18;
+        title_max_w = @min(title_max_w, hint_x - title_x - 18);
+        if (hint_max_w > font.g_titlebar_cell_width * 4) {
+            renderTitlebarTextLimited(hint, hint_x, text_y, mixColor(bg, fg, 0.55), hint_max_w);
+        }
     }
+
+    renderTitlebarTextLimited(title, title_x, text_y, title_color, title_max_w);
 }
 
 pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32) void {
@@ -1595,9 +1739,10 @@ pub fn renderSettingsPage(window_width: f32, window_height: f32, top_offset: f32
     renderRoundedQuadAlpha(layout.box_x - 1, box_y - 1, layout.box_w + 2, layout.box_h + 2, 11, border_color, 0.24);
     renderRoundedQuadAlpha(layout.box_x, box_y, layout.box_w, layout.box_h, 10, panel_color, 0.96);
 
-    const title_y = @round(window_height - layout.box_top_px - 34);
+    const title_y = textYFromTop(window_height, layout.box_top_px + 18);
+    const subtitle_y = textYFromTop(window_height, layout.box_top_px + 18 + overlayLineHeight());
     renderTitlebarText("Settings", layout.box_x + 24, title_y, mixColor(fg, accent, 0.14));
-    renderTitlebarText("Config changes save immediately", layout.box_x + 24, title_y - 24, muted_color);
+    renderTitlebarTextLimited("Config changes save immediately", layout.box_x + 24, subtitle_y, muted_color, layout.box_w - 96);
     renderTitlebarText("Esc", layout.box_x + layout.box_w - 52, title_y, mixColor(bg, fg, 0.72));
 
     var font_buf: [24]u8 = undefined;
@@ -2051,20 +2196,30 @@ pub fn renderStartupShortcutsOverlay(window_width: f32, window_height: f32, top_
 
     const pad_x: f32 = 24;
     const pad_y: f32 = 18;
-    const col_gap: f32 = 48;
-    const line_height = font.g_titlebar_cell_height + 9;
+    const pair_gap_base: f32 = 48;
+    const column_gap: f32 = 38;
+    const line_height = overlayLineHeight();
     const heading_gap: f32 = 16;
     const hint_gap: f32 = 12;
     const hint = "Press any key or click to hide";
     const heading = "Keyboard shortcuts";
-    const entries_height = line_height * @as(f32, @floatFromInt(STARTUP_SHORTCUT_ENTRIES.len));
-    const box_width = @round(@max(
+    const content_height = @max(1.0, window_height - top_offset);
+    const available_height = @max(line_height, content_height - 24.0);
+    const fixed_height = pad_y * 2 + overlayTextHeight() + heading_gap + hint_gap + overlayTextHeight();
+    const available_entry_height = @max(line_height, available_height - fixed_height);
+    const rows_fit: usize = @max(1, @as(usize, @intFromFloat(@floor(available_entry_height / line_height))));
+    var columns: usize = (STARTUP_SHORTCUT_ENTRIES.len + rows_fit - 1) / rows_fit;
+    columns = @min(@max(columns, 1), 3);
+    const rows_per_column = (STARTUP_SHORTCUT_ENTRIES.len + columns - 1) / columns;
+    const entries_height = line_height * @as(f32, @floatFromInt(rows_per_column));
+    const pair_width = max_keys_width + pair_gap_base + max_action_width;
+    const desired_box_width = @round(@max(
         measureTitlebarText(heading) + pad_x * 2,
-        max_keys_width + col_gap + max_action_width + pad_x * 2,
+        @max(measureTitlebarText(hint) + pad_x * 2, pair_width * @as(f32, @floatFromInt(columns)) + column_gap * @as(f32, @floatFromInt(columns - 1)) + pad_x * 2),
     ));
-    const box_height = @round(pad_y * 2 + font.g_titlebar_cell_height + heading_gap + entries_height + hint_gap + font.g_titlebar_cell_height);
+    const box_width = @round(@min(desired_box_width, @max(260.0, window_width - 24.0)));
+    const box_height = @round(fixed_height + entries_height);
 
-    const content_height = window_height - top_offset;
     const box_x = @round(@max(12, (window_width - box_width) / 2));
     const box_y = @round(@max(12, (content_height - box_height) / 2));
 
@@ -2089,21 +2244,29 @@ pub fn renderStartupShortcutsOverlay(window_width: f32, window_height: f32, top_
     const hint_color = mixColor(AppWindow.g_theme.background, hint_base, alpha);
 
     const heading_w = measureTitlebarText(heading);
-    const heading_y = @round(box_y + box_height - pad_y - font.g_titlebar_cell_height);
+    const heading_y = @round(box_y + box_height - pad_y - overlayTextHeight());
     renderTitlebarText(heading, box_x + (box_width - heading_w) / 2, heading_y, heading_color);
     gl_init.renderQuadAlpha(box_x + pad_x, heading_y - heading_gap / 2 - 1, box_width - pad_x * 2, 1, border_color, alpha * 0.36);
 
-    const keys_x = @round(box_x + pad_x);
-    const action_x = @round(keys_x + max_keys_width + col_gap);
-    var y = @round(heading_y - heading_gap - line_height);
-    for (STARTUP_SHORTCUT_ENTRIES) |entry| {
-        renderTitlebarText(entry.keys, keys_x, y, keys_color);
-        renderTitlebarText(entry.action, action_x, y, action_color);
-        y -= line_height;
+    const inner_w = @max(1.0, box_width - pad_x * 2);
+    const total_column_gap = column_gap * @as(f32, @floatFromInt(columns - 1));
+    const column_w = @max(1.0, (inner_w - total_column_gap) / @as(f32, @floatFromInt(columns)));
+    const pair_gap = @min(pair_gap_base, @max(18.0, column_w * 0.08));
+    const keys_w = @min(max_keys_width, column_w * 0.48);
+    const action_w = @max(1.0, column_w - keys_w - pair_gap);
+
+    for (STARTUP_SHORTCUT_ENTRIES, 0..) |entry, idx| {
+        const col = idx / rows_per_column;
+        const row = idx % rows_per_column;
+        const col_x = @round(box_x + pad_x + @as(f32, @floatFromInt(col)) * (column_w + column_gap));
+        const action_x = @round(col_x + keys_w + pair_gap);
+        const y = @round(heading_y - heading_gap - line_height - @as(f32, @floatFromInt(row)) * line_height);
+        renderTitlebarTextLimited(entry.keys, col_x, y, keys_color, keys_w);
+        renderTitlebarTextLimited(entry.action, action_x, y, action_color, action_w);
     }
 
     const hint_w = measureTitlebarText(hint);
-    renderTitlebarText(hint, box_x + (box_width - hint_w) / 2, box_y + pad_y, hint_color);
+    renderTitlebarTextLimited(hint, box_x + (box_width - @min(hint_w, box_width - pad_x * 2)) / 2, box_y + pad_y, hint_color, box_width - pad_x * 2);
 }
 
 // ============================================================================

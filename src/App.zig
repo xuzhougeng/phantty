@@ -170,8 +170,8 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.cursor_blink = cfg.@"cursor-style-blink";
     self.theme = cfg.resolved_theme;
     self.shader_path = cfg.@"custom-shader";
-    self.initial_cols = cfg.@"window-width";
-    self.initial_rows = cfg.@"window-height";
+    self.initial_cols = if (cfg.@"window-width" > 0) cfg.@"window-width" else 80;
+    self.initial_rows = if (cfg.@"window-height" > 0) cfg.@"window-height" else 24;
     self.debug_fps = cfg.@"phantty-debug-fps";
     self.debug_draw_calls = cfg.@"phantty-debug-draw-calls";
     self.unfocused_split_opacity = cfg.@"unfocused-split-opacity";

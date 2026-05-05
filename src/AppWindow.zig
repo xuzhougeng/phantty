@@ -186,6 +186,17 @@ pub fn activeSurface() ?*Surface {
     return tab.activeSurface();
 }
 
+pub fn currentTitlebarHeight() f32 {
+    if (g_window) |w| return @floatFromInt(w.titlebar_height);
+    return titlebar.titlebarHeight();
+}
+
+fn syncWindowTitlebarHeight(win: *win32_backend.Window) f32 {
+    const next: i32 = @intFromFloat(titlebar.titlebarHeight());
+    win.titlebar_height = next;
+    return @floatFromInt(next);
+}
+
 pub fn activeSelection() *Selection {
     return tab.activeSelection();
 }
@@ -425,7 +436,7 @@ fn onWin32Resize(width: i32, height: i32) void {
     const padding_top: f32 = @floatFromInt(DEFAULT_PADDING);
     const padding_bottom: f32 = @floatFromInt(DEFAULT_PADDING);
     const render_padding: f32 = 10;
-    const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const tb = currentTitlebarHeight();
     const sidebar_w = titlebar.sidebarWidth();
     const explorer_w = file_explorer.width();
     const avail_w = @as(f32, @floatFromInt(width)) - sidebar_w - explorer_w - padding_left - padding_right;
@@ -560,7 +571,7 @@ fn onWin32Resize(width: i32, height: i32) void {
 
 fn resizeWindowToGrid() void {
     const padding: f32 = 10;
-    const tb: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const tb = currentTitlebarHeight();
     const content_w: f32 = font.cell_width * @as(f32, @floatFromInt(term_cols));
     const content_h: f32 = font.cell_height * @as(f32, @floatFromInt(term_rows));
     const win_w: i32 = @intFromFloat(content_w + titlebar.sidebarWidth() + file_explorer.width() + padding * 2);
@@ -641,14 +652,23 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         // glyph_face is set inside preloadCharacters
 
         rebuildTitlebarFont(allocator, new_family, new_weight, uiFontSize(new_font_size), ft_lib);
+        if (g_window) |w| _ = syncWindowTitlebarHeight(w);
 
         // --- Window size ---
-        // If window size is configured, apply it; then resize window to match new cell dims.
-        // Actual terminal + PTY resize is handled by computeSplitLayout → setScreenSize
-        // in the render loop (triggered by the window resize event from setSize).
-        if (cfg.@"window-width" > 0) term_cols = cfg.@"window-width";
-        if (cfg.@"window-height" > 0) term_rows = cfg.@"window-height";
-        resizeWindowToGrid();
+        // In normal windowed mode, preserve the current grid size and resize
+        // the window around the new cell metrics. In maximized/fullscreen mode,
+        // keep the OS-managed window bounds stable and recompute the grid from
+        // the current client size instead.
+        if (g_window) |w| {
+            const is_os_sized = w.is_fullscreen or win32_backend.IsZoomed(w.hwnd) != 0;
+            if (is_os_sized) {
+                onWin32Resize(w.width, w.height);
+            } else {
+                if (cfg.@"window-width" > 0) term_cols = cfg.@"window-width";
+                if (cfg.@"window-height" > 0) term_rows = cfg.@"window-height";
+                resizeWindowToGrid();
+            }
+        }
     } else {
         std.debug.print("Reload: failed to load font, keeping current font\n", .{});
     }
@@ -750,7 +770,7 @@ fn syncImeCaretPosition(win: *win32_backend.Window, split_count: usize) void {
     const cell_h = font.cell_height;
 
     var x: f32 = titlebar.sidebarWidth() + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(cursor_x)) * cell_w;
-    var y: f32 = @as(f32, @floatFromInt(win32_backend.TITLEBAR_HEIGHT)) + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(cursor_y)) * cell_h;
+    var y: f32 = currentTitlebarHeight() + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(cursor_y)) * cell_h;
 
     if (split_count > 1) {
         for (0..split_layout.g_split_rect_count) |i| {
@@ -935,6 +955,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     font.preloadCharacters(face);
 
     rebuildTitlebarFont(allocator, requested_font, requested_weight, uiFontSize(font_size), ft_lib);
+    _ = syncWindowTitlebarHeight(&win32_window);
 
     // Load Segoe MDL2 Assets for caption button icons (Windows system font)
     // Size is DPI-dependent: 10px at 96 DPI, scales proportionally
@@ -1026,7 +1047,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     //   setScreenSize(pw=fb_width, ph=fb_height-54, explicit_padding)
     //   avail_w = fb_width - 10 - 22 = fb_width - 32
     //   avail_h = (fb_height - 54) - 10 - 10 = fb_height - 74
-    const titlebar_height: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+    const titlebar_height = currentTitlebarHeight();
     const explicit_left: f32 = @floatFromInt(DEFAULT_PADDING);
     const explicit_right: f32 = @as(f32, @floatFromInt(DEFAULT_PADDING)) + overlays.SCROLLBAR_WIDTH;
     const explicit_top: f32 = @floatFromInt(DEFAULT_PADDING);
@@ -1189,7 +1210,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
 
         // Render padding constants - used for content area and titlebar positioning
         const padding: f32 = 10;
-        const titlebar_offset: f32 = @floatFromInt(win32_backend.TITLEBAR_HEIGHT);
+        const titlebar_offset = syncWindowTitlebarHeight(win);
         const sidebar_w = titlebar.sidebarWidth();
         const explorer_w = file_explorer.width();
         const top_padding: f32 = padding + titlebar_offset;

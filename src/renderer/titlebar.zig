@@ -40,6 +40,10 @@ pub fn sidebarHeaderHeight() f32 {
     return @max(SIDEBAR_HEADER_H, @round(font.g_titlebar_cell_height + 24));
 }
 
+pub fn titlebarHeight() f32 {
+    return @round(@max(@as(f32, @floatFromInt(win32_backend.TITLEBAR_HEIGHT)), font.g_titlebar_cell_height + 12));
+}
+
 pub fn sidebarMaxWidthForWindow(window_width: f32) f32 {
     return @max(SIDEBAR_MIN_WIDTH, @min(SIDEBAR_MAX_WIDTH, window_width - SIDEBAR_MIN_CONTENT_WIDTH));
 }
