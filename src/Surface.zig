@@ -55,6 +55,8 @@ pub const SshConnection = struct {
     host_len: usize = 0,
     port_buf: [16]u8 = undefined,
     port_len: usize = 0,
+    password_buf: [128]u8 = undefined,
+    password_len: usize = 0,
     password_auth: bool = false,
 
     pub fn user(self: *const SshConnection) []const u8 {
@@ -67,6 +69,10 @@ pub const SshConnection = struct {
 
     pub fn port(self: *const SshConnection) []const u8 {
         return self.port_buf[0..self.port_len];
+    }
+
+    pub fn password(self: *const SshConnection) []const u8 {
+        return self.password_buf[0..self.password_len];
     }
 };
 
@@ -494,15 +500,18 @@ pub fn setSshConnection(
     user: []const u8,
     host: []const u8,
     port: []const u8,
+    password: []const u8,
     password_auth: bool,
 ) void {
     var conn: SshConnection = .{};
     conn.user_len = @min(user.len, conn.user_buf.len);
     conn.host_len = @min(host.len, conn.host_buf.len);
     conn.port_len = @min(port.len, conn.port_buf.len);
+    conn.password_len = @min(password.len, conn.password_buf.len);
     @memcpy(conn.user_buf[0..conn.user_len], user[0..conn.user_len]);
     @memcpy(conn.host_buf[0..conn.host_len], host[0..conn.host_len]);
     @memcpy(conn.port_buf[0..conn.port_len], port[0..conn.port_len]);
+    @memcpy(conn.password_buf[0..conn.password_len], password[0..conn.password_len]);
     conn.password_auth = password_auth;
 
     self.launch_kind = .ssh;

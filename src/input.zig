@@ -182,15 +182,32 @@ fn remoteClipboardImagePath(allocator: std.mem.Allocator, local_path: []const u8
     return std.fmt.allocPrint(allocator, "/tmp/{s}", .{basename}) catch null;
 }
 
+fn sshAskPassScriptPath(allocator: std.mem.Allocator) ?[]u8 {
+    const temp_dir = clipboardTempDir(allocator) orelse return null;
+    defer allocator.free(temp_dir);
+
+    return std.fmt.allocPrint(allocator, "{s}\\phantty-ssh-askpass.cmd", .{temp_dir}) catch null;
+}
+
+fn ensureSshAskPassScript(allocator: std.mem.Allocator) ?[]u8 {
+    const path = sshAskPassScriptPath(allocator) orelse return null;
+    errdefer allocator.free(path);
+
+    const file = std.fs.createFileAbsolute(path, .{ .truncate = true }) catch return null;
+    defer file.close();
+
+    file.writeAll(
+        "@echo off\r\n" ++
+            "powershell.exe -NoLogo -NoProfile -Command \"[Console]::Out.Write($env:PHANTTY_SSH_PASSWORD)\"\r\n",
+    ) catch return null;
+    return path;
+}
+
 fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surface, local_path: []const u8) ?[]u8 {
     const conn = surface.ssh_connection orelse {
         std.debug.print("SSH image paste skipped: no SSH profile metadata for this surface\n", .{});
         return null;
     };
-    if (conn.password_auth) {
-        std.debug.print("SSH image paste skipped: password-auth profiles need key/agent auth for background scp\n", .{});
-        return null;
-    }
 
     const remote_path = remoteClipboardImagePath(allocator, local_path) orelse return null;
     var keep_remote_path = false;
@@ -199,15 +216,27 @@ fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surf
     const destination = std.fmt.allocPrint(allocator, "{s}@{s}:{s}", .{ conn.user(), conn.host(), remote_path }) catch return null;
     defer allocator.free(destination);
 
-    var argv_buf: [12][]const u8 = undefined;
+    var askpass_path: ?[]u8 = null;
+    defer if (askpass_path) |path| allocator.free(path);
+    var env_map: ?std.process.EnvMap = null;
+    defer if (env_map) |*map| map.deinit();
+
+    if (conn.password_auth) {
+        askpass_path = ensureSshAskPassScript(allocator) orelse return null;
+        env_map = std.process.getEnvMap(allocator) catch return null;
+        if (env_map) |*map| {
+            map.put("SSH_ASKPASS", askpass_path.?) catch return null;
+            map.put("SSH_ASKPASS_REQUIRE", "force") catch return null;
+            map.put("DISPLAY", "phantty") catch return null;
+            map.put("PHANTTY_SSH_PASSWORD", conn.password()) catch return null;
+        }
+    }
+
+    var argv_buf: [18][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = "scp.exe";
     argc += 1;
     argv_buf[argc] = "-q";
-    argc += 1;
-    argv_buf[argc] = "-o";
-    argc += 1;
-    argv_buf[argc] = "BatchMode=yes";
     argc += 1;
     argv_buf[argc] = "-o";
     argc += 1;
@@ -217,6 +246,25 @@ fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surf
     argc += 1;
     argv_buf[argc] = "ConnectTimeout=8";
     argc += 1;
+    if (conn.password_auth) {
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "PreferredAuthentications=password,keyboard-interactive";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "PubkeyAuthentication=no";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "NumberOfPasswordPrompts=1";
+        argc += 1;
+    } else {
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "BatchMode=yes";
+        argc += 1;
+    }
     if (conn.port().len > 0) {
         argv_buf[argc] = "-P";
         argc += 1;
@@ -233,6 +281,7 @@ fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surf
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;
+    if (env_map) |*map| child.env_map = map;
     child.spawn() catch |err| {
         std.debug.print("SSH image upload failed to start: {}\n", .{err});
         return null;

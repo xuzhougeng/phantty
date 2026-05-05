@@ -876,7 +876,7 @@ fn connectSshProfile(idx: usize) void {
 
     sessionLauncherClose();
     if (AppWindow.spawnTabWithCommandUtf8ReturningSurface(command)) |surface| {
-        surface.setSshConnection(user, ip, port, password.len > 0);
+        surface.setSshConnection(user, ip, port, password, password.len > 0);
         if (server_name.len > 0) {
             surface.setTitleOverride(server_name);
         }
