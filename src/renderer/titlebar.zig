@@ -32,6 +32,14 @@ pub fn sidebarWidth() f32 {
     return if (tab.g_sidebar_visible) g_sidebar_width else 0;
 }
 
+pub fn sidebarRowHeight() f32 {
+    return @max(SIDEBAR_ROW_H, @round(font.g_titlebar_cell_height + 22));
+}
+
+pub fn sidebarHeaderHeight() f32 {
+    return @max(SIDEBAR_HEADER_H, @round(font.g_titlebar_cell_height + 24));
+}
+
 pub fn sidebarMaxWidthForWindow(window_width: f32) f32 {
     return @max(SIDEBAR_MIN_WIDTH, @min(SIDEBAR_MAX_WIDTH, window_width - SIDEBAR_MIN_CONTENT_WIDTH));
 }
@@ -972,7 +980,9 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
     gl_init.renderQuad(sidebar_w - 1, 0, if (resize_hovered) 2 else 1, side_h, edge_color);
 
     const header_top_px = titlebar_h;
-    const header_y = window_height - header_top_px - SIDEBAR_HEADER_H;
+    const header_h = sidebarHeaderHeight();
+    const row_h_full = sidebarRowHeight();
+    const header_y = window_height - header_top_px - header_h;
     const plus_btn_w: f32 = 42;
     const plus_x = sidebar_w - plus_btn_w - 6;
     const plus_hovered = blk: {
@@ -980,13 +990,13 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
         if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
         const mx: f32 = @floatFromInt(win.mouse_x);
         const my: f32 = @floatFromInt(win.mouse_y);
-        break :blk mx >= plus_x and mx < plus_x + plus_btn_w and my >= header_top_px and my < header_top_px + SIDEBAR_HEADER_H;
+        break :blk mx >= plus_x and mx < plus_x + plus_btn_w and my >= header_top_px and my < header_top_px + header_h;
     };
     if (plus_hovered) {
-        gl_init.renderQuad(plus_x, header_y + 4, plus_btn_w, SIDEBAR_HEADER_H - 8, hover_bg);
+        gl_init.renderQuad(plus_x, header_y + 4, plus_btn_w, header_h - 8, hover_bg);
     }
-    _ = renderTextLimited("Tabs", 14, header_y + (SIDEBAR_HEADER_H - font.g_titlebar_cell_height) / 2, header_text, sidebar_w - plus_btn_w - 26);
-    renderPlusIcon(plus_x, header_y, plus_btn_w, SIDEBAR_HEADER_H, text_active);
+    _ = renderTextLimited("Tabs", 14, header_y + (header_h - font.g_titlebar_cell_height) / 2, header_text, sidebar_w - plus_btn_w - 26);
+    renderPlusIcon(plus_x, header_y, plus_btn_w, header_h, text_active);
     gl_init.renderQuad(0, header_y, sidebar_w, 1, border_color);
 
     const now_ms = std.time.milliTimestamp();
@@ -996,7 +1006,7 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
         0.016;
     tab.g_last_frame_time_ms = now_ms;
 
-    const list_top_px = titlebar_h + SIDEBAR_HEADER_H + 6;
+    const list_top_px = titlebar_h + header_h + 6;
     for (0..tab.MAX_TABS) |tab_idx| {
         tab.g_tab_text_x_start[tab_idx] = 0;
         tab.g_tab_text_x_end[tab_idx] = 0;
@@ -1005,9 +1015,9 @@ pub fn renderSidebar(window_width: f32, window_height: f32, titlebar_h: f32) voi
     }
 
     for (0..tab.g_tab_count) |tab_idx| {
-        const row_top_px = list_top_px + @as(f32, @floatFromInt(tab_idx)) * SIDEBAR_ROW_H;
+        const row_top_px = list_top_px + @as(f32, @floatFromInt(tab_idx)) * row_h_full;
         if (row_top_px >= window_height) break;
-        const row_h = @min(SIDEBAR_ROW_H, window_height - row_top_px);
+        const row_h = @min(row_h_full, window_height - row_top_px);
         const row_y = window_height - row_top_px - row_h;
         const is_active = tab_idx == tab.g_active_tab;
 

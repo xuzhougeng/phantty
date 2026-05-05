@@ -87,8 +87,8 @@ pub threadlocal var g_icon_atlas: ?FontAtlas = null;
 pub threadlocal var g_icon_atlas_texture: c.GLuint = 0;
 pub threadlocal var g_icon_atlas_modified: usize = 0;
 
-// Titlebar font — separate face/cache/atlas at fixed 14pt for crisp titlebar text.
-// Avoids scaling artifacts from rendering terminal-size glyphs at a smaller size.
+// UI font — separate face/cache/atlas derived from the terminal font size.
+// Avoids scaling artifacts while keeping sidebars and overlays in step with zoom.
 pub threadlocal var g_titlebar_face: ?freetype.Face = null;
 pub threadlocal var g_titlebar_cache: std.AutoHashMapUnmanaged(u32, Character) = .empty;
 pub threadlocal var g_titlebar_atlas: ?FontAtlas = null;

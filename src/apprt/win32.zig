@@ -23,6 +23,7 @@ pub const HICON = *opaque {};
 pub const HCURSOR = *opaque {};
 pub const HBRUSH = *opaque {};
 pub const HMENU = *opaque {};
+pub const HIMC = *opaque {};
 pub const ATOM = u16;
 pub const WPARAM = windows.WPARAM;
 pub const LPARAM = windows.LPARAM;
@@ -179,6 +180,9 @@ pub const WM_SYSKEYUP: UINT = 0x0105;
 pub const WM_CHAR: UINT = 0x0102;
 pub const WM_SYSCHAR: UINT = 0x0106;
 pub const WM_SYSDEADCHAR: UINT = 0x0107;
+pub const WM_IME_STARTCOMPOSITION: UINT = 0x010D;
+pub const WM_IME_ENDCOMPOSITION: UINT = 0x010E;
+pub const WM_IME_COMPOSITION: UINT = 0x010F;
 pub const WM_MOUSEMOVE: UINT = 0x0200;
 pub const WM_LBUTTONDOWN: UINT = 0x0201;
 pub const WM_LBUTTONUP: UINT = 0x0202;
@@ -204,6 +208,22 @@ pub const WM_MOUSELEAVE: UINT = 0x02A3;
 pub const WM_ACTIVATE: UINT = 0x0006;
 pub const WM_GETMINMAXINFO: UINT = 0x0024;
 pub const WM_DROPFILES: UINT = 0x0233;
+
+pub const CFS_POINT: DWORD = 0x0002;
+pub const CFS_CANDIDATEPOS: DWORD = 0x0040;
+
+pub const COMPOSITIONFORM = extern struct {
+    dwStyle: DWORD,
+    ptCurrentPos: POINT,
+    rcArea: RECT,
+};
+
+pub const CANDIDATEFORM = extern struct {
+    dwIndex: DWORD,
+    dwStyle: DWORD,
+    ptCurrentPos: POINT,
+    rcArea: RECT,
+};
 
 // TrackMouseEvent
 pub const TME_LEAVE: DWORD = 0x00000002;
@@ -327,6 +347,11 @@ extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) BOOL;
 extern "user32" fn FlashWindowEx(pfwi: *const FLASHWINFO) callconv(.winapi) BOOL;
 extern "user32" fn GetForegroundWindow() callconv(.winapi) ?HWND;
+
+extern "imm32" fn ImmGetContext(hWnd: HWND) callconv(.winapi) ?HIMC;
+extern "imm32" fn ImmReleaseContext(hWnd: HWND, hIMC: HIMC) callconv(.winapi) BOOL;
+extern "imm32" fn ImmSetCompositionWindow(hIMC: HIMC, lpCompForm: *COMPOSITIONFORM) callconv(.winapi) BOOL;
+extern "imm32" fn ImmSetCandidateWindow(hIMC: HIMC, lpCandidate: *CANDIDATEFORM) callconv(.winapi) BOOL;
 
 // Clipboard
 pub extern "user32" fn OpenClipboard(hWndNewOwner: ?HWND) callconv(.winapi) BOOL;
@@ -756,6 +781,10 @@ pub const Window = struct {
     /// Current mouse position in client coordinates (for hover tracking)
     mouse_x: i32 = 0,
     mouse_y: i32 = 0,
+    /// Terminal caret position in client coordinates for Windows IME UI.
+    ime_caret_x: i32 = 12,
+    ime_caret_y: i32 = TITLEBAR_HEIGHT + 10,
+    ime_caret_height: i32 = 20,
 
     // Input event queues (written by WndProc, read by main loop)
     key_events: RingBuffer(KeyEvent, 64) = .{},
@@ -770,6 +799,13 @@ pub const Window = struct {
     /// this, newly exposed pixels show as black until the main loop
     /// renders the next frame.
     on_resize: ?*const fn (width: i32, height: i32) void = null,
+
+    pub fn setImeCaret(self: *Window, x: i32, y: i32, height: i32) void {
+        self.ime_caret_x = @max(0, x);
+        self.ime_caret_y = @max(0, y);
+        self.ime_caret_height = @max(1, height);
+        updateImeWindowPosition(self);
+    }
 
     /// Initialize a Win32 window with an OpenGL 3.3 core profile context.
     ///
@@ -1268,6 +1304,7 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         },
         WM_SETFOCUS => {
             w.focused = true;
+            updateImeWindowPosition(w);
             return 0;
         },
         WM_KILLFOCUS => {
@@ -1276,6 +1313,14 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         },
         WM_ERASEBKGND => {
             return 1;
+        },
+
+        WM_IME_STARTCOMPOSITION, WM_IME_COMPOSITION => {
+            updateImeWindowPosition(w);
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        },
+        WM_IME_ENDCOMPOSITION => {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
         WM_DROPFILES => {
@@ -1574,6 +1619,40 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         else => {},
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+fn updateImeWindowPosition(w: *Window) void {
+    const hIMC = ImmGetContext(w.hwnd) orelse return;
+    defer _ = ImmReleaseContext(w.hwnd, hIMC);
+
+    const x = @max(0, @min(w.width - 1, w.ime_caret_x));
+    const y = @max(0, @min(w.height - 1, w.ime_caret_y));
+    const h = @max(1, w.ime_caret_height);
+
+    var comp = COMPOSITIONFORM{
+        .dwStyle = CFS_POINT,
+        .ptCurrentPos = .{ .x = x, .y = y },
+        .rcArea = .{
+            .left = x,
+            .top = y,
+            .right = @max(x + 1, w.width),
+            .bottom = @min(w.height, y + h),
+        },
+    };
+    _ = ImmSetCompositionWindow(hIMC, &comp);
+
+    var candidate = CANDIDATEFORM{
+        .dwIndex = 0,
+        .dwStyle = CFS_CANDIDATEPOS,
+        .ptCurrentPos = .{ .x = x, .y = y + h },
+        .rcArea = .{
+            .left = x,
+            .top = y,
+            .right = @max(x + 1, w.width),
+            .bottom = w.height,
+        },
+    };
+    _ = ImmSetCandidateWindow(hIMC, &candidate);
 }
 
 fn handleDropFiles(wParam: WPARAM, w: *Window) void {

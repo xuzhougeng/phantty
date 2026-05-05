@@ -30,14 +30,18 @@ pub fn transfer(allocator: std.mem.Allocator, conn: *const SshConnection, src: [
         }
     }
 
-    var argv_buf: [18][]const u8 = undefined;
+    var control_path: ?[]u8 = null;
+    defer if (control_path) |p| allocator.free(p);
+    control_path = sshControlPathOption(allocator);
+
+    var argv_buf: [32][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = "scp.exe";
     argc += 1;
     argv_buf[argc] = "-q";
     argc += 1;
 
-    argc = appendSshOptions(&argv_buf, argc, conn, .scp);
+    argc = appendSshOptions(&argv_buf, argc, conn, .scp, control_path);
 
     argv_buf[argc] = src;
     argc += 1;
@@ -81,12 +85,16 @@ pub fn sshExec(allocator: std.mem.Allocator, conn: *const SshConnection, command
         }
     }
 
-    var argv_buf: [18][]const u8 = undefined;
+    var control_path: ?[]u8 = null;
+    defer if (control_path) |p| allocator.free(p);
+    control_path = sshControlPathOption(allocator);
+
+    var argv_buf: [32][]const u8 = undefined;
     var argc: usize = 0;
     argv_buf[argc] = "ssh.exe";
     argc += 1;
 
-    argc = appendSshOptions(&argv_buf, argc, conn, .ssh);
+    argc = appendSshOptions(&argv_buf, argc, conn, .ssh, control_path);
 
     // user@host
     var dest_buf: [280]u8 = undefined;
@@ -156,7 +164,13 @@ pub fn remoteSpec(buf: *[512]u8, conn: *const SshConnection, remote_path: []cons
 
 const PortMode = enum { ssh, scp };
 
-fn appendSshOptions(argv_buf: *[18][]const u8, start_argc: usize, conn: *const SshConnection, port_mode: PortMode) usize {
+fn appendSshOptions(
+    argv_buf: *[32][]const u8,
+    start_argc: usize,
+    conn: *const SshConnection,
+    port_mode: PortMode,
+    control_path: ?[]const u8,
+) usize {
     var argc = start_argc;
     argv_buf[argc] = "-o";
     argc += 1;
@@ -190,7 +204,39 @@ fn appendSshOptions(argv_buf: *[18][]const u8, start_argc: usize, conn: *const S
         argv_buf[argc] = conn.port();
         argc += 1;
     }
+    if (control_path) |path| {
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "ControlMaster=auto";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = "ControlPersist=10m";
+        argc += 1;
+        argv_buf[argc] = "-o";
+        argc += 1;
+        argv_buf[argc] = path;
+        argc += 1;
+    }
     return argc;
+}
+
+fn sshControlPathOption(allocator: std.mem.Allocator) ?[]u8 {
+    const temp_raw = std.process.getEnvVarOwned(allocator, "TEMP") catch
+        std.process.getEnvVarOwned(allocator, "TMP") catch return null;
+    defer allocator.free(temp_raw);
+
+    const trimmed = std.mem.trimRight(u8, temp_raw, "\\/");
+    if (trimmed.len == 0) return null;
+
+    var normalized: std.ArrayListUnmanaged(u8) = .empty;
+    defer normalized.deinit(allocator);
+    normalized.appendSlice(allocator, "ControlPath=") catch return null;
+    for (trimmed) |ch| {
+        normalized.append(allocator, if (ch == '\\') '/' else ch) catch return null;
+    }
+    normalized.appendSlice(allocator, "/phantty-ssh-%C") catch return null;
+    return normalized.toOwnedSlice(allocator) catch null;
 }
 
 fn askPassScriptPath(allocator: std.mem.Allocator) ?[]u8 {
@@ -247,8 +293,8 @@ test "appendSshOptions key-based auth" {
     conn.password_auth = false;
     conn.port_len = 0;
 
-    var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh);
+    var argv_buf: [32][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
     // -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o BatchMode=yes = 6 args
     try std.testing.expectEqual(@as(usize, 6), argc);
     try std.testing.expectEqualStrings("BatchMode=yes", argv_buf[5]);
@@ -259,8 +305,8 @@ test "appendSshOptions password auth" {
     conn.password_auth = true;
     conn.port_len = 0;
 
-    var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh);
+    var argv_buf: [32][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
     // -o StrictHostKeyChecking -o ConnectTimeout -o PreferredAuth -o NumPasswords = 8
     try std.testing.expectEqual(@as(usize, 8), argc);
     try std.testing.expectEqualStrings("NumberOfPasswordPrompts=1", argv_buf[7]);
@@ -272,8 +318,8 @@ test "appendSshOptions with ssh port" {
     @memcpy(conn.port_buf[0..4], "2222");
     conn.port_len = 4;
 
-    var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh);
+    var argv_buf: [32][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, null);
     // 6 (base key-auth) + 2 (-p 2222) = 8
     try std.testing.expectEqual(@as(usize, 8), argc);
     try std.testing.expectEqualStrings("-p", argv_buf[6]);
@@ -286,9 +332,22 @@ test "appendSshOptions with scp port" {
     @memcpy(conn.port_buf[0..4], "2222");
     conn.port_len = 4;
 
-    var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn, .scp);
+    var argv_buf: [32][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .scp, null);
     try std.testing.expectEqual(@as(usize, 8), argc);
     try std.testing.expectEqualStrings("-P", argv_buf[6]);
     try std.testing.expectEqualStrings("2222", argv_buf[7]);
+}
+
+test "appendSshOptions with control path" {
+    var conn: SshConnection = .{};
+    conn.password_auth = false;
+    conn.port_len = 0;
+
+    var argv_buf: [32][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh, "ControlPath=C:/Temp/phantty-ssh-%C");
+    try std.testing.expectEqual(@as(usize, 12), argc);
+    try std.testing.expectEqualStrings("ControlMaster=auto", argv_buf[7]);
+    try std.testing.expectEqualStrings("ControlPersist=10m", argv_buf[9]);
+    try std.testing.expectEqualStrings("ControlPath=C:/Temp/phantty-ssh-%C", argv_buf[11]);
 }

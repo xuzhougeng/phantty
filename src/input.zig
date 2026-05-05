@@ -889,10 +889,10 @@ fn hitTestSidebarTab(xpos: f64, ypos: f64) ?usize {
     if (!tab.g_sidebar_visible) return null;
     if (xpos < 0 or xpos >= @as(f64, @floatCast(titlebar.sidebarWidth()))) return null;
 
-    const list_top = titlebarHeight() + @as(f64, titlebar.SIDEBAR_HEADER_H) + 6;
+    const list_top = titlebarHeight() + @as(f64, @floatCast(titlebar.sidebarHeaderHeight())) + 6;
     if (ypos < list_top) return null;
 
-    const idx_f = (ypos - list_top) / @as(f64, titlebar.SIDEBAR_ROW_H);
+    const idx_f = (ypos - list_top) / @as(f64, @floatCast(titlebar.sidebarRowHeight()));
     const idx: usize = @intFromFloat(@floor(idx_f));
     if (idx >= tab.g_tab_count) return null;
     return idx;
@@ -904,7 +904,7 @@ fn hitTestSidebarPlusButton(xpos: f64, ypos: f64) bool {
     const plus_w: f64 = 42;
     const plus_x = @as(f64, @floatCast(titlebar.sidebarWidth())) - plus_w - 6;
     return xpos >= plus_x and xpos < plus_x + plus_w and
-        ypos >= top and ypos < top + @as(f64, titlebar.SIDEBAR_HEADER_H);
+        ypos >= top and ypos < top + @as(f64, @floatCast(titlebar.sidebarHeaderHeight()));
 }
 
 fn hitTestSidebarTabCloseButton(xpos: f64, ypos: f64, tab_idx: usize) bool {
@@ -1117,11 +1117,11 @@ fn handleFileExplorerPress(xpos: f64, ypos: f64) void {
     if (xpos < panel_x) return;
 
     const titlebar_h = titlebarHeight();
-    const header_h: f64 = @floatCast(file_explorer.HEADER_HEIGHT);
+    const header_h: f64 = @floatCast(file_explorer.headerHeight());
     const list_top = titlebar_h + header_h;
     if (ypos < list_top) return;
 
-    const row_h: f64 = @floatCast(file_explorer.ROW_HEIGHT);
+    const row_h: f64 = @floatCast(file_explorer.rowHeight());
     const scroll: f64 = @floatCast(file_explorer.g_scroll_offset);
     const row_idx: usize = @intFromFloat((ypos - list_top + scroll) / row_h);
 
@@ -1876,7 +1876,7 @@ fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
         const win = AppWindow.g_window orelse return;
         const panel_x = @as(i32, @intFromFloat(@as(f32, @floatFromInt(win.width)) - file_explorer.width()));
         if (ev.xpos >= panel_x) {
-            const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * file_explorer.ROW_HEIGHT * 3 / 120.0;
+            const delta: f32 = -@as(f32, @floatFromInt(ev.delta)) * file_explorer.rowHeight() * 3 / 120.0;
             file_explorer.scrollBy(delta);
             return;
         }

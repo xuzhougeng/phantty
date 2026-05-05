@@ -17,6 +17,7 @@ pub const RESIZE_HIT_WIDTH: f32 = 8;
 pub const ROW_HEIGHT: f32 = 24;
 pub const HEADER_HEIGHT: f32 = 36;
 pub const INDENT_WIDTH: f32 = 16;
+pub const MAX_ENTRIES: usize = 2048;
 
 pub const Mode = enum { local, remote };
 
@@ -24,6 +25,8 @@ pub threadlocal var g_visible: bool = false;
 pub threadlocal var g_width: f32 = DEFAULT_WIDTH;
 pub threadlocal var g_focused: bool = false;
 pub threadlocal var g_mode: Mode = .local;
+pub threadlocal var g_row_height: f32 = ROW_HEIGHT;
+pub threadlocal var g_header_height: f32 = HEADER_HEIGHT;
 
 // Remote SSH connection state (copied from surface when entering remote mode)
 pub threadlocal var g_ssh_conn: Surface.SshConnection = .{};
@@ -34,6 +37,9 @@ pub threadlocal var g_transfer_status: TransferStatus = .idle;
 pub threadlocal var g_transfer_msg: [128]u8 = undefined;
 pub threadlocal var g_transfer_msg_len: u8 = 0;
 pub threadlocal var g_transfer_time: i64 = 0;
+pub threadlocal var g_loading: bool = false;
+pub threadlocal var g_loading_msg: [128]u8 = undefined;
+pub threadlocal var g_loading_msg_len: u8 = 0;
 
 pub const TransferStatus = enum { idle, in_progress, success, failed };
 
@@ -48,8 +54,30 @@ pub threadlocal var g_root_path: [260]u8 = undefined;
 pub threadlocal var g_root_path_len: usize = 0;
 
 // Flat list of currently visible entries (rebuilt on expand/collapse/rescan)
-pub threadlocal var g_entries: [2048]FlatEntry = undefined;
+pub threadlocal var g_entries: [MAX_ENTRIES]FlatEntry = undefined;
 pub threadlocal var g_entry_count: usize = 0;
+
+const AsyncListKind = enum { rescan, expand };
+
+const AsyncListJob = struct {
+    kind: AsyncListKind,
+    conn: Surface.SshConnection,
+    context_id: u64,
+    path_buf: [512]u8 = undefined,
+    path_len: usize = 0,
+    depth: u16 = 0,
+    resolve_root: bool = false,
+    root_buf: [512]u8 = undefined,
+    root_len: usize = 0,
+    entries: []file_backend.Entry,
+    status: file_backend.ListStatus = .ssh_failed,
+    count: usize = 0,
+    done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    thread: ?std.Thread = null,
+};
+
+threadlocal var g_async_job: ?*AsyncListJob = null;
+threadlocal var g_async_context_id: u64 = 1;
 
 pub const FlatEntry = struct {
     name_buf: [256]u8 = undefined,
@@ -64,6 +92,19 @@ pub const FlatEntry = struct {
 
 pub fn width() f32 {
     return if (g_visible) g_width else 0;
+}
+
+pub fn syncLayoutMetrics(text_height: f32) void {
+    g_row_height = @max(ROW_HEIGHT, @round(text_height + 8));
+    g_header_height = @max(HEADER_HEIGHT, @round(text_height + 16));
+}
+
+pub fn rowHeight() f32 {
+    return g_row_height;
+}
+
+pub fn headerHeight() f32 {
+    return g_header_height;
 }
 
 pub fn maxWidthForWindow(window_width: f32) f32 {
@@ -94,6 +135,7 @@ pub fn toggle() void {
 
 /// Enter remote mode with the given SSH connection.
 pub fn enterRemoteMode(conn: *const Surface.SshConnection, remote_cwd: []const u8) void {
+    g_async_context_id +%= 1;
     g_mode = .remote;
     g_ssh_conn = conn.*;
     g_has_ssh_conn = true;
@@ -107,6 +149,7 @@ pub fn enterRemoteMode(conn: *const Surface.SshConnection, remote_cwd: []const u
 
 /// Switch back to local mode.
 pub fn enterLocalMode() void {
+    g_async_context_id +%= 1;
     g_mode = .local;
     g_has_ssh_conn = false;
     g_entry_count = 0;
@@ -114,6 +157,7 @@ pub fn enterLocalMode() void {
 }
 
 pub fn setRoot(path: []const u8) void {
+    g_async_context_id +%= 1;
     const len = @min(path.len, g_root_path.len);
     @memcpy(g_root_path[0..len], path[0..len]);
     g_root_path_len = len;
@@ -121,6 +165,51 @@ pub fn setRoot(path: []const u8) void {
         rescanRemote();
     } else {
         rescan();
+    }
+}
+
+pub fn tickAsync() void {
+    const job = g_async_job orelse return;
+    if (!job.done.load(.acquire)) return;
+
+    if (job.thread) |thread| thread.join();
+    g_async_job = null;
+    g_loading = false;
+    defer destroyAsyncJob(job);
+
+    if (job.context_id != g_async_context_id or g_mode != .remote or !g_has_ssh_conn) {
+        return;
+    }
+
+    if (job.status != .ok) {
+        setTransferStatus(.failed, if (job.resolve_root) "SSH pwd failed" else "SSH list failed");
+        if (job.kind == .expand) {
+            if (findEntryByPath(job.path_buf[0..job.path_len])) |idx| {
+                g_entries[idx].expanded = false;
+            }
+        }
+        return;
+    }
+
+    switch (job.kind) {
+        .rescan => {
+            if (job.resolve_root) {
+                const root_len = @min(job.root_len, g_root_path.len);
+                @memcpy(g_root_path[0..root_len], job.root_buf[0..root_len]);
+                g_root_path_len = root_len;
+            }
+            g_entry_count = 0;
+            g_scroll_offset = 0;
+            g_selected = null;
+            const root = g_root_path[0..g_root_path_len];
+            _ = insertBackendChildren(0, job.entries[0..job.count], 0, root, '/');
+        },
+        .expand => {
+            const path = job.path_buf[0..job.path_len];
+            const idx = findEntryByPath(path) orelse return;
+            if (!g_entries[idx].expanded) return;
+            _ = insertBackendChildren(idx + 1, job.entries[0..job.count], job.depth, path, '/');
+        },
     }
 }
 
@@ -152,21 +241,15 @@ pub fn rescanRemote() void {
     if (!g_has_ssh_conn) return;
 
     if (g_root_path_len == 0) {
-        var root_buf: [512]u8 = undefined;
-        const allocator = std.heap.page_allocator;
-        const len = file_backend.resolveRoot(allocator, .{ .ssh = &g_ssh_conn }, &root_buf) orelse {
-            setTransferStatus(.failed, "SSH pwd failed");
-            return;
-        };
-        const root_len = @min(len, g_root_path.len);
-        @memcpy(g_root_path[0..root_len], root_buf[0..root_len]);
-        g_root_path_len = root_len;
+        if (!startAsyncList(.rescan, "", 0, true)) {
+            setTransferStatus(.failed, "SSH list busy");
+        }
+        return;
     }
 
     const path = g_root_path[0..g_root_path_len];
-    const result = loadBackendEntries(.{ .ssh = &g_ssh_conn }, path, 0, path, '/');
-    if (result != .ok) {
-        setTransferStatus(.failed, "SSH list failed");
+    if (!startAsyncList(.rescan, path, 0, false)) {
+        setTransferStatus(.failed, "SSH list busy");
     }
 }
 
@@ -259,7 +342,13 @@ pub fn toggleExpand(idx: usize) void {
 }
 
 fn expandRemote(idx: usize) void {
-    expandWithBackend(idx, .{ .ssh = &g_ssh_conn }, '/');
+    const entry = &g_entries[idx];
+    entry.expanded = true;
+    const path = entry.path_buf[0..entry.path_len];
+    if (!startAsyncList(.expand, path, entry.depth + 1, false)) {
+        entry.expanded = false;
+        setTransferStatus(.failed, "SSH list busy");
+    }
 }
 
 fn expandWithBackend(idx: usize, backend: file_backend.Backend, sep: u8) void {
@@ -289,20 +378,36 @@ fn expandWithBackend(idx: usize, backend: file_backend.Backend, sep: u8) void {
         return;
     }
 
-    const flat_children = allocator.alloc(FlatEntry, result.count) catch {
-        entry.expanded = false;
-        return;
+    const inserted = insertBackendChildren(insert_pos, backend_entries[0..result.count], child_depth, path, sep);
+    if (inserted == 0) entry.expanded = false;
+}
+
+fn insertBackendChildren(
+    insert_pos: usize,
+    backend_entries: []const file_backend.Entry,
+    child_depth: u16,
+    parent_path: []const u8,
+    sep: u8,
+) usize {
+    if (backend_entries.len == 0) return 0;
+    if (g_entry_count >= g_entries.len) return 0;
+
+    const allocator = std.heap.page_allocator;
+    const max_new = g_entries.len - g_entry_count;
+    const flat_children = allocator.alloc(FlatEntry, @min(backend_entries.len, max_new)) catch {
+        return 0;
     };
     defer allocator.free(flat_children);
 
     var filled: usize = 0;
-    for (backend_entries[0..result.count]) |*child| {
-        if (copyBackendEntry(&flat_children[filled], child, child_depth, path, sep)) {
+    for (backend_entries) |*child| {
+        if (filled >= flat_children.len) break;
+        if (copyBackendEntry(&flat_children[filled], child, child_depth, parent_path, sep)) {
             filled += 1;
         }
     }
 
-    if (filled == 0) return;
+    if (filled == 0) return 0;
 
     if (insert_pos < g_entry_count) {
         std.mem.copyBackwards(
@@ -314,6 +419,81 @@ fn expandWithBackend(idx: usize, backend: file_backend.Backend, sep: u8) void {
 
     @memcpy(g_entries[insert_pos .. insert_pos + filled], flat_children[0..filled]);
     g_entry_count += filled;
+    return filled;
+}
+
+fn findEntryByPath(path: []const u8) ?usize {
+    for (0..g_entry_count) |idx| {
+        const entry_path = g_entries[idx].path_buf[0..g_entries[idx].path_len];
+        if (std.mem.eql(u8, entry_path, path)) return idx;
+    }
+    return null;
+}
+
+fn startAsyncList(kind: AsyncListKind, path: []const u8, depth: u16, resolve_root: bool) bool {
+    if (!g_has_ssh_conn) return false;
+    if (g_async_job != null) return false;
+    if (path.len > 512) return false;
+
+    const allocator = std.heap.page_allocator;
+    const entries = allocator.alloc(file_backend.Entry, MAX_ENTRIES) catch return false;
+    const job = allocator.create(AsyncListJob) catch {
+        allocator.free(entries);
+        return false;
+    };
+
+    job.* = .{
+        .kind = kind,
+        .conn = g_ssh_conn,
+        .context_id = g_async_context_id,
+        .path_len = path.len,
+        .depth = depth,
+        .resolve_root = resolve_root,
+        .entries = entries,
+    };
+    @memcpy(job.path_buf[0..path.len], path);
+
+    const thread = std.Thread.spawn(.{}, asyncListThread, .{job}) catch {
+        allocator.free(entries);
+        allocator.destroy(job);
+        return false;
+    };
+    job.thread = thread;
+    g_async_job = job;
+    setLoading(if (resolve_root) "remote folder" else path);
+    return true;
+}
+
+fn asyncListThread(job: *AsyncListJob) void {
+    const allocator = std.heap.page_allocator;
+    var path = job.path_buf[0..job.path_len];
+
+    if (job.resolve_root) {
+        const root_len = file_backend.resolveRoot(allocator, .{ .ssh = &job.conn }, &job.root_buf) orelse {
+            job.status = .ssh_failed;
+            job.done.store(true, .release);
+            return;
+        };
+        job.root_len = root_len;
+        path = job.root_buf[0..root_len];
+    }
+
+    const result = file_backend.list(allocator, .{ .ssh = &job.conn }, path, job.entries);
+    job.status = result.status;
+    job.count = result.count;
+    job.done.store(true, .release);
+}
+
+fn destroyAsyncJob(job: *AsyncListJob) void {
+    const allocator = std.heap.page_allocator;
+    allocator.free(job.entries);
+    allocator.destroy(job);
+}
+
+fn setLoading(msg: []const u8) void {
+    g_loading = true;
+    g_loading_msg_len = @intCast(@min(msg.len, g_loading_msg.len));
+    @memcpy(g_loading_msg[0..g_loading_msg_len], msg[0..g_loading_msg_len]);
 }
 
 fn expand(idx: usize) void {
@@ -358,7 +538,7 @@ pub fn scrollBy(delta: f32) void {
 }
 
 fn maxScroll() f32 {
-    const total_h = @as(f32, @floatFromInt(g_entry_count)) * ROW_HEIGHT;
+    const total_h = @as(f32, @floatFromInt(g_entry_count)) * rowHeight();
     return @max(0, total_h - 400);
 }
 
@@ -548,11 +728,12 @@ pub fn moveSelection(delta: i32) void {
 
 fn ensureSelectedVisible() void {
     const sel = g_selected orelse return;
-    const sel_top = @as(f32, @floatFromInt(sel)) * ROW_HEIGHT;
+    const row_h = rowHeight();
+    const sel_top = @as(f32, @floatFromInt(sel)) * row_h;
     if (sel_top < g_scroll_offset) {
         g_scroll_offset = sel_top;
-    } else if (sel_top + ROW_HEIGHT > g_scroll_offset + 400) {
-        g_scroll_offset = sel_top + ROW_HEIGHT - 400;
+    } else if (sel_top + row_h > g_scroll_offset + 400) {
+        g_scroll_offset = sel_top + row_h - 400;
     }
 }
 

@@ -640,26 +640,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
         font.preloadCharacters(new_face);
         // glyph_face is set inside preloadCharacters
 
-        // Rebuild titlebar font at 14pt with the new family
-        if (font.g_titlebar_face) |old_tb| old_tb.deinit();
-        font.g_titlebar_face = null;
-        font.g_titlebar_cache.deinit(allocator);
-        font.g_titlebar_cache = .empty;
-        if (font.g_titlebar_atlas) |*a| {
-            a.deinit(allocator);
-            font.g_titlebar_atlas = null;
-        }
-        if (font.g_titlebar_atlas_texture != 0) {
-            gl.DeleteTextures.?(1, &font.g_titlebar_atlas_texture);
-            font.g_titlebar_atlas_texture = 0;
-            font.g_titlebar_atlas_modified = 0;
-        }
-        if (font.loadFontFromConfig(allocator, new_family, new_weight, 10, ft_lib)) |tb_face| {
-            font.g_titlebar_face = tb_face;
-            const sm = tb_face.handle.*.size.*.metrics;
-            font.g_titlebar_cell_height = @round(@as(f32, @floatFromInt(sm.height)) / 64.0);
-            font.g_titlebar_baseline = @round(-@as(f32, @floatFromInt(sm.descender)) / 64.0);
-        }
+        rebuildTitlebarFont(allocator, new_family, new_weight, uiFontSize(new_font_size), ft_lib);
 
         // --- Window size ---
         // If window size is configured, apply it; then resize window to match new cell dims.
@@ -673,6 +654,62 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     }
 
     std.debug.print("Config reloaded successfully\n", .{});
+}
+
+fn uiFontSize(term_font_size: u32) u32 {
+    return @min(24, @max(9, term_font_size));
+}
+
+fn clearTitlebarFont(allocator: std.mem.Allocator) void {
+    if (font.g_titlebar_face) |old_tb| old_tb.deinit();
+    font.g_titlebar_face = null;
+    font.g_titlebar_cache.deinit(allocator);
+    font.g_titlebar_cache = .empty;
+    if (font.g_titlebar_atlas) |*a| {
+        a.deinit(allocator);
+        font.g_titlebar_atlas = null;
+    }
+    if (font.g_titlebar_atlas_texture != 0) {
+        gl.DeleteTextures.?(1, &font.g_titlebar_atlas_texture);
+        font.g_titlebar_atlas_texture = 0;
+        font.g_titlebar_atlas_modified = 0;
+    }
+}
+
+fn rebuildTitlebarFont(
+    allocator: std.mem.Allocator,
+    family: []const u8,
+    weight: directwrite.DWRITE_FONT_WEIGHT,
+    pt: u32,
+    ft_lib: freetype.Library,
+) void {
+    clearTitlebarFont(allocator);
+
+    if (font.loadFontFromConfig(allocator, family, weight, pt, ft_lib)) |tb_face| {
+        font.g_titlebar_face = tb_face;
+
+        const sm = tb_face.handle.*.size.*.metrics;
+        const tb_ascent = @as(f32, @floatFromInt(sm.ascender)) / 64.0;
+        const tb_descent = @as(f32, @floatFromInt(sm.descender)) / 64.0;
+        const tb_height = @as(f32, @floatFromInt(sm.height)) / 64.0;
+        font.g_titlebar_cell_height = @round(tb_height);
+        font.g_titlebar_baseline = @round(-tb_descent);
+
+        var max_adv: f32 = 0;
+        for (32..127) |cp| {
+            if (font.loadTitlebarGlyph(@intCast(cp))) |g| {
+                const adv = @as(f32, @floatFromInt(g.advance >> 6));
+                max_adv = @max(max_adv, adv);
+            }
+        }
+        if (max_adv > 0) font.g_titlebar_cell_width = max_adv;
+
+        std.debug.print("UI font: {}pt {d:.0}x{d:.0} (ascent={d:.1}, descent={d:.1}, baseline={d:.0})\n", .{
+            pt, font.g_titlebar_cell_width, font.g_titlebar_cell_height, tb_ascent, tb_descent, font.g_titlebar_baseline,
+        });
+    } else {
+        std.debug.print("UI font init failed, keeping titlebar fallback metrics\n", .{});
+    }
 }
 
 /// Check if the config file has changed (via ReadDirectoryChangesW) and reload if so.
@@ -693,6 +730,44 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
 pub fn resetCursorBlink() void {
     g_cursor_blink_visible = true;
     g_last_blink_time = std.time.milliTimestamp();
+}
+
+fn syncImeCaretPosition(win: *win32_backend.Window, split_count: usize) void {
+    const surface = activeSurface() orelse return;
+
+    var cursor_x: usize = 0;
+    var cursor_y: usize = 0;
+    {
+        surface.render_state.mutex.lock();
+        defer surface.render_state.mutex.unlock();
+        const screen = surface.terminal.screens.active;
+        cursor_x = screen.cursor.x;
+        cursor_y = screen.cursor.y;
+    }
+
+    const pad = surface.getPadding();
+    const cell_w = font.cell_width;
+    const cell_h = font.cell_height;
+
+    var x: f32 = titlebar.sidebarWidth() + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(cursor_x)) * cell_w;
+    var y: f32 = @as(f32, @floatFromInt(win32_backend.TITLEBAR_HEIGHT)) + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(cursor_y)) * cell_h;
+
+    if (split_count > 1) {
+        for (0..split_layout.g_split_rect_count) |i| {
+            const rect = split_layout.g_split_rects[i];
+            if (rect.surface == surface) {
+                x = @as(f32, @floatFromInt(rect.x)) + @as(f32, @floatFromInt(pad.left)) + @as(f32, @floatFromInt(cursor_x)) * cell_w;
+                y = @as(f32, @floatFromInt(rect.y)) + @as(f32, @floatFromInt(pad.top)) + @as(f32, @floatFromInt(cursor_y)) * cell_h;
+                break;
+            }
+        }
+    }
+
+    win.setImeCaret(
+        @intFromFloat(@round(x)),
+        @intFromFloat(@round(y)),
+        @intFromFloat(@max(1.0, @round(cell_h))),
+    );
 }
 
 /// Handle a bell notification from the terminal.
@@ -859,38 +934,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
     gl_init.initInstancedBuffers();
     font.preloadCharacters(face);
 
-    // Initialize titlebar font — same family at fixed 14pt for crisp tab titles
-    {
-        const titlebar_pt: u32 = 10;
-        const tb_face = font.loadFontFromConfig(allocator, requested_font, requested_weight, titlebar_pt, ft_lib);
-        if (tb_face) |tf| {
-            font.g_titlebar_face = tf;
-
-            // Calculate titlebar cell metrics from the 14pt face
-            const sm = tf.handle.*.size.*.metrics;
-            // Simple approach: use FreeType metrics directly
-            const tb_ascent = @as(f32, @floatFromInt(sm.ascender)) / 64.0;
-            const tb_descent = @as(f32, @floatFromInt(sm.descender)) / 64.0;
-            const tb_height = @as(f32, @floatFromInt(sm.height)) / 64.0;
-            font.g_titlebar_cell_height = @round(tb_height);
-            font.g_titlebar_baseline = @round(-tb_descent);
-            // Measure max advance across ASCII
-            var max_adv: f32 = 0;
-            for (32..127) |cp| {
-                if (font.loadTitlebarGlyph(@intCast(cp))) |g| {
-                    const adv = @as(f32, @floatFromInt(g.advance >> 6));
-                    max_adv = @max(max_adv, adv);
-                }
-            }
-            if (max_adv > 0) font.g_titlebar_cell_width = max_adv;
-
-            std.debug.print("Titlebar font: {d:.0}x{d:.0} (ascent={d:.1}, descent={d:.1}, baseline={d:.0})\n", .{
-                font.g_titlebar_cell_width, font.g_titlebar_cell_height, tb_ascent, tb_descent, font.g_titlebar_baseline,
-            });
-        } else {
-            std.debug.print("Titlebar font init failed, will fall back to scaled terminal font\n", .{});
-        }
-    }
+    rebuildTitlebarFont(allocator, requested_font, requested_weight, uiFontSize(font_size), ft_lib);
 
     // Load Segoe MDL2 Assets for caption button icons (Windows system font)
     // Size is DPI-dependent: 10px at 96 DPI, scales proportionally
@@ -1078,6 +1122,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
         // Check for config file changes
         if (config_watcher) |*w| checkConfigReload(allocator, w);
         overlays.tickSessionLauncher();
+        file_explorer.tickAsync();
 
         // Process pending resize (coalesced, like Ghostty)
         // We wait for RESIZE_COALESCE_MS after last resize event before applying.
@@ -1156,6 +1201,7 @@ fn runMainLoop(allocator: std.mem.Allocator) !void {
             const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - sidebar_w - explorer_w - padding * 2);
             const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_height)) - top_padding - padding);
             const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
+            syncImeCaretPosition(win, split_count);
 
             // Debug: print split count on first few frames
             // GL rendering
