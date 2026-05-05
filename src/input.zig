@@ -1953,6 +1953,11 @@ pub fn copySelectionToClipboard() void {
                 .y = @intCast(vp_row),
             } }) orelse continue;
 
+            // Skip spacer cells for wide characters — the actual codepoint
+            // lives in the head cell; spacers are layout-only.
+            const wide_val: u2 = @intFromEnum(cell_data.cell.wide);
+            if (wide_val == 2 or wide_val == 3) continue; // spacer_tail / spacer_head
+
             const cp = cell_data.cell.codepoint();
             if (cp == 0 or cp == ' ') {
                 text.append(allocator, ' ') catch continue;
@@ -1960,6 +1965,17 @@ pub fn copySelectionToClipboard() void {
                 var buf: [4]u8 = undefined;
                 const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch continue;
                 text.appendSlice(allocator, buf[0..len]) catch continue;
+
+                // Append grapheme cluster continuation codepoints (emoji ZWJ sequences, etc.)
+                if (cell_data.cell.hasGrapheme()) {
+                    const page = &cell_data.node.data;
+                    if (page.lookupGrapheme(cell_data.cell)) |extra_cps| {
+                        for (extra_cps) |ecp| {
+                            const elen = std.unicode.utf8Encode(@intCast(ecp), &buf) catch continue;
+                            text.appendSlice(allocator, buf[0..elen]) catch {};
+                        }
+                    }
+                }
             }
         }
         if (row < end_row) {
