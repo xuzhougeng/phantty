@@ -74,6 +74,20 @@ When adding more UI automation, follow the same pattern:
 - Capture both full-window and cropped target-region screenshots, and inspect the crop when a pixel check fails.
 - Always clean up test windows with `CloseMainWindow()`, then `Stop-Process -Force` if the process remains.
 
+## Windows SSH/SCP Compatibility
+
+When changing SSH/SCP code paths (`src/scp.zig`, SSH clipboard image paste, remote file explorer listing/upload/download, or SSH session metadata), test against the existing real SSH profile in `%APPDATA%\phantty\ssh_hosts` whenever it is available. The profile fields are hex encoded as `name, host, user, password, port`; decode them locally for the test, but never print or commit the password. At minimum, verify:
+
+```powershell
+ssh.exe ... user@host pwd
+scp.exe ... local-file user@host:/tmp/test-file
+ssh.exe -T ... user@host "cat > '/tmp/test-file'"  # only if testing the stream fallback
+```
+
+Do **not** add OpenSSH connection sharing (`ControlMaster`, `ControlPersist`, `ControlPath`) to helper `ssh.exe` or `scp.exe` commands on Windows. Windows OpenSSH does not provide the Unix-domain socket behavior those options expect here; it reproduces as `getsockname failed: Not a socket`, `Read from remote host ...: Unknown error`, `scp.exe: Connection closed`, or `lost connection`. This broke SCP uploads even though the same profile and remote service worked without those options.
+
+Keep stderr visible for helper `ssh.exe`/`scp.exe` failures. Do not reduce failures to a generic "SSH image upload failed"; preserve the underlying OpenSSH error so regressions can be diagnosed without guessing.
+
 ## Windows Development Compatibility
 
 This repository must remain safe to check out and develop on Windows.
