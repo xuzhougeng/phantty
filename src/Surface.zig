@@ -41,6 +41,13 @@ pub const Selection = struct {
 /// OSC parser state machine — handles sequences split across PTY reads.
 const OscParseState = enum { ground, esc, osc_num, osc_semi, osc_title };
 
+/// Coarse launch environment for terminal-side integrations such as path paste.
+pub const LaunchKind = enum {
+    windows,
+    wsl,
+    ssh,
+};
+
 // ============================================================================
 // VT stream handler — wraps ghostty's readonly handler to intercept bell
 // ============================================================================
@@ -83,6 +90,28 @@ pub const VtHandler = struct {
 /// Our custom stream type using the bell-aware handler.
 pub const VtStream = ghostty_vt.Stream(VtHandler);
 
+fn detectLaunchKind(command: []const u16) LaunchKind {
+    var buf: [512]u8 = undefined;
+    const len = @min(command.len, buf.len);
+    for (command[0..len], 0..) |wc, i| {
+        const ch: u8 = if (wc < 0x80) @intCast(wc) else ' ';
+        buf[i] = std.ascii.toLower(ch);
+    }
+    const lower = buf[0..len];
+
+    if (std.mem.indexOf(u8, lower, "ssh.exe") != null or
+        std.mem.startsWith(u8, lower, "ssh "))
+    {
+        return .ssh;
+    }
+    if (std.mem.indexOf(u8, lower, "wsl.exe") != null or
+        std.mem.startsWith(u8, lower, "wsl "))
+    {
+        return .wsl;
+    }
+    return .windows;
+}
+
 // ============================================================================
 // Core state
 // ============================================================================
@@ -93,6 +122,7 @@ pty: Pty,
 command: Command,
 selection: Selection,
 render_state: renderer.State,
+launch_kind: LaunchKind,
 
 /// Size information for this surface (screen size, cell size, padding).
 /// Used by the renderer to position content correctly.
@@ -271,6 +301,7 @@ pub fn init(
     surface.allocator = allocator;
     surface.selection = .{};
     surface.render_state = renderer.State.init(&surface.terminal);
+    surface.launch_kind = detectLaunchKind(shell_cmd);
     surface.dirty = std.atomic.Value(bool).init(true);
     surface.exited = std.atomic.Value(bool).init(false);
 

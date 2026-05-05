@@ -41,6 +41,47 @@ const BitmapInfoHeader = extern struct {
     biClrImportant: u32,
 };
 
+fn isPasteStripByte(byte: u8) bool {
+    return switch (byte) {
+        0x00, // NUL
+        0x08, // BS
+        0x05, // ENQ
+        0x04, // EOT
+        0x1B, // ESC
+        0x7F, // DEL
+        0x03, // VINTR (Ctrl+C)
+        0x1C, // VQUIT (Ctrl+\)
+        0x15, // VKILL (Ctrl+U)
+        0x1A, // VSUSP (Ctrl+Z)
+        0x11, // VSTART (Ctrl+Q)
+        0x13, // VSTOP (Ctrl+S)
+        0x17, // VWERASE (Ctrl+W)
+        0x16, // VLNEXT (Ctrl+V)
+        0x12, // VREPRINT (Ctrl+R)
+        0x0F, // VDISCARD (Ctrl+O)
+        => true,
+        else => false,
+    };
+}
+
+fn pasteNeedsMutation(data: []const u8, bracketed: bool) bool {
+    for (data) |byte| {
+        if (isPasteStripByte(byte)) return true;
+        if (!bracketed and byte == '\n') return true;
+    }
+    return false;
+}
+
+fn mutatePasteData(data: []u8, bracketed: bool) void {
+    for (data) |*byte| {
+        if (isPasteStripByte(byte.*)) {
+            byte.* = ' ';
+        } else if (!bracketed and byte.* == '\n') {
+            byte.* = '\r';
+        }
+    }
+}
+
 /// Write data to the PTY's input pipe (us -> child stdin).
 fn writeToPty(surface: *Surface, data: []const u8) void {
     var bytes_written: windows.DWORD = 0;
@@ -51,6 +92,28 @@ fn writeToPty(surface: *Surface, data: []const u8) void {
         &bytes_written,
         null,
     );
+}
+
+fn writePasteToPty(surface: *Surface, allocator: std.mem.Allocator, data: []const u8) void {
+    const bracketed = surface.terminal.modes.get(.bracketed_paste);
+    var owned: ?[]u8 = null;
+    var body = data;
+    if (pasteNeedsMutation(data, bracketed)) {
+        owned = allocator.dupe(u8, data) catch return;
+        mutatePasteData(owned.?, bracketed);
+        body = owned.?;
+    }
+    defer {
+        if (owned) |buf| allocator.free(buf);
+    }
+
+    if (bracketed) {
+        writeToPty(surface, "\x1b[200~");
+        writeToPty(surface, body);
+        writeToPty(surface, "\x1b[201~");
+    } else {
+        writeToPty(surface, body);
+    }
 }
 
 fn clipboardTempDir(allocator: std.mem.Allocator) ?[]u8 {
@@ -76,6 +139,33 @@ fn clipboardImagePath(allocator: std.mem.Allocator) ?[]u8 {
 fn quotePathForPaste(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
     if (std.mem.indexOfAny(u8, path, " \t\"") == null) return allocator.dupe(u8, path) catch null;
     return std.fmt.allocPrint(allocator, "\"{s}\"", .{path}) catch null;
+}
+
+fn clipboardHasImage() bool {
+    return win32_backend.IsClipboardFormatAvailable(CF_DIBV5) != 0 or
+        win32_backend.IsClipboardFormatAvailable(CF_DIB) != 0;
+}
+
+fn windowsPathToWslPath(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
+    if (path.len < 3 or path[1] != ':' or (path[2] != '\\' and path[2] != '/')) return null;
+    const drive = std.ascii.toLower(path[0]);
+    if (drive < 'a' or drive > 'z') return null;
+
+    const out_len = 6 + path.len - 2; // "/mnt/<drive>" plus the path after "C:"
+    const out = allocator.alloc(u8, out_len) catch return null;
+    @memcpy(out[0..5], "/mnt/");
+    out[5] = drive;
+    for (path[2..], 6..) |ch, i| {
+        out[i] = if (ch == '\\') '/' else ch;
+    }
+    return out;
+}
+
+fn imagePathForSurfacePaste(allocator: std.mem.Allocator, surface: *const Surface, path: []const u8) ?[]u8 {
+    if (surface.launch_kind == .wsl) {
+        if (windowsPathToWslPath(allocator, path)) |wsl_path| return wsl_path;
+    }
+    return allocator.dupe(u8, path) catch null;
 }
 
 fn readClipboardUnicodeText(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
@@ -152,6 +242,21 @@ fn saveClipboardDibAsBmp(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
 fn saveClipboardImageToTemp(allocator: std.mem.Allocator) ?[]u8 {
     const hmem = win32_backend.GetClipboardData(CF_DIBV5) orelse win32_backend.GetClipboardData(CF_DIB) orelse return null;
     return saveClipboardDibAsBmp(allocator, hmem);
+}
+
+fn pasteClipboardImage(surface: *Surface, allocator: std.mem.Allocator) bool {
+    const image_path = saveClipboardImageToTemp(allocator) orelse return false;
+    defer allocator.free(image_path);
+
+    const target_path = imagePathForSurfacePaste(allocator, surface, image_path) orelse return false;
+    defer allocator.free(target_path);
+
+    const pasted = quotePathForPaste(allocator, target_path) orelse return false;
+    defer allocator.free(pasted);
+
+    std.debug.print("Pasting clipboard image path: {s}\n", .{target_path});
+    writePasteToPty(surface, allocator, pasted);
+    return true;
 }
 
 // Selection + divider drag state (moved from AppWindow.zig)
@@ -506,6 +611,12 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     // Ctrl+Shift+V = paste
     if (ev.ctrl and ev.shift and ev.vk == 0x56) { // 'V'
         pasteFromClipboard();
+        return;
+    }
+    // Ctrl+V is normally forwarded to terminal apps. For image clipboards, take
+    // the terminal-side paste path so WSL/remote TUIs don't try to read X11.
+    if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == 0x56 and clipboardHasImage()) { // 'V'
+        pasteImageFromClipboard();
         return;
     }
     // Ctrl+Shift+T and Ctrl+Shift+N are handled above (before rename guard)
@@ -1519,7 +1630,7 @@ pub fn pasteFromClipboard() void {
         defer allocator.free(text);
         if (text.len > 0) {
             std.debug.print("Pasting {} UTF-8 bytes from clipboard\n", .{text.len});
-            writeToPty(surface, text);
+            writePasteToPty(surface, allocator, text);
         }
         return;
     }
@@ -1529,18 +1640,23 @@ pub fn pasteFromClipboard() void {
         defer allocator.free(text);
         if (text.len > 0) {
             std.debug.print("Pasting {} ANSI bytes from clipboard\n", .{text.len});
-            writeToPty(surface, text);
+            writePasteToPty(surface, allocator, text);
         }
         return;
     }
 
-    if (saveClipboardImageToTemp(allocator)) |image_path| {
-        defer allocator.free(image_path);
-        const pasted = quotePathForPaste(allocator, image_path) orelse return;
-        defer allocator.free(pasted);
-        std.debug.print("Pasting clipboard image path: {s}\n", .{image_path});
-        writeToPty(surface, pasted);
-    }
+    _ = pasteClipboardImage(surface, allocator);
+}
+
+pub fn pasteImageFromClipboard() void {
+    const surface = AppWindow.activeSurface() orelse return;
+    const win = AppWindow.g_window orelse return;
+    const allocator = AppWindow.g_allocator orelse return;
+
+    if (win32_backend.OpenClipboard(win.hwnd) == 0) return;
+    defer _ = win32_backend.CloseClipboard();
+
+    _ = pasteClipboardImage(surface, allocator);
 }
 
 pub fn writeTextToActivePty(text: []const u8) void {
