@@ -132,6 +132,63 @@ fn splitSpawnCommand(
     allocator: std.mem.Allocator,
     surface: *const Surface,
 ) ?[:0]const u16 {
+    return switch (surface.launch_kind) {
+        .wsl => splitWslCommand(allocator, surface),
+        .ssh => splitSshCommand(allocator, surface),
+        .windows => null,
+    };
+}
+
+fn appendAscii(buf: *[1024]u8, pos: *usize, text: []const u8) bool {
+    if (pos.* + text.len > buf.len) return false;
+    @memcpy(buf[pos.*..][0..text.len], text);
+    pos.* += text.len;
+    return true;
+}
+
+fn appendWindowsQuotedArg(buf: *[1024]u8, pos: *usize, arg: []const u8) bool {
+    if (pos.* >= buf.len) return false;
+    buf[pos.*] = '"';
+    pos.* += 1;
+    for (arg) |ch| {
+        if (ch == '"') {
+            if (!appendAscii(buf, pos, "\\\"")) return false;
+        } else {
+            if (pos.* >= buf.len) return false;
+            buf[pos.*] = ch;
+            pos.* += 1;
+        }
+    }
+    if (pos.* >= buf.len) return false;
+    buf[pos.*] = '"';
+    pos.* += 1;
+    return true;
+}
+
+fn splitWslCommand(
+    allocator: std.mem.Allocator,
+    surface: *const Surface,
+) ?[:0]const u16 {
+    var command_buf: [1024]u8 = undefined;
+    var pos: usize = 0;
+    if (!appendAscii(&command_buf, &pos, "wsl.exe")) return null;
+
+    if (surface.getCwd()) |cwd| {
+        if (cwd.len > 0) {
+            if (!appendAscii(&command_buf, &pos, " --cd ")) return null;
+            if (!appendWindowsQuotedArg(&command_buf, &pos, cwd)) return null;
+            return std.unicode.utf8ToUtf16LeAllocZ(allocator, command_buf[0..pos]) catch null;
+        }
+    }
+
+    if (!appendAscii(&command_buf, &pos, " ~")) return null;
+    return std.unicode.utf8ToUtf16LeAllocZ(allocator, command_buf[0..pos]) catch null;
+}
+
+fn splitSshCommand(
+    allocator: std.mem.Allocator,
+    surface: *const Surface,
+) ?[:0]const u16 {
     const conn = surface.ssh_connection orelse return null;
 
     var command_buf: [512]u8 = undefined;

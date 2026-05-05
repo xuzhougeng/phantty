@@ -228,6 +228,13 @@ fn isUnsupportedShellCwd(path: []const u16) bool {
     return !(path.len >= 4 and path[2] == '?' and path[3] == '\\');
 }
 
+fn utf8PathToCwdPtr(path: []const u8, cwd_buf: *[260]u16) ?[*:0]const u16 {
+    const len = std.unicode.utf8ToUtf16Le(cwd_buf[0 .. cwd_buf.len - 1], path) catch return null;
+    if (isUnsupportedShellCwd(cwd_buf[0..len])) return null;
+    cwd_buf[len] = 0;
+    return @ptrCast(cwd_buf);
+}
+
 /// Convert the active surface's CWD from Unix to Windows path.
 fn getActiveCwd(cwd_buf: *[260]u16) ?[*:0]const u16 {
     if (tab.activeSurface()) |surface| {
@@ -236,6 +243,11 @@ fn getActiveCwd(cwd_buf: *[260]u16) ?[*:0]const u16 {
                 if (isUnsupportedShellCwd(cwd_buf[0..len])) return null;
                 cwd_buf[len] = 0;
                 return @ptrCast(cwd_buf);
+            }
+        }
+        if (surface.launch_kind == .windows) {
+            if (surface.getInitialCwd()) |initial_cwd| {
+                return utf8PathToCwdPtr(initial_cwd, cwd_buf);
             }
         }
     }
