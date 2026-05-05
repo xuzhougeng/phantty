@@ -7,6 +7,7 @@
 const std = @import("std");
 const Surface = @import("Surface.zig");
 const scp = @import("scp.zig");
+const file_backend = @import("file_backend.zig");
 
 pub const DEFAULT_WIDTH: f32 = 240;
 pub const MIN_WIDTH: f32 = 160;
@@ -96,7 +97,12 @@ pub fn enterRemoteMode(conn: *const Surface.SshConnection, remote_cwd: []const u
     g_mode = .remote;
     g_ssh_conn = conn.*;
     g_has_ssh_conn = true;
-    setRoot(remote_cwd);
+    if (remote_cwd.len > 0) {
+        setRoot(remote_cwd);
+    } else {
+        g_root_path_len = 0;
+        rescanRemote();
+    }
 }
 
 /// Switch back to local mode.
@@ -131,145 +137,110 @@ pub fn rescan() void {
     if (g_root_path_len == 0) return;
 
     const path = g_root_path[0..g_root_path_len];
-    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return;
-    defer dir.close();
-
-    scanDir(&dir, 0, path);
+    const result = loadBackendEntries(.local, path, 0, path, '\\');
+    if (result != .ok) {
+        setTransferStatus(.failed, "Cannot open folder");
+    }
 }
 
-/// Scan remote directory via `ssh ls -1paF`.
+/// Scan remote directory via the configured SSH backend.
 pub fn rescanRemote() void {
     g_entry_count = 0;
     g_scroll_offset = 0;
     g_selected = null;
 
     if (!g_has_ssh_conn) return;
-    if (g_root_path_len == 0) return;
+
+    if (g_root_path_len == 0) {
+        var root_buf: [512]u8 = undefined;
+        const allocator = std.heap.page_allocator;
+        const len = file_backend.resolveRoot(allocator, .{ .ssh = &g_ssh_conn }, &root_buf) orelse {
+            setTransferStatus(.failed, "SSH pwd failed");
+            return;
+        };
+        const root_len = @min(len, g_root_path.len);
+        @memcpy(g_root_path[0..root_len], root_buf[0..root_len]);
+        g_root_path_len = root_len;
+    }
 
     const path = g_root_path[0..g_root_path_len];
-
-    // Build command: ls -1p <path> (no -a to skip dotfiles, -p appends / to dirs)
-    var cmd_buf: [320]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "ls -1p {s}", .{path}) catch return;
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const output = scp.sshExec(allocator, &g_ssh_conn, cmd) orelse return;
-    defer allocator.free(output);
-
-    parseRemoteLsOutput(output, 0, path);
-}
-
-fn parseRemoteLsOutput(output: []const u8, depth: u16, parent_path: []const u8) void {
-    var line_start: usize = 0;
-    for (output, 0..) |ch, i| {
-        if (ch == '\n') {
-            var line = output[line_start..i];
-            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            if (line.len > 0) {
-                addRemoteEntry(line, depth, parent_path);
-            }
-            line_start = i + 1;
-        }
+    const result = loadBackendEntries(.{ .ssh = &g_ssh_conn }, path, 0, path, '/');
+    if (result != .ok) {
+        setTransferStatus(.failed, "SSH list failed");
     }
-    // Last line without newline
-    if (line_start < output.len) {
-        var line = output[line_start..];
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-        if (line.len > 0) {
-            addRemoteEntry(line, depth, parent_path);
-        }
-    }
-
-    // Sort entries at this depth
-    sortEntries(depth);
 }
 
-fn addRemoteEntry(line: []const u8, depth: u16, parent_path: []const u8) void {
-    if (g_entry_count >= g_entries.len) return;
-    // Skip . and ..
-    const is_dir = line.len > 0 and line[line.len - 1] == '/';
-    const name = if (is_dir) line[0 .. line.len - 1] else line;
-    if (name.len == 0) return;
-    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return;
+fn loadBackendEntries(
+    backend: file_backend.Backend,
+    path: []const u8,
+    depth: u16,
+    parent_path: []const u8,
+    sep: u8,
+) file_backend.ListStatus {
+    const capacity = g_entries.len - g_entry_count;
+    if (capacity == 0) return .ok;
 
-    var e = &g_entries[g_entry_count];
-    const name_len: u8 = @intCast(@min(name.len, 255));
-    @memcpy(e.name_buf[0..name_len], name[0..name_len]);
-    e.name_len = name_len;
-    e.is_dir = is_dir;
-    e.expanded = false;
-    e.depth = depth;
+    const allocator = std.heap.page_allocator;
+    const entries = allocator.alloc(file_backend.Entry, capacity) catch return .open_failed;
+    defer allocator.free(entries);
 
-    // Build remote path: parent/name
-    const plen = @as(u16, @intCast(parent_path.len));
-    @memcpy(e.path_buf[0..plen], parent_path);
-    e.path_buf[plen] = '/';
-    @memcpy(e.path_buf[plen + 1 ..][0..name_len], name[0..name_len]);
-    e.path_len = plen + 1 + name_len;
+    const result = file_backend.list(allocator, backend, path, entries);
+    if (result.status != .ok) return result.status;
 
-    g_entry_count += 1;
-}
-
-fn scanDir(dir: *std.fs.Dir, depth: u16, parent_path: []const u8) void {
-    var it = dir.iterate();
-    while (it.next() catch null) |entry| {
+    for (entries[0..result.count]) |*entry| {
         if (g_entry_count >= g_entries.len) break;
-        if (entry.name.len == 0 or entry.name[0] == '.') continue;
-
-        var e = &g_entries[g_entry_count];
-        const name_len: u8 = @intCast(@min(entry.name.len, 255));
-        @memcpy(e.name_buf[0..name_len], entry.name[0..name_len]);
-        e.name_len = name_len;
-        e.is_dir = entry.kind == .directory;
-        e.expanded = false;
-        e.depth = depth;
-
-        // Build relative path
-        const sep_len: u16 = if (parent_path.len > 0) 1 else 0;
-        const total_path_len = @as(u16, @intCast(@min(parent_path.len + sep_len + name_len, 511)));
-        if (parent_path.len > 0) {
-            @memcpy(e.path_buf[0..parent_path.len], parent_path);
-            e.path_buf[parent_path.len] = '\\';
-            @memcpy(e.path_buf[parent_path.len + 1 ..][0..name_len], entry.name[0..name_len]);
-        } else {
-            @memcpy(e.path_buf[0..name_len], entry.name[0..name_len]);
+        if (copyBackendEntry(&g_entries[g_entry_count], entry, depth, parent_path, sep)) {
+            g_entry_count += 1;
         }
-        e.path_len = total_path_len;
-
-        g_entry_count += 1;
     }
 
-    // Sort: directories first, then alphabetical
-    if (g_entry_count > 0) {
-        sortEntries(depth);
-    }
+    return .ok;
 }
 
-fn sortEntries(depth: u16) void {
-    // Find range of entries at this depth that were just added
-    var start: usize = g_entry_count;
-    var i: usize = g_entry_count;
-    while (i > 0) {
-        i -= 1;
-        if (g_entries[i].depth == depth) {
-            start = i;
-        } else break;
-    }
-    if (start >= g_entry_count) return;
+fn copyBackendEntry(
+    dest: *FlatEntry,
+    src: *const file_backend.Entry,
+    depth: u16,
+    parent_path: []const u8,
+    sep: u8,
+) bool {
+    const name = src.name();
+    const name_len: u8 = @intCast(@min(name.len, 255));
+    @memcpy(dest.name_buf[0..name_len], name[0..name_len]);
+    dest.name_len = name_len;
+    dest.is_dir = src.is_dir;
+    dest.expanded = false;
+    dest.depth = depth;
 
-    const slice = g_entries[start..g_entry_count];
-    std.sort.insertion(FlatEntry, slice, {}, lessThan);
+    const path_len = buildChildPathInto(&dest.path_buf, parent_path, name[0..name_len], sep) orelse return false;
+    dest.path_len = @intCast(path_len);
+    return true;
 }
 
-fn lessThan(_: void, a: FlatEntry, b: FlatEntry) bool {
-    if (a.is_dir and !b.is_dir) return true;
-    if (!a.is_dir and b.is_dir) return false;
-    const a_name = a.name_buf[0..a.name_len];
-    const b_name = b.name_buf[0..b.name_len];
-    return std.mem.order(u8, a_name, b_name) == .lt;
+fn buildChildPathInto(buf: *[512]u8, parent: []const u8, name: []const u8, sep: u8) ?usize {
+    if (parent.len > buf.len) return null;
+    var pos: usize = 0;
+    @memcpy(buf[0..parent.len], parent);
+    pos = parent.len;
+
+    const add_sep = parent.len > 0 and !pathEndsWithSeparator(parent, sep);
+    if (add_sep) {
+        if (pos >= buf.len) return null;
+        buf[pos] = sep;
+        pos += 1;
+    }
+
+    if (pos + name.len > buf.len) return null;
+    @memcpy(buf[pos..][0..name.len], name);
+    pos += name.len;
+    return pos;
+}
+
+fn pathEndsWithSeparator(path: []const u8, sep: u8) bool {
+    if (path.len == 0) return false;
+    const last = path[path.len - 1];
+    if (sep == '\\') return last == '\\' or last == '/';
+    return last == sep;
 }
 
 pub fn toggleExpand(idx: usize) void {
@@ -288,161 +259,65 @@ pub fn toggleExpand(idx: usize) void {
 }
 
 fn expandRemote(idx: usize) void {
+    expandWithBackend(idx, .{ .ssh = &g_ssh_conn }, '/');
+}
+
+fn expandWithBackend(idx: usize, backend: file_backend.Backend, sep: u8) void {
     const entry = &g_entries[idx];
     entry.expanded = true;
 
     const path = entry.path_buf[0..entry.path_len];
     const child_depth = entry.depth + 1;
-
-    // Build command
-    var cmd_buf: [560]u8 = undefined;
-    const cmd = std.fmt.bufPrint(&cmd_buf, "ls -1p {s}", .{path}) catch return;
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const output = scp.sshExec(allocator, &g_ssh_conn, cmd) orelse return;
-    defer allocator.free(output);
-
-    // Count entries to insert
     const insert_pos = idx + 1;
     const max_new = g_entries.len - g_entry_count;
     if (max_new == 0) return;
 
-    // Parse into tail of array, then move into place (same pattern as local expand)
-    const old_count = g_entry_count;
-    var filled: usize = 0;
+    const allocator = std.heap.page_allocator;
+    const backend_entries = allocator.alloc(file_backend.Entry, max_new) catch {
+        entry.expanded = false;
+        return;
+    };
+    defer allocator.free(backend_entries);
 
-    var line_start: usize = 0;
-    for (output, 0..) |ch, i| {
-        if (ch == '\n') {
-            var line = output[line_start..i];
-            if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-            if (line.len > 0 and filled < max_new) {
-                if (addRemoteEntryAtTail(line, child_depth, path, old_count + filled))
-                    filled += 1;
-            }
-            line_start = i + 1;
-        }
+    const result = file_backend.list(allocator, backend, path, backend_entries);
+    if (result.status != .ok) {
+        entry.expanded = false;
+        setTransferStatus(
+            .failed,
+            if (g_mode == .remote) "SSH list failed" else "Cannot open folder",
+        );
+        return;
     }
-    if (line_start < output.len and filled < max_new) {
-        var line = output[line_start..];
-        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
-        if (line.len > 0) {
-            if (addRemoteEntryAtTail(line, child_depth, path, old_count + filled))
-                filled += 1;
+
+    const flat_children = allocator.alloc(FlatEntry, result.count) catch {
+        entry.expanded = false;
+        return;
+    };
+    defer allocator.free(flat_children);
+
+    var filled: usize = 0;
+    for (backend_entries[0..result.count]) |*child| {
+        if (copyBackendEntry(&flat_children[filled], child, child_depth, path, sep)) {
+            filled += 1;
         }
     }
 
     if (filled == 0) return;
 
-    // Sort tail entries
-    std.sort.insertion(FlatEntry, g_entries[old_count .. old_count + filled], {}, lessThan);
-
-    // Shift existing entries after insert_pos down
-    if (insert_pos < old_count) {
-        var j: usize = old_count - 1;
-        while (true) {
-            g_entries[j + filled] = g_entries[j];
-            if (j == insert_pos) break;
-            j -= 1;
-        }
+    if (insert_pos < g_entry_count) {
+        std.mem.copyBackwards(
+            FlatEntry,
+            g_entries[insert_pos + filled .. g_entry_count + filled],
+            g_entries[insert_pos..g_entry_count],
+        );
     }
 
-    // Copy from tail to insert position
-    for (0..filled) |fi| {
-        g_entries[insert_pos + fi] = g_entries[old_count + fi];
-    }
-
+    @memcpy(g_entries[insert_pos .. insert_pos + filled], flat_children[0..filled]);
     g_entry_count += filled;
-}
-
-fn addRemoteEntryAtTail(line: []const u8, depth: u16, parent_path: []const u8, target_idx: usize) bool {
-    const is_dir = line.len > 0 and line[line.len - 1] == '/';
-    const name = if (is_dir) line[0 .. line.len - 1] else line;
-    if (name.len == 0) return false;
-    if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return false;
-
-    var e = &g_entries[target_idx];
-    const name_len: u8 = @intCast(@min(name.len, 255));
-    @memcpy(e.name_buf[0..name_len], name[0..name_len]);
-    e.name_len = name_len;
-    e.is_dir = is_dir;
-    e.expanded = false;
-    e.depth = depth;
-
-    const plen = @as(u16, @intCast(parent_path.len));
-    @memcpy(e.path_buf[0..plen], parent_path);
-    e.path_buf[plen] = '/';
-    @memcpy(e.path_buf[plen + 1 ..][0..name_len], name[0..name_len]);
-    e.path_len = plen + 1 + name_len;
-
-    return true;
 }
 
 fn expand(idx: usize) void {
-    const entry = &g_entries[idx];
-    entry.expanded = true;
-
-    const path = entry.path_buf[0..entry.path_len];
-    var dir = std.fs.cwd().openDir(path, .{ .iterate = true }) catch return;
-    defer dir.close();
-
-    const child_depth = entry.depth + 1;
-    const insert_pos = idx + 1;
-    const max_new = g_entries.len - g_entry_count;
-    if (max_new == 0) return;
-
-    // Collect children into the tail of the entries array temporarily
-    var filled: usize = 0;
-    var it = dir.iterate();
-    while (it.next() catch null) |child| {
-        if (filled >= max_new) break;
-        if (child.name.len == 0 or child.name[0] == '.') continue;
-
-        // Use temp storage at the end
-        const tmp_idx = g_entry_count + filled;
-        var e = &g_entries[tmp_idx];
-        const name_len: u8 = @intCast(@min(child.name.len, 255));
-        @memcpy(e.name_buf[0..name_len], child.name[0..name_len]);
-        e.name_len = name_len;
-        e.is_dir = child.kind == .directory;
-        e.expanded = false;
-        e.depth = child_depth;
-
-        // Build path: parent_path + \ + name
-        const parent_path = entry.path_buf[0..entry.path_len];
-        const plen = @as(u16, @intCast(parent_path.len));
-        @memcpy(e.path_buf[0..plen], parent_path);
-        e.path_buf[plen] = '\\';
-        @memcpy(e.path_buf[plen + 1 ..][0..name_len], child.name[0..name_len]);
-        e.path_len = plen + 1 + name_len;
-
-        filled += 1;
-    }
-
-    if (filled == 0) return;
-
-    // Sort the collected children (at tail)
-    std.sort.insertion(FlatEntry, g_entries[g_entry_count .. g_entry_count + filled], {}, lessThan);
-
-    // Shift existing entries after insert_pos down by `filled`
-    if (insert_pos < g_entry_count) {
-        var j: usize = g_entry_count - 1;
-        while (true) {
-            g_entries[j + filled] = g_entries[j];
-            if (j == insert_pos) break;
-            j -= 1;
-        }
-    }
-
-    // Copy from tail temp to insert position
-    for (0..filled) |fi| {
-        g_entries[insert_pos + fi] = g_entries[g_entry_count + fi];
-    }
-
-    g_entry_count += filled;
+    expandWithBackend(idx, .local, '\\');
 }
 
 fn collapse(idx: usize) void {
@@ -762,74 +637,23 @@ pub fn uploadFile(local_path: []const u8) void {
 // Tests
 // ============================================================================
 
-test "parseRemoteLsOutput basic entries" {
-    // Reset state
-    g_entry_count = 0;
-    g_scroll_offset = 0;
-    g_selected = null;
-
-    const output = "documents/\nreadme.txt\nscripts/\n";
-    parseRemoteLsOutput(output, 0, "/home/user");
-
-    // After sorting: dirs first then files
-    try std.testing.expectEqual(@as(usize, 3), g_entry_count);
-
-    // dirs sorted: documents, scripts; then files: readme.txt
-    try std.testing.expectEqualStrings("documents", g_entries[0].name_buf[0..g_entries[0].name_len]);
-    try std.testing.expect(g_entries[0].is_dir);
-    try std.testing.expectEqualStrings("scripts", g_entries[1].name_buf[0..g_entries[1].name_len]);
-    try std.testing.expect(g_entries[1].is_dir);
-    try std.testing.expectEqualStrings("readme.txt", g_entries[2].name_buf[0..g_entries[2].name_len]);
-    try std.testing.expect(!g_entries[2].is_dir);
-}
-
-test "parseRemoteLsOutput skips . and .." {
-    g_entry_count = 0;
-    const output = "./\n../\nfoo.txt\n";
-    parseRemoteLsOutput(output, 0, "/tmp");
-    try std.testing.expectEqual(@as(usize, 1), g_entry_count);
-    try std.testing.expectEqualStrings("foo.txt", g_entries[0].name_buf[0..g_entries[0].name_len]);
-}
-
-test "parseRemoteLsOutput handles CRLF" {
-    g_entry_count = 0;
-    const output = "alpha/\r\nbeta.txt\r\n";
-    parseRemoteLsOutput(output, 0, "/data");
-    try std.testing.expectEqual(@as(usize, 2), g_entry_count);
-    try std.testing.expectEqualStrings("alpha", g_entries[0].name_buf[0..g_entries[0].name_len]);
-    try std.testing.expect(g_entries[0].is_dir);
-    try std.testing.expectEqualStrings("beta.txt", g_entries[1].name_buf[0..g_entries[1].name_len]);
-}
-
-test "parseRemoteLsOutput path construction" {
-    g_entry_count = 0;
-    const output = "sub/\nfile.log\n";
-    parseRemoteLsOutput(output, 0, "/var/log");
-
-    // Check path of first entry
-    const path0 = g_entries[0].path_buf[0..g_entries[0].path_len];
-    try std.testing.expectEqualStrings("/var/log/sub", path0);
-
-    const path1 = g_entries[1].path_buf[0..g_entries[1].path_len];
-    try std.testing.expectEqualStrings("/var/log/file.log", path1);
-}
-
-test "addRemoteEntry empty and dot entries rejected" {
-    g_entry_count = 0;
-    addRemoteEntry("", 0, "/x");
-    try std.testing.expectEqual(@as(usize, 0), g_entry_count);
-
-    addRemoteEntry("./", 0, "/x");
-    try std.testing.expectEqual(@as(usize, 0), g_entry_count);
-
-    addRemoteEntry("../", 0, "/x");
-    try std.testing.expectEqual(@as(usize, 0), g_entry_count);
-}
-
 test "setTransferStatus stores message" {
     setTransferStatus(.success, "test_file.txt");
     try std.testing.expectEqual(TransferStatus.success, g_transfer_status);
     try std.testing.expectEqualStrings("test_file.txt", g_transfer_msg[0..g_transfer_msg_len]);
+}
+
+test "buildChildPathInto avoids duplicate separators" {
+    var buf: [512]u8 = undefined;
+
+    const remote = buildChildPathInto(&buf, "/var/log", "syslog", '/') orelse unreachable;
+    try std.testing.expectEqualStrings("/var/log/syslog", buf[0..remote]);
+
+    const remote_root = buildChildPathInto(&buf, "/", "home", '/') orelse unreachable;
+    try std.testing.expectEqualStrings("/home", buf[0..remote_root]);
+
+    const local = buildChildPathInto(&buf, "C:\\Users", "xzg", '\\') orelse unreachable;
+    try std.testing.expectEqualStrings("C:\\Users\\xzg", buf[0..local]);
 }
 
 test "Mode enum values" {

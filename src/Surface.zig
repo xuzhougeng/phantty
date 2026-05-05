@@ -257,6 +257,11 @@ got_osc7_this_batch: bool = false,
 cwd_path: [512]u8 = undefined,
 cwd_path_len: usize = 0,
 
+// Windows-side launch CWD. Used as a fallback for shells that do not emit OSC 7
+// (cmd.exe and stock PowerShell, for example).
+initial_cwd_path: [512]u8 = undefined,
+initial_cwd_path_len: usize = 0,
+
 // ============================================================================
 // VT stream
 // ============================================================================
@@ -367,6 +372,8 @@ pub fn init(
     surface.osc7_title_len = 0;
     surface.got_osc7_this_batch = false;
     surface.cwd_path_len = 0;
+    surface.initial_cwd_path_len = 0;
+    surface.captureInitialCwd(cwd);
 
     // Init bell state
     surface.bell_pending = std.atomic.Value(bool).init(false);
@@ -619,6 +626,26 @@ pub fn getCwd(self: *const Surface) ?[]const u8 {
     if (self.cwd_path_len > 0)
         return self.cwd_path[0..self.cwd_path_len];
     return null;
+}
+
+/// Get the Windows-side launch directory for shells that do not report OSC 7.
+pub fn getInitialCwd(self: *const Surface) ?[]const u8 {
+    if (self.initial_cwd_path_len > 0)
+        return self.initial_cwd_path[0..self.initial_cwd_path_len];
+    return null;
+}
+
+fn captureInitialCwd(self: *Surface, cwd: ?[*:0]const u16) void {
+    if (cwd) |ptr| {
+        var len: usize = 0;
+        while (ptr[len] != 0) : (len += 1) {}
+        const utf8_len = std.unicode.utf16LeToUtf8(&self.initial_cwd_path, ptr[0..len]) catch 0;
+        self.initial_cwd_path_len = utf8_len;
+        return;
+    }
+
+    const path = std.process.getCwd(&self.initial_cwd_path) catch return;
+    self.initial_cwd_path_len = path.len;
 }
 
 /// Reset OSC batch state — call before each PTY read batch.

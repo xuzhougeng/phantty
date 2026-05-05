@@ -3,5 +3,6 @@
 
 comptime {
     _ = @import("scp.zig");
+    _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
 }

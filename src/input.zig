@@ -400,16 +400,17 @@ pub fn toggleSidebar() void {
 
 pub fn toggleFileExplorer() void {
     file_explorer.toggle();
-    // Set root to active surface CWD if not already set
-    if (file_explorer.g_visible and file_explorer.g_root_path_len == 0) {
+    // Set root to the active surface each time the explorer is opened.
+    if (file_explorer.g_visible) {
         if (tab.activeSurface()) |surface| {
             if (surface.launch_kind == .ssh) {
                 // SSH session: enter remote mode
                 if (surface.ssh_connection) |conn| {
-                    const cwd = surface.getCwd() orelse "/home";
+                    const cwd = surface.getCwd() orelse "";
                     file_explorer.enterRemoteMode(&conn, cwd);
                 }
             } else {
+                var root_set = false;
                 if (surface.getCwd()) |unix_path| {
                     var wpath: [260]u16 = undefined;
                     if (AppWindow.wsl_paths.unixPathToWindows(unix_path, &wpath)) |wlen| {
@@ -418,7 +419,14 @@ pub fn toggleFileExplorer() void {
                         if (utf8_len > 0) {
                             file_explorer.enterLocalMode();
                             file_explorer.setRoot(utf8_buf[0..utf8_len]);
+                            root_set = true;
                         }
+                    }
+                }
+                if (!root_set) {
+                    if (surface.getInitialCwd()) |initial_cwd| {
+                        file_explorer.enterLocalMode();
+                        file_explorer.setRoot(initial_cwd);
                     }
                 }
             }

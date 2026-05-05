@@ -37,7 +37,7 @@ pub fn transfer(allocator: std.mem.Allocator, conn: *const SshConnection, src: [
     argv_buf[argc] = "-q";
     argc += 1;
 
-    argc = appendSshOptions(&argv_buf, argc, conn);
+    argc = appendSshOptions(&argv_buf, argc, conn, .scp);
 
     argv_buf[argc] = src;
     argc += 1;
@@ -86,7 +86,7 @@ pub fn sshExec(allocator: std.mem.Allocator, conn: *const SshConnection, command
     argv_buf[argc] = "ssh.exe";
     argc += 1;
 
-    argc = appendSshOptions(&argv_buf, argc, conn);
+    argc = appendSshOptions(&argv_buf, argc, conn, .ssh);
 
     // user@host
     var dest_buf: [280]u8 = undefined;
@@ -154,7 +154,9 @@ pub fn remoteSpec(buf: *[512]u8, conn: *const SshConnection, remote_path: []cons
 // Internal helpers
 // ============================================================================
 
-fn appendSshOptions(argv_buf: *[18][]const u8, start_argc: usize, conn: *const SshConnection) usize {
+const PortMode = enum { ssh, scp };
+
+fn appendSshOptions(argv_buf: *[18][]const u8, start_argc: usize, conn: *const SshConnection, port_mode: PortMode) usize {
     var argc = start_argc;
     argv_buf[argc] = "-o";
     argc += 1;
@@ -167,11 +169,7 @@ fn appendSshOptions(argv_buf: *[18][]const u8, start_argc: usize, conn: *const S
     if (conn.password_auth) {
         argv_buf[argc] = "-o";
         argc += 1;
-        argv_buf[argc] = "PreferredAuthentications=password,keyboard-interactive";
-        argc += 1;
-        argv_buf[argc] = "-o";
-        argc += 1;
-        argv_buf[argc] = "PubkeyAuthentication=no";
+        argv_buf[argc] = "PreferredAuthentications=publickey,password,keyboard-interactive";
         argc += 1;
         argv_buf[argc] = "-o";
         argc += 1;
@@ -184,7 +182,10 @@ fn appendSshOptions(argv_buf: *[18][]const u8, start_argc: usize, conn: *const S
         argc += 1;
     }
     if (conn.port().len > 0) {
-        argv_buf[argc] = "-P";
+        argv_buf[argc] = switch (port_mode) {
+            .ssh => "-p",
+            .scp => "-P",
+        };
         argc += 1;
         argv_buf[argc] = conn.port();
         argc += 1;
@@ -247,7 +248,7 @@ test "appendSshOptions key-based auth" {
     conn.port_len = 0;
 
     var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn);
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh);
     // -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 -o BatchMode=yes = 6 args
     try std.testing.expectEqual(@as(usize, 6), argc);
     try std.testing.expectEqualStrings("BatchMode=yes", argv_buf[5]);
@@ -259,21 +260,34 @@ test "appendSshOptions password auth" {
     conn.port_len = 0;
 
     var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn);
-    // -o StrictHostKeyChecking -o ConnectTimeout -o PreferredAuth -o PubkeyAuth -o NumPasswords = 10
-    try std.testing.expectEqual(@as(usize, 10), argc);
-    try std.testing.expectEqualStrings("PubkeyAuthentication=no", argv_buf[7]);
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh);
+    // -o StrictHostKeyChecking -o ConnectTimeout -o PreferredAuth -o NumPasswords = 8
+    try std.testing.expectEqual(@as(usize, 8), argc);
+    try std.testing.expectEqualStrings("NumberOfPasswordPrompts=1", argv_buf[7]);
 }
 
-test "appendSshOptions with port" {
+test "appendSshOptions with ssh port" {
     var conn: SshConnection = .{};
     conn.password_auth = false;
     @memcpy(conn.port_buf[0..4], "2222");
     conn.port_len = 4;
 
     var argv_buf: [18][]const u8 = undefined;
-    const argc = appendSshOptions(&argv_buf, 0, &conn);
-    // 6 (base key-auth) + 2 (-P 2222) = 8
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .ssh);
+    // 6 (base key-auth) + 2 (-p 2222) = 8
+    try std.testing.expectEqual(@as(usize, 8), argc);
+    try std.testing.expectEqualStrings("-p", argv_buf[6]);
+    try std.testing.expectEqualStrings("2222", argv_buf[7]);
+}
+
+test "appendSshOptions with scp port" {
+    var conn: SshConnection = .{};
+    conn.password_auth = false;
+    @memcpy(conn.port_buf[0..4], "2222");
+    conn.port_len = 4;
+
+    var argv_buf: [18][]const u8 = undefined;
+    const argc = appendSshOptions(&argv_buf, 0, &conn, .scp);
     try std.testing.expectEqual(@as(usize, 8), argc);
     try std.testing.expectEqualStrings("-P", argv_buf[6]);
     try std.testing.expectEqualStrings("2222", argv_buf[7]);

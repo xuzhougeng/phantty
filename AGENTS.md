@@ -55,6 +55,25 @@ Get-Item .\zig-out\bin\phantty.exe
 
 `Remove-Item -Recurse -Force .\zig-out, .\.zig-cache -ErrorAction SilentlyContinue` removes build outputs and Zig caches.
 
+## Windows UI Automation
+
+When debugging UI behavior, automate Phantty as a real visible Windows app from PowerShell. Prefer Win32-driven automation over shell-only assumptions.
+
+Use the checked-in automation script for File Explorer regressions:
+
+```powershell
+zig build
+powershell -NoProfile -ExecutionPolicy Bypass -File .\debug\test-file-explorer-ui.ps1
+```
+
+The script launches a real Phantty window, sets DPI awareness, fixes the window position and size, captures before/after screenshots, crops the right panel, sends `Ctrl+Shift+E`, performs a region-based pixel check, and writes screenshots plus JSON metrics under `zig-out\ui-test\`.
+
+When adding more UI automation, follow the same pattern:
+- Wait until `MainWindowHandle` is non-zero, call `ShowWindow` and `SetForegroundWindow`, then click inside the client area before sending keys.
+- Prefer Win32 `keybd_event` or `SendInput` for shortcuts; `System.Windows.Forms.SendKeys` can silently miss GLFW/terminal windows when focus is not exactly right.
+- Capture both full-window and cropped target-region screenshots, and inspect the crop when a pixel check fails.
+- Always clean up test windows with `CloseMainWindow()`, then `Stop-Process -Force` if the process remains.
+
 ## Windows Development Compatibility
 
 This repository must remain safe to check out and develop on Windows.
