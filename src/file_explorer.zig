@@ -76,7 +76,19 @@ const AsyncListJob = struct {
     thread: ?std.Thread = null,
 };
 
+const PendingAsyncList = struct {
+    kind: AsyncListKind,
+    context_id: u64,
+    path_buf: [512]u8 = undefined,
+    path_len: usize = 0,
+    depth: u16 = 0,
+    resolve_root: bool = false,
+};
+
+const AsyncListStart = enum { started, queued, blocked };
+
 threadlocal var g_async_job: ?*AsyncListJob = null;
+threadlocal var g_pending_async_list: ?PendingAsyncList = null;
 threadlocal var g_async_context_id: u64 = 1;
 
 pub const FlatEntry = struct {
@@ -124,13 +136,6 @@ pub fn setWidth(w: f32, window_width: f32) bool {
 
 pub fn toggle() void {
     g_visible = !g_visible;
-    if (g_visible and g_entry_count == 0) {
-        if (g_mode == .remote and g_has_ssh_conn) {
-            rescanRemote();
-        } else {
-            rescan();
-        }
-    }
 }
 
 /// Enter remote mode with the given SSH connection.
@@ -150,6 +155,8 @@ pub fn enterRemoteMode(conn: *const Surface.SshConnection, remote_cwd: []const u
 /// Switch back to local mode.
 pub fn enterLocalMode() void {
     g_async_context_id +%= 1;
+    g_pending_async_list = null;
+    g_loading = false;
     g_mode = .local;
     g_has_ssh_conn = false;
     g_entry_count = 0;
@@ -175,6 +182,7 @@ pub fn tickAsync() void {
     if (job.thread) |thread| thread.join();
     g_async_job = null;
     g_loading = false;
+    defer maybeStartPendingAsyncList();
     defer destroyAsyncJob(job);
 
     if (job.context_id != g_async_context_id or g_mode != .remote or !g_has_ssh_conn) {
@@ -241,14 +249,14 @@ pub fn rescanRemote() void {
     if (!g_has_ssh_conn) return;
 
     if (g_root_path_len == 0) {
-        if (!startAsyncList(.rescan, "", 0, true)) {
+        if (startAsyncList(.rescan, "", 0, true) == .blocked) {
             setTransferStatus(.failed, "SSH list busy");
         }
         return;
     }
 
     const path = g_root_path[0..g_root_path_len];
-    if (!startAsyncList(.rescan, path, 0, false)) {
+    if (startAsyncList(.rescan, path, 0, false) == .blocked) {
         setTransferStatus(.failed, "SSH list busy");
     }
 }
@@ -345,7 +353,7 @@ fn expandRemote(idx: usize) void {
     const entry = &g_entries[idx];
     entry.expanded = true;
     const path = entry.path_buf[0..entry.path_len];
-    if (!startAsyncList(.expand, path, entry.depth + 1, false)) {
+    if (startAsyncList(.expand, path, entry.depth + 1, false) == .blocked) {
         entry.expanded = false;
         setTransferStatus(.failed, "SSH list busy");
     }
@@ -430,16 +438,16 @@ fn findEntryByPath(path: []const u8) ?usize {
     return null;
 }
 
-fn startAsyncList(kind: AsyncListKind, path: []const u8, depth: u16, resolve_root: bool) bool {
-    if (!g_has_ssh_conn) return false;
-    if (g_async_job != null) return false;
-    if (path.len > 512) return false;
+fn startAsyncList(kind: AsyncListKind, path: []const u8, depth: u16, resolve_root: bool) AsyncListStart {
+    if (!g_has_ssh_conn) return .blocked;
+    if (path.len > 512) return .blocked;
+    if (g_async_job != null) return queueAsyncList(kind, path, depth, resolve_root);
 
     const allocator = std.heap.page_allocator;
-    const entries = allocator.alloc(file_backend.Entry, MAX_ENTRIES) catch return false;
+    const entries = allocator.alloc(file_backend.Entry, MAX_ENTRIES) catch return .blocked;
     const job = allocator.create(AsyncListJob) catch {
         allocator.free(entries);
-        return false;
+        return .blocked;
     };
 
     job.* = .{
@@ -456,12 +464,42 @@ fn startAsyncList(kind: AsyncListKind, path: []const u8, depth: u16, resolve_roo
     const thread = std.Thread.spawn(.{}, asyncListThread, .{job}) catch {
         allocator.free(entries);
         allocator.destroy(job);
-        return false;
+        return .blocked;
     };
     job.thread = thread;
     g_async_job = job;
     setLoading(if (resolve_root) "remote folder" else path);
-    return true;
+    return .started;
+}
+
+fn queueAsyncList(kind: AsyncListKind, path: []const u8, depth: u16, resolve_root: bool) AsyncListStart {
+    if (path.len > 512) return .blocked;
+    var pending = PendingAsyncList{
+        .kind = kind,
+        .context_id = g_async_context_id,
+        .path_len = path.len,
+        .depth = depth,
+        .resolve_root = resolve_root,
+    };
+    @memcpy(pending.path_buf[0..path.len], path);
+    g_pending_async_list = pending;
+    setLoading(if (resolve_root) "remote folder" else path);
+    return .queued;
+}
+
+fn maybeStartPendingAsyncList() void {
+    if (g_async_job != null) return;
+    const pending = g_pending_async_list orelse return;
+    g_pending_async_list = null;
+
+    if (pending.context_id != g_async_context_id or g_mode != .remote or !g_has_ssh_conn) {
+        return;
+    }
+
+    const path = pending.path_buf[0..pending.path_len];
+    if (startAsyncList(pending.kind, path, pending.depth, pending.resolve_root) == .blocked) {
+        setTransferStatus(.failed, "SSH list failed");
+    }
 }
 
 fn asyncListThread(job: *AsyncListJob) void {
