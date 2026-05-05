@@ -561,21 +561,21 @@ fn resizeWindowToGrid() void {
     if (g_window) |w| w.setSize(win_w, win_h);
 }
 
-/// Check if the config file has changed (via ReadDirectoryChangesW) and reload if so.
-fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void {
-    if (!watcher.hasChanged()) return;
-
-    std.debug.print("Config file changed, reloading...\n", .{});
-
+/// Reload config from disk and apply theme/font/cursor/etc. (used after UI writes config).
+pub fn reloadConfigImmediate(allocator: std.mem.Allocator) void {
     const cfg = Config.load(allocator) catch |err| {
-        std.debug.print("Failed to reload config: {}\n", .{err});
+        std.debug.print("reloadConfigImmediate: failed to load config: {}\n", .{err});
         return;
     };
     defer cfg.deinit(allocator);
+    applyReloadedConfig(allocator, &cfg);
+}
 
+/// Apply freshly loaded configuration to this window/font/theme state.
+fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     // Update App's cached config so new windows get the new settings
     if (g_app) |app| {
-        app.updateConfig(&cfg);
+        app.updateConfig(cfg);
     }
 
     if (g_window == null) return;
@@ -666,6 +666,20 @@ fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void
     }
 
     std.debug.print("Config reloaded successfully\n", .{});
+}
+
+/// Check if the config file has changed (via ReadDirectoryChangesW) and reload if so.
+fn checkConfigReload(allocator: std.mem.Allocator, watcher: *ConfigWatcher) void {
+    if (!watcher.hasChanged()) return;
+
+    std.debug.print("Config file changed, reloading...\n", .{});
+
+    const cfg = Config.load(allocator) catch |err| {
+        std.debug.print("Failed to reload config: {}\n", .{err});
+        return;
+    };
+    defer cfg.deinit(allocator);
+    applyReloadedConfig(allocator, &cfg);
 }
 
 /// Reset cursor blink to visible state (call on keypress like Ghostty)

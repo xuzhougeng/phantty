@@ -13,6 +13,7 @@ const split_layout = AppWindow.split_layout;
 const Surface = @import("../Surface.zig");
 const SplitTree = @import("../split_tree.zig");
 const Config = @import("../config.zig");
+const themes_embed = @import("../themes.zig");
 const win32_backend = @import("../apprt/win32.zig");
 
 const c = @cImport({
@@ -126,6 +127,16 @@ pub fn startupShortcutsDismiss() void {
 const COMMAND_PALETTE_FILTER_MAX = 64;
 const COMMAND_PALETTE_MAX_VISIBLE_ROWS = 14;
 
+const THEME_OVERRIDE_KEYS = [_][]const u8{
+    "background",
+    "foreground",
+    "cursor-color",
+    "cursor-text",
+    "selection-background",
+    "selection-foreground",
+    "palette",
+};
+
 const CommandAction = enum {
     new_tab,
     split_right,
@@ -168,6 +179,14 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "Ctrl++", .action = .font_size_increase },
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Ctrl+Enter", .action = .toggle_maximize },
 };
+
+const PaletteItem = union(enum) {
+    command: usize,
+    theme: usize,
+};
+
+threadlocal var g_palette_scratch: [COMMAND_PALETTE_MAX_VISIBLE_ROWS]PaletteItem = undefined;
+threadlocal var g_palette_scratch_len: usize = 0;
 
 pub threadlocal var g_command_palette_visible: bool = false;
 threadlocal var g_command_palette_selected: usize = 0;
@@ -246,16 +265,18 @@ pub fn commandPaletteInsertChar(codepoint: u21) void {
 }
 
 pub fn commandPaletteExecuteSelected() void {
-    const entry_index = commandPaletteSelectedEntryIndex() orelse return;
-    const action = COMMAND_ENTRIES[entry_index].action;
+    rebuildPaletteScratch();
+    if (g_palette_scratch_len == 0) return;
+    if (g_command_palette_selected >= g_palette_scratch_len) return;
+    const item = g_palette_scratch[g_command_palette_selected];
     commandPaletteClose();
-    executeCommand(action);
+    executePaletteItem(item);
 }
 
 pub fn commandPaletteExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
-    const entry_index = commandPaletteHitTest(xpos, ypos, window_width, window_height, top_offset) orelse return false;
+    const item = commandPaletteHitTest(xpos, ypos, window_width, window_height, top_offset) orelse return false;
     commandPaletteClose();
-    executeCommand(COMMAND_ENTRIES[entry_index].action);
+    executePaletteItem(item);
     return true;
 }
 
@@ -321,32 +342,52 @@ fn commandEntryMatches(entry: CommandEntry) bool {
         containsIgnoreCase(entry.shortcut, filter);
 }
 
+fn rebuildPaletteScratch() void {
+    const filter = commandPaletteFilter();
+    g_palette_scratch_len = 0;
+
+    if (filter.len == 0) {
+        for (COMMAND_ENTRIES, 0..) |entry, idx| {
+            if (!commandEntryMatches(entry)) continue;
+            if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+            g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
+            g_palette_scratch_len += 1;
+        }
+        return;
+    }
+
+    for (COMMAND_ENTRIES, 0..) |entry, idx| {
+        if (!commandEntryMatches(entry)) continue;
+        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        g_palette_scratch[g_palette_scratch_len] = .{ .command = idx };
+        g_palette_scratch_len += 1;
+    }
+    for (&themes_embed.entries, 0..) |th, ti| {
+        if (g_palette_scratch_len >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        if (!containsIgnoreCase(th.name, filter)) continue;
+        g_palette_scratch[g_palette_scratch_len] = .{ .theme = ti };
+        g_palette_scratch_len += 1;
+    }
+}
+
+fn executePaletteItem(item: PaletteItem) void {
+    switch (item) {
+        .command => |cmd_idx| executeCommand(COMMAND_ENTRIES[cmd_idx].action),
+        .theme => |ti| applyEmbeddedThemeFromPalette(ti),
+    }
+}
+
+fn applyEmbeddedThemeFromPalette(theme_index: usize) void {
+    const allocator = AppWindow.g_allocator orelse return;
+    if (theme_index >= themes_embed.entries.len) return;
+    Config.removeConfigKeys(allocator, &THEME_OVERRIDE_KEYS) catch {};
+    Config.setConfigValue(allocator, "theme", themes_embed.entries[theme_index].name) catch {};
+    AppWindow.reloadConfigImmediate(allocator);
+}
+
 fn commandPaletteVisibleCount() usize {
-    var count: usize = 0;
-    for (COMMAND_ENTRIES) |entry| {
-        if (commandEntryMatches(entry)) count += 1;
-    }
-    return count;
-}
-
-fn commandPaletteSelectedEntryIndex() ?usize {
-    var visible_idx: usize = 0;
-    for (COMMAND_ENTRIES, 0..) |entry, entry_idx| {
-        if (!commandEntryMatches(entry)) continue;
-        if (visible_idx == g_command_palette_selected) return entry_idx;
-        visible_idx += 1;
-    }
-    return null;
-}
-
-fn commandPaletteEntryIndexAtVisibleRow(row: usize) ?usize {
-    var visible_idx: usize = 0;
-    for (COMMAND_ENTRIES, 0..) |entry, entry_idx| {
-        if (!commandEntryMatches(entry)) continue;
-        if (visible_idx == row) return entry_idx;
-        visible_idx += 1;
-    }
-    return null;
+    rebuildPaletteScratch();
+    return g_palette_scratch_len;
 }
 
 fn commandPaletteClampSelection() void {
@@ -384,7 +425,7 @@ fn commandPaletteLayout(window_width: f32, window_height: f32, top_offset: f32) 
     };
 }
 
-fn commandPaletteHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) ?usize {
+fn commandPaletteHitTest(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) ?PaletteItem {
     const layout = commandPaletteLayout(window_width, window_height, top_offset);
     const x: f32 = @floatCast(xpos);
     const y: f32 = @floatCast(ypos);
@@ -394,8 +435,10 @@ fn commandPaletteHitTest(xpos: f64, ypos: f64, window_width: f32, window_height:
     const row_f = (y - layout.row_top_px) / layout.row_h;
     if (row_f < 0) return null;
     const row: usize = @intFromFloat(@floor(row_f));
-    if (row >= @min(commandPaletteVisibleCount(), COMMAND_PALETTE_MAX_VISIBLE_ROWS)) return null;
-    return commandPaletteEntryIndexAtVisibleRow(row);
+    rebuildPaletteScratch();
+    if (row >= g_palette_scratch_len) return null;
+    if (row >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) return null;
+    return g_palette_scratch[row];
 }
 
 fn renderTitlebarText(text: []const u8, x_start: f32, y: f32, color: [3]f32) void {
@@ -479,23 +522,21 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     if (filter.len > 0) {
         renderTitlebarText(filter, filter_x + 12, filter_y, fg);
     } else {
-        renderTitlebarText("Type to filter commands", filter_x + 12, filter_y, dim);
+        renderTitlebarText("Filter commands (type to pick a built-in theme too)", filter_x + 12, filter_y, dim);
     }
 
-    const visible_count = commandPaletteVisibleCount();
-    if (visible_count == 0) {
-        const empty_text = "No matching commands";
+    rebuildPaletteScratch();
+    if (g_palette_scratch_len == 0) {
+        const empty_text = "No matching commands or themes";
         renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, window_height - layout.row_top_px - 26, muted);
     } else {
-        var visible_idx: usize = 0;
-        var rendered_rows: usize = 0;
-        for (COMMAND_ENTRIES) |entry| {
-            if (!commandEntryMatches(entry)) continue;
-            if (rendered_rows >= COMMAND_PALETTE_MAX_VISIBLE_ROWS) break;
+        var row: usize = 0;
+        while (row < g_palette_scratch_len and row < COMMAND_PALETTE_MAX_VISIBLE_ROWS) : (row += 1) {
+            const item = g_palette_scratch[row];
+            const selected = row == g_command_palette_selected;
 
-            const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(rendered_rows)) * layout.row_h);
+            const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(row)) * layout.row_h);
             const row_y = @round(window_height - row_top - layout.row_h);
-            const selected = visible_idx == g_command_palette_selected;
             if (selected) {
                 renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
                 renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
@@ -506,21 +547,31 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
 
             const text_y = @round(row_y + (layout.row_h - font.g_titlebar_cell_height) / 2);
             const title_x = @round(layout.box_x + pad_x + 2);
-            var shortcut_left = layout.box_x + layout.box_w - pad_x;
-            if (entry.shortcut.len > 0) {
-                const shortcut_w = measureTitlebarText(entry.shortcut);
-                shortcut_left = @round(layout.box_x + layout.box_w - pad_x - shortcut_w);
-                renderTitlebarText(entry.shortcut, shortcut_left, text_y, shortcut_color);
+
+            switch (item) {
+                .command => |cmd_idx| {
+                    const entry = COMMAND_ENTRIES[cmd_idx];
+                    var shortcut_left = layout.box_x + layout.box_w - pad_x;
+                    if (entry.shortcut.len > 0) {
+                        const shortcut_w = measureTitlebarText(entry.shortcut);
+                        shortcut_left = @round(layout.box_x + layout.box_w - pad_x - shortcut_w);
+                        renderTitlebarText(entry.shortcut, shortcut_left, text_y, shortcut_color);
+                    }
+                    renderTitlebarTextLimited(entry.title, title_x, text_y, row_title_color, shortcut_left - title_x - 18);
+                },
+                .theme => |ti| {
+                    const name = themes_embed.entries[ti].name;
+                    const suffix = "  theme";
+                    const suffix_w = measureTitlebarText(suffix);
+                    const shortcut_right = layout.box_x + layout.box_w - pad_x;
+                    renderTitlebarText(suffix, shortcut_right - suffix_w, text_y, shortcut_color);
+                    renderTitlebarTextLimited(name, title_x, text_y, row_title_color, (shortcut_right - suffix_w) - title_x - 18);
+                },
             }
-
-            renderTitlebarTextLimited(entry.title, title_x, text_y, row_title_color, shortcut_left - title_x - 18);
-
-            visible_idx += 1;
-            rendered_rows += 1;
         }
     }
 
-    const footer = "Up/Down select, Enter run";
+    const footer = "Up/Down + Enter applies";
     renderTitlebarText(footer, layout.box_x + pad_x, box_y + 17, muted);
 }
 
@@ -1389,16 +1440,6 @@ fn runSettingsFocusRight() void {
         else => runSettingsFocusPrimary(),
     }
 }
-
-const THEME_OVERRIDE_KEYS = [_][]const u8{
-    "background",
-    "foreground",
-    "cursor-color",
-    "cursor-text",
-    "selection-background",
-    "selection-foreground",
-    "palette",
-};
 
 const THEME_RESET_KEYS = [_][]const u8{
     "theme",
