@@ -177,6 +177,8 @@ pub const WM_KEYUP: UINT = 0x0101;
 pub const WM_SYSKEYDOWN: UINT = 0x0104;
 pub const WM_SYSKEYUP: UINT = 0x0105;
 pub const WM_CHAR: UINT = 0x0102;
+pub const WM_SYSCHAR: UINT = 0x0106;
+pub const WM_SYSDEADCHAR: UINT = 0x0107;
 pub const WM_MOUSEMOVE: UINT = 0x0200;
 pub const WM_LBUTTONDOWN: UINT = 0x0201;
 pub const WM_LBUTTONUP: UINT = 0x0202;
@@ -1452,6 +1454,16 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
             }
             return 0;
         },
+        // After WM_SYSKEYDOWN, TranslateMessage posts WM_SYSCHAR. If we let that reach
+        // DefWindowProc for keys with no menu mnemonic, Windows plays the default beep.
+        // We handle Alt shortcuts from key_events; swallow SYSCHAR except Alt+Space (system menu).
+        WM_SYSCHAR => {
+            if (wParam == @as(WPARAM, ' ')) {
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
+            }
+            return 0;
+        },
+        WM_SYSDEADCHAR => return 0,
         WM_CHAR => {
             // wParam is UTF-16 code unit from TranslateMessage
             const char_code: u16 = @intCast(wParam & 0xFFFF);
