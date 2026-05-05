@@ -168,9 +168,98 @@ fn windowsPathToWslPath(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
     return out;
 }
 
+fn clipboardImageBasename(path: []const u8) []const u8 {
+    var start: usize = 0;
+    for (path, 0..) |ch, i| {
+        if (ch == '\\' or ch == '/') start = i + 1;
+    }
+    return path[start..];
+}
+
+fn remoteClipboardImagePath(allocator: std.mem.Allocator, local_path: []const u8) ?[]u8 {
+    const basename = clipboardImageBasename(local_path);
+    if (basename.len == 0) return null;
+    return std.fmt.allocPrint(allocator, "/tmp/{s}", .{basename}) catch null;
+}
+
+fn uploadClipboardImageForSsh(allocator: std.mem.Allocator, surface: *const Surface, local_path: []const u8) ?[]u8 {
+    const conn = surface.ssh_connection orelse {
+        std.debug.print("SSH image paste skipped: no SSH profile metadata for this surface\n", .{});
+        return null;
+    };
+    if (conn.password_auth) {
+        std.debug.print("SSH image paste skipped: password-auth profiles need key/agent auth for background scp\n", .{});
+        return null;
+    }
+
+    const remote_path = remoteClipboardImagePath(allocator, local_path) orelse return null;
+    var keep_remote_path = false;
+    defer if (!keep_remote_path) allocator.free(remote_path);
+
+    const destination = std.fmt.allocPrint(allocator, "{s}@{s}:{s}", .{ conn.user(), conn.host(), remote_path }) catch return null;
+    defer allocator.free(destination);
+
+    var argv_buf: [12][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_buf[argc] = "scp.exe";
+    argc += 1;
+    argv_buf[argc] = "-q";
+    argc += 1;
+    argv_buf[argc] = "-o";
+    argc += 1;
+    argv_buf[argc] = "BatchMode=yes";
+    argc += 1;
+    argv_buf[argc] = "-o";
+    argc += 1;
+    argv_buf[argc] = "StrictHostKeyChecking=accept-new";
+    argc += 1;
+    argv_buf[argc] = "-o";
+    argc += 1;
+    argv_buf[argc] = "ConnectTimeout=8";
+    argc += 1;
+    if (conn.port().len > 0) {
+        argv_buf[argc] = "-P";
+        argc += 1;
+        argv_buf[argc] = conn.port();
+        argc += 1;
+    }
+    argv_buf[argc] = local_path;
+    argc += 1;
+    argv_buf[argc] = destination;
+    argc += 1;
+
+    std.debug.print("Uploading clipboard image over SSH: {s} -> {s}\n", .{ local_path, destination });
+    var child = std.process.Child.init(argv_buf[0..argc], allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch |err| {
+        std.debug.print("SSH image upload failed to start: {}\n", .{err});
+        return null;
+    };
+
+    const term = child.wait() catch |err| {
+        std.debug.print("SSH image upload wait failed: {}\n", .{err});
+        return null;
+    };
+    const ok = switch (term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
+    if (!ok) {
+        std.debug.print("SSH image upload failed; not pasting unreachable path\n", .{});
+        return null;
+    }
+
+    keep_remote_path = true;
+    return remote_path;
+}
+
 fn imagePathForSurfacePaste(allocator: std.mem.Allocator, surface: *const Surface, path: []const u8) ?[]u8 {
-    if (surface.launch_kind == .wsl) {
-        if (windowsPathToWslPath(allocator, path)) |wsl_path| return wsl_path;
+    switch (surface.launch_kind) {
+        .wsl => if (windowsPathToWslPath(allocator, path)) |wsl_path| return wsl_path,
+        .ssh => return uploadClipboardImageForSsh(allocator, surface, path),
+        .windows => {},
     }
     return allocator.dupe(u8, path) catch null;
 }
@@ -261,10 +350,7 @@ fn saveClipboardImageToTemp(allocator: std.mem.Allocator) ?[]u8 {
     return saveClipboardDibAsPng(allocator, hmem);
 }
 
-fn pasteClipboardImage(surface: *Surface, allocator: std.mem.Allocator) bool {
-    const image_path = saveClipboardImageToTemp(allocator) orelse return false;
-    defer allocator.free(image_path);
-
+fn pasteSavedClipboardImage(surface: *Surface, allocator: std.mem.Allocator, image_path: []const u8) bool {
     const target_path = imagePathForSurfacePaste(allocator, surface, image_path) orelse return false;
     defer allocator.free(target_path);
 
@@ -1635,7 +1721,10 @@ pub fn pasteFromClipboard() void {
     const allocator = AppWindow.g_allocator orelse return;
 
     if (win32_backend.OpenClipboard(win.hwnd) == 0) return;
-    defer _ = win32_backend.CloseClipboard();
+    var clipboard_open = true;
+    defer if (clipboard_open) {
+        _ = win32_backend.CloseClipboard();
+    };
 
     if (win32_backend.GetClipboardData(CF_UNICODETEXT)) |hmem| {
         const text = readClipboardUnicodeText(allocator, hmem) orelse return;
@@ -1657,7 +1746,12 @@ pub fn pasteFromClipboard() void {
         return;
     }
 
-    _ = pasteClipboardImage(surface, allocator);
+    const image_path = saveClipboardImageToTemp(allocator) orelse return;
+    defer allocator.free(image_path);
+    _ = win32_backend.CloseClipboard();
+    clipboard_open = false;
+
+    _ = pasteSavedClipboardImage(surface, allocator, image_path);
 }
 
 pub fn pasteImageFromClipboard() void {
@@ -1666,9 +1760,17 @@ pub fn pasteImageFromClipboard() void {
     const allocator = AppWindow.g_allocator orelse return;
 
     if (win32_backend.OpenClipboard(win.hwnd) == 0) return;
-    defer _ = win32_backend.CloseClipboard();
+    var clipboard_open = true;
+    defer if (clipboard_open) {
+        _ = win32_backend.CloseClipboard();
+    };
 
-    _ = pasteClipboardImage(surface, allocator);
+    const image_path = saveClipboardImageToTemp(allocator) orelse return;
+    defer allocator.free(image_path);
+    _ = win32_backend.CloseClipboard();
+    clipboard_open = false;
+
+    _ = pasteSavedClipboardImage(surface, allocator, image_path);
 }
 
 pub fn writeTextToActivePty(text: []const u8) void {

@@ -48,6 +48,28 @@ pub const LaunchKind = enum {
     ssh,
 };
 
+pub const SshConnection = struct {
+    user_buf: [128]u8 = undefined,
+    user_len: usize = 0,
+    host_buf: [128]u8 = undefined,
+    host_len: usize = 0,
+    port_buf: [16]u8 = undefined,
+    port_len: usize = 0,
+    password_auth: bool = false,
+
+    pub fn user(self: *const SshConnection) []const u8 {
+        return self.user_buf[0..self.user_len];
+    }
+
+    pub fn host(self: *const SshConnection) []const u8 {
+        return self.host_buf[0..self.host_len];
+    }
+
+    pub fn port(self: *const SshConnection) []const u8 {
+        return self.port_buf[0..self.port_len];
+    }
+};
+
 // ============================================================================
 // VT stream handler — wraps ghostty's readonly handler to intercept bell
 // ============================================================================
@@ -123,6 +145,7 @@ command: Command,
 selection: Selection,
 render_state: renderer.State,
 launch_kind: LaunchKind,
+ssh_connection: ?SshConnection,
 
 /// Size information for this surface (screen size, cell size, padding).
 /// Used by the renderer to position content correctly.
@@ -302,6 +325,7 @@ pub fn init(
     surface.selection = .{};
     surface.render_state = renderer.State.init(&surface.terminal);
     surface.launch_kind = detectLaunchKind(shell_cmd);
+    surface.ssh_connection = null;
     surface.dirty = std.atomic.Value(bool).init(true);
     surface.exited = std.atomic.Value(bool).init(false);
 
@@ -463,6 +487,26 @@ pub fn unref(self: *Surface, allocator: std.mem.Allocator) void {
     if (self.ref_count == 0) {
         self.deinit(allocator);
     }
+}
+
+pub fn setSshConnection(
+    self: *Surface,
+    user: []const u8,
+    host: []const u8,
+    port: []const u8,
+    password_auth: bool,
+) void {
+    var conn: SshConnection = .{};
+    conn.user_len = @min(user.len, conn.user_buf.len);
+    conn.host_len = @min(host.len, conn.host_buf.len);
+    conn.port_len = @min(port.len, conn.port_buf.len);
+    @memcpy(conn.user_buf[0..conn.user_len], user[0..conn.user_len]);
+    @memcpy(conn.host_buf[0..conn.host_len], host[0..conn.host_len]);
+    @memcpy(conn.port_buf[0..conn.port_len], port[0..conn.port_len]);
+    conn.password_auth = password_auth;
+
+    self.launch_kind = .ssh;
+    self.ssh_connection = conn;
 }
 
 // ============================================================================
