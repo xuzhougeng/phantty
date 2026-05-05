@@ -731,6 +731,12 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         toggleSidebar();
         return;
     }
+    // Ctrl+Shift+W = close focused panel/tab/window
+    if (ev.ctrl and ev.shift and ev.vk == 0x57) { // 'W'
+        if (tab.g_tab_rename_active) tab.commitTabRename();
+        AppWindow.closeFocusedSplit();
+        return;
+    }
     // Ctrl+Enter = maximize / restore window
     if (ev.ctrl and !ev.shift and !ev.alt and ev.vk == win32_backend.VK_RETURN) {
         if (tab.g_tab_rename_active) tab.commitTabRename();

@@ -128,6 +128,25 @@ pub fn activeSurface() ?*Surface {
     return t.focusedSurface();
 }
 
+fn splitSpawnCommand(
+    allocator: std.mem.Allocator,
+    surface: *const Surface,
+) ?[:0]const u16 {
+    const conn = surface.ssh_connection orelse return null;
+
+    var command_buf: [512]u8 = undefined;
+    const auth_flags = if (conn.password_auth)
+        "-o StrictHostKeyChecking=accept-new -o PreferredAuthentications=password,keyboard-interactive -o PubkeyAuthentication=no "
+    else
+        "-o StrictHostKeyChecking=accept-new ";
+    const command = if (conn.port().len > 0)
+        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}-p {s} {s}@{s}", .{ auth_flags, conn.port(), conn.user(), conn.host() }) catch return null
+    else
+        std.fmt.bufPrint(&command_buf, "cmd.exe /k ssh.exe -tt {s}{s}@{s}", .{ auth_flags, conn.user(), conn.host() }) catch return null;
+
+    return std.unicode.utf8ToUtf16LeAllocZ(allocator, command) catch null;
+}
+
 /// Get the active tab's focused surface's selection
 pub fn activeSelection() *Selection {
     if (g_tab_count > 0) {
@@ -277,6 +296,9 @@ pub fn splitFocusedReturningSurface(
 ) ?*Surface {
     const t = activeTab() orelse return null;
     const focused_surface = t.focusedSurface() orelse return null;
+    const split_command = splitSpawnCommand(allocator, focused_surface);
+    defer if (split_command) |command| allocator.free(command);
+    const shell_cmd = split_command orelse getShellCmd();
 
     // Calculate exact dimensions for the new split surface
     const screen_w = focused_surface.size.screen.width;
@@ -309,7 +331,7 @@ pub fn splitFocusedReturningSurface(
         allocator,
         split_cols,
         split_rows,
-        getShellCmd(),
+        shell_cmd,
         g_scrollback_limit,
         cursor_style,
         cursor_blink,
@@ -318,6 +340,10 @@ pub fn splitFocusedReturningSurface(
         std.debug.print("Failed to create Surface for split\n", .{});
         return null;
     };
+
+    if (focused_surface.ssh_connection) |conn| {
+        new_surface.setSshConnection(conn.user(), conn.host(), conn.port(), conn.password(), conn.password_auth);
+    }
 
     // Pre-initialize size state to match what computeSplitLayout will compute
     new_surface.size.screen.width = new_screen_w;
