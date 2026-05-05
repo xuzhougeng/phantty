@@ -43,6 +43,7 @@ pub fn build(b: *std.Build) void {
     // Win32: link native Windows libraries
     exe_mod.linkSystemLibrary("user32", .{});
     exe_mod.linkSystemLibrary("gdi32", .{});
+    exe_mod.linkSystemLibrary("gdiplus", .{});
     exe_mod.linkSystemLibrary("dwmapi", .{});
     exe_mod.linkSystemLibrary("ws2_32", .{});
     exe_mod.linkSystemLibrary("mswsock", .{});

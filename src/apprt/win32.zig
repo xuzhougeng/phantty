@@ -36,6 +36,13 @@ pub const LONG = i32;
 pub const INT = i32;
 pub const WCHAR = u16;
 
+pub const GUID = extern struct {
+    Data1: u32,
+    Data2: u16,
+    Data3: u16,
+    Data4: [8]u8,
+};
+
 pub const RECT = extern struct {
     left: LONG,
     top: LONG,
@@ -329,6 +336,36 @@ pub extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.win
 pub extern "kernel32" fn GlobalLock(hMem: *anyopaque) callconv(.winapi) ?*anyopaque;
 pub extern "kernel32" fn GlobalUnlock(hMem: *anyopaque) callconv(.winapi) BOOL;
 pub extern "kernel32" fn GlobalSize(hMem: *anyopaque) callconv(.winapi) usize;
+
+// GDI+ image encoding
+pub const GpImage = opaque {};
+pub const GpBitmap = GpImage;
+
+pub const GdiplusStartupInput = extern struct {
+    GdiplusVersion: UINT,
+    DebugEventCallback: ?*const anyopaque,
+    SuppressBackgroundThread: BOOL,
+    SuppressExternalCodecs: BOOL,
+};
+
+pub extern "gdiplus" fn GdiplusStartup(
+    token: *usize,
+    input: *const GdiplusStartupInput,
+    output: ?*anyopaque,
+) callconv(.winapi) INT;
+pub extern "gdiplus" fn GdiplusShutdown(token: usize) callconv(.winapi) void;
+pub extern "gdiplus" fn GdipCreateBitmapFromGdiDib(
+    gdiBitmapInfo: *const anyopaque,
+    gdiBitmapData: *const anyopaque,
+    bitmap: *?*GpBitmap,
+) callconv(.winapi) INT;
+pub extern "gdiplus" fn GdipSaveImageToFile(
+    image: *GpImage,
+    filename: [*:0]const WCHAR,
+    clsidEncoder: *const GUID,
+    encoderParams: ?*const anyopaque,
+) callconv(.winapi) INT;
+pub extern "gdiplus" fn GdipDisposeImage(image: *GpImage) callconv(.winapi) INT;
 
 // ============================================================================
 // ConPTY, pipes, and process management

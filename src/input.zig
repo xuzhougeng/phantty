@@ -26,6 +26,13 @@ const CF_UNICODETEXT: win32_backend.UINT = 13;
 const CF_DIBV5: win32_backend.UINT = 17;
 const BI_RGB: u32 = 0;
 const BI_BITFIELDS: u32 = 3;
+const GDIP_OK: win32_backend.INT = 0;
+const PNG_ENCODER_CLSID: win32_backend.GUID = .{
+    .Data1 = 0x557CF406,
+    .Data2 = 0x1A04,
+    .Data3 = 0x11D3,
+    .Data4 = .{ 0x9A, 0x73, 0x00, 0x00, 0xF8, 0x1E, 0xF3, 0x2E },
+};
 
 const BitmapInfoHeader = extern struct {
     biSize: u32,
@@ -133,7 +140,7 @@ fn clipboardImagePath(allocator: std.mem.Allocator) ?[]u8 {
     defer allocator.free(temp_dir);
 
     const ts = std.time.milliTimestamp();
-    return std.fmt.allocPrint(allocator, "{s}\\phantty-clipboard-{d}.bmp", .{ temp_dir, ts }) catch null;
+    return std.fmt.allocPrint(allocator, "{s}\\phantty-clipboard-{d}.png", .{ temp_dir, ts }) catch null;
 }
 
 fn quotePathForPaste(allocator: std.mem.Allocator, path: []const u8) ?[]u8 {
@@ -203,7 +210,7 @@ fn dibMaskBytes(header: BitmapInfoHeader) usize {
     return if (header.biSize == @sizeOf(BitmapInfoHeader)) 12 else 0;
 }
 
-fn saveClipboardDibAsBmp(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
+fn saveClipboardDibAsPng(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
     const total_size = win32_backend.GlobalSize(hmem);
     if (total_size < @sizeOf(BitmapInfoHeader)) return null;
 
@@ -217,31 +224,41 @@ fn saveClipboardDibAsBmp(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
     if (header.biSize < @sizeOf(BitmapInfoHeader) or header.biPlanes != 1) return null;
     if (header.biCompression != BI_RGB and header.biCompression != BI_BITFIELDS) return null;
 
-    const pixel_offset = 14 + @as(usize, header.biSize) + dibColorTableBytes(header.*) + dibMaskBytes(header.*);
+    const pixel_offset = @as(usize, header.biSize) + dibColorTableBytes(header.*) + dibMaskBytes(header.*);
     if (pixel_offset > dib.len) return null;
 
     const out_path = clipboardImagePath(allocator) orelse return null;
-    errdefer allocator.free(out_path);
+    var keep_out_path = false;
+    defer if (!keep_out_path) allocator.free(out_path);
 
-    const file = std.fs.createFileAbsolute(out_path, .{}) catch return null;
-    defer file.close();
+    const out_path_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, out_path) catch return null;
+    defer allocator.free(out_path_w);
 
-    var fh: [14]u8 = undefined;
-    fh[0] = 'B';
-    fh[1] = 'M';
-    std.mem.writeInt(u32, fh[2..6], @intCast(14 + dib.len), .little);
-    std.mem.writeInt(u16, fh[6..8], 0, .little);
-    std.mem.writeInt(u16, fh[8..10], 0, .little);
-    std.mem.writeInt(u32, fh[10..14], @intCast(pixel_offset), .little);
+    const startup_input: win32_backend.GdiplusStartupInput = .{
+        .GdiplusVersion = 1,
+        .DebugEventCallback = null,
+        .SuppressBackgroundThread = 0,
+        .SuppressExternalCodecs = 0,
+    };
+    var gdip_token: usize = 0;
+    if (win32_backend.GdiplusStartup(&gdip_token, &startup_input, null) != GDIP_OK) return null;
+    defer win32_backend.GdiplusShutdown(gdip_token);
 
-    file.writeAll(&fh) catch return null;
-    file.writeAll(dib) catch return null;
+    const info_ptr: *const anyopaque = @ptrCast(dib.ptr);
+    const data_ptr: *const anyopaque = @ptrCast(dib[pixel_offset..].ptr);
+    var bitmap: ?*win32_backend.GpBitmap = null;
+    if (win32_backend.GdipCreateBitmapFromGdiDib(info_ptr, data_ptr, &bitmap) != GDIP_OK) return null;
+    const gdip_bitmap = bitmap orelse return null;
+    defer _ = win32_backend.GdipDisposeImage(gdip_bitmap);
+
+    if (win32_backend.GdipSaveImageToFile(gdip_bitmap, out_path_w.ptr, &PNG_ENCODER_CLSID, null) != GDIP_OK) return null;
+    keep_out_path = true;
     return out_path;
 }
 
 fn saveClipboardImageToTemp(allocator: std.mem.Allocator) ?[]u8 {
     const hmem = win32_backend.GetClipboardData(CF_DIBV5) orelse win32_backend.GetClipboardData(CF_DIB) orelse return null;
-    return saveClipboardDibAsBmp(allocator, hmem);
+    return saveClipboardDibAsPng(allocator, hmem);
 }
 
 fn pasteClipboardImage(surface: *Surface, allocator: std.mem.Allocator) bool {
