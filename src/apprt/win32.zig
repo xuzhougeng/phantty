@@ -327,6 +327,7 @@ pub extern "user32" fn GetClipboardData(uFormat: UINT) callconv(.winapi) ?*anyop
 pub extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: usize) callconv(.winapi) ?*anyopaque;
 pub extern "kernel32" fn GlobalLock(hMem: *anyopaque) callconv(.winapi) ?*anyopaque;
 pub extern "kernel32" fn GlobalUnlock(hMem: *anyopaque) callconv(.winapi) BOOL;
+pub extern "kernel32" fn GlobalSize(hMem: *anyopaque) callconv(.winapi) usize;
 
 // ============================================================================
 // ConPTY, pipes, and process management
