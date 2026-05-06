@@ -1251,7 +1251,7 @@ fn looksLikePreviewPath(path: []const u8) bool {
     return endsWithIgnoreCase(path, ".pdf") or isPreviewImagePath(path);
 }
 
-fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?[]u8 {
+fn extractTokenAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?[]u8 {
     const cols = @as(usize, @intCast(surface.size.grid.cols));
     const rows = @as(usize, @intCast(surface.size.grid.rows));
     if (cols == 0 or rows == 0 or cell_pos.row >= rows) return null;
@@ -1287,8 +1287,61 @@ fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cel
     }
 
     const trimmed = trimPreviewToken(token.items);
-    if (!looksLikePreviewPath(trimmed)) return null;
     return allocator.dupe(u8, trimmed) catch null;
+}
+
+fn looksLikeUrl(text: []const u8) bool {
+    return std.mem.startsWith(u8, text, "http://") or
+        std.mem.startsWith(u8, text, "https://") or
+        std.mem.startsWith(u8, text, "www.");
+}
+
+fn extractUrlAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?[]u8 {
+    const token = extractTokenAtCell(allocator, surface, cell_pos) orelse return null;
+    if (!looksLikeUrl(token)) {
+        allocator.free(token);
+        return null;
+    }
+    return token;
+}
+
+fn extractPreviewPathAtCell(allocator: std.mem.Allocator, surface: *Surface, cell_pos: CellPos) ?[]u8 {
+    const token = extractTokenAtCell(allocator, surface, cell_pos) orelse return null;
+    if (!looksLikePreviewPath(token)) {
+        allocator.free(token);
+        return null;
+    }
+    return token;
+}
+
+fn openUrl(url: []const u8) bool {
+    const allocator = AppWindow.g_allocator orelse return false;
+    const target = if (std.mem.startsWith(u8, url, "www."))
+        std.fmt.allocPrint(allocator, "https://{s}", .{url}) catch return false
+    else
+        allocator.dupe(u8, url) catch return false;
+    defer allocator.free(target);
+
+    const target_w = std.unicode.utf8ToUtf16LeAllocZ(allocator, target) catch return false;
+    defer allocator.free(target_w);
+
+    const hwnd = if (AppWindow.g_window) |win| win.hwnd else null;
+    const result = win32_backend.ShellExecuteW(
+        hwnd,
+        std.unicode.utf8ToUtf16LeStringLiteral("open"),
+        target_w.ptr,
+        null,
+        null,
+        win32_backend.SW_SHOW,
+    );
+    return result > 32;
+}
+
+fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
+    const allocator = AppWindow.g_allocator orelse return false;
+    const url = extractUrlAtCell(allocator, surface, cell_pos) orelse return false;
+    defer allocator.free(url);
+    return openUrl(url);
 }
 
 fn appendShellQuoted(list: *std.ArrayListUnmanaged(u8), allocator: std.mem.Allocator, text: []const u8) !void {
@@ -1529,7 +1582,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             }
 
             const cell_pos = mouseToSurfaceCell(clicked_surface, xpos, ypos);
-            if (ev.ctrl and !ev.shift and !ev.alt and openPreviewPanelForCell(clicked_surface, cell_pos)) return;
+            if (ev.ctrl and !ev.shift and !ev.alt) {
+                if (openUrlAtCell(clicked_surface, cell_pos)) return;
+                if (openPreviewPanelForCell(clicked_surface, cell_pos)) return;
+            }
 
             const abs_row = viewportOffsetForSurface(clicked_surface) + cell_pos.row;
             // Start selection on the clicked surface
