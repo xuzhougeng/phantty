@@ -148,10 +148,10 @@ export default {
 
 async function login(request: Request, env: Env): Promise<Response> {
   const body = (await request.json().catch(() => null)) as LoginBody | null;
-  const username = body?.username ?? "";
+  const username = (body?.username ?? "").trim();
   const password = body?.password ?? "";
 
-  if (username !== env.ADMIN_USERNAME) {
+  if (username !== env.ADMIN_USERNAME.trim()) {
     return json({ error: "invalid credentials" }, 401);
   }
 
@@ -200,10 +200,10 @@ async function routeWebSocket(request: Request, env: Env, role: "browser" | "pha
 }
 
 async function verifyPassword(password: string, expectedHash: string): Promise<boolean> {
-  const [scheme, hash] = expectedHash.split(":", 2);
-  if (scheme !== "sha256" || !hash) return false;
+  const [scheme, hash] = expectedHash.trim().split(":", 2);
+  if (scheme.toLowerCase() !== "sha256" || !hash) return false;
   const actual = await sha256Hex(password);
-  return timingSafeEqual(actual, hash.toLowerCase());
+  return timingSafeEqual(actual, hash.trim().toLowerCase());
 }
 
 type SessionPayload = {

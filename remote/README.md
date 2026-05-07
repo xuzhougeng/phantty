@@ -50,6 +50,14 @@ wrangler secret put SESSION_SIGNING_SECRET
 sha256:<lowercase-hex-sha256-of-password>
 ```
 
+On Linux, generate it without adding a newline or losing backslashes:
+
+```bash
+IFS= read -r -s -p "Admin password: " PW; echo
+printf '%s' "$PW" | sha256sum | awk '{print "sha256:" $1}'
+unset PW
+```
+
 Build and deploy:
 
 ```powershell
