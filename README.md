@@ -116,6 +116,8 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | Right-click a selection | Copy selection |
 | **Ctrl+V** | Paste text |
 | **Ctrl+Shift+V** | Paste clipboard image |
+| **Ctrl+Shift+Y** | Grant pending remote input control |
+| **Ctrl+Shift+R** | Revoke remote input control |
 | **Alt** + arrow keys | Move focus to adjacent panel (spatial) |
 | **Ctrl+Shift+[** | Focus previous panel (cycle) |
 | **Ctrl+Shift+]** | Focus next panel (cycle) |

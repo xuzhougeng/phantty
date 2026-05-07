@@ -106,6 +106,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+C / Ctrl+V", .action = "Copy / paste text" },
     .{ .keys = "Right-click selection", .action = "Copy selection" },
     .{ .keys = "Ctrl+Shift+V", .action = "Paste image" },
+    .{ .keys = "Ctrl+Shift+Y / R", .action = "Grant / revoke remote input" },
     .{ .keys = "Ctrl+,", .action = "Open config" },
     .{ .keys = "Ctrl++ / Ctrl+-", .action = "Font size" },
     .{ .keys = "Ctrl+Enter", .action = "Maximize / restore" },
@@ -164,6 +165,8 @@ const CommandAction = enum {
     font_size_decrease,
     font_size_increase,
     toggle_maximize,
+    remote_control_grant,
+    remote_control_revoke,
 };
 
 const CommandEntry = struct {
@@ -190,6 +193,8 @@ const COMMAND_ENTRIES = [_]CommandEntry{
     .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "Ctrl+-", .action = .font_size_decrease },
     .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "Ctrl++", .action = .font_size_increase },
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Ctrl+Enter", .action = .toggle_maximize },
+    .{ .title = "Grant Remote Input", .detail = "Allow the paired browser to type into panels", .shortcut = "Ctrl+Shift+Y", .action = .remote_control_grant },
+    .{ .title = "Revoke Remote Input", .detail = "Return the paired browser to read-only mode", .shortcut = "Ctrl+Shift+R", .action = .remote_control_revoke },
 };
 
 const PaletteItem = union(enum) {
@@ -322,6 +327,12 @@ fn executeCommand(action: CommandAction) void {
         .font_size_decrease => AppWindow.input.adjustFontSize(-1),
         .font_size_increase => AppWindow.input.adjustFontSize(1),
         .toggle_maximize => AppWindow.input.toggleMaximize(),
+        .remote_control_grant => {
+            _ = AppWindow.input.grantRemoteControl();
+        },
+        .remote_control_revoke => {
+            _ = AppWindow.input.revokeRemoteControl();
+        },
     }
 }
 
@@ -2539,6 +2550,30 @@ pub fn renderDebugOverlay(window_width: f32) void {
                     .{ remoteStateLabel(client.loadState()), client.sessionKey() },
                 ) catch break :blk "";
             }, remoteStateColor(client.loadState()));
+
+            if (client.hasControlRequest()) {
+                renderDebugLine(
+                    window_width,
+                    &overlay_y,
+                    margin,
+                    pad_h,
+                    pad_v,
+                    line_h,
+                    "Remote input request: Ctrl+Shift+Y grant / Ctrl+Shift+R revoke",
+                    .{ 1.0, 0.78, 0.22 },
+                );
+            } else if (client.controlGranted()) {
+                renderDebugLine(
+                    window_width,
+                    &overlay_y,
+                    margin,
+                    pad_h,
+                    pad_v,
+                    line_h,
+                    "Remote input granted: Ctrl+Shift+R revoke",
+                    .{ 0.24, 1.0, 0.44 },
+                );
+            }
         }
     }
 

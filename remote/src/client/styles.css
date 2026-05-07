@@ -267,6 +267,37 @@ button:disabled {
   font-size: 12px;
 }
 
+.terminal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.control-state {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.control-state[data-state="pending"] {
+  border-color: rgba(246, 199, 111, 0.6);
+  color: var(--accent);
+}
+
+.control-state[data-state="granted"] {
+  border-color: rgba(100, 214, 154, 0.6);
+  color: var(--ok);
+}
+
+.control-button {
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
 .panels-stage {
   position: relative;
   min-height: 0;

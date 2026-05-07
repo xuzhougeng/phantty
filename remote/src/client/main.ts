@@ -38,6 +38,8 @@ type SurfaceView = {
   disposeInput: { dispose(): void };
 };
 
+type ControlState = "idle" | "pending" | "granted";
+
 const appRoot = document.querySelector<HTMLElement>("#app");
 
 if (!appRoot) {
@@ -53,6 +55,7 @@ let selectedTabIndex = 0;
 let selectedSurfaceId: string | null = null;
 let surfaceViews = new Map<string, SurfaceView>();
 let notices: string[] = [];
+let controlState: ControlState = "idle";
 
 function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(path, {
@@ -139,7 +142,11 @@ function renderConsole(): void {
       <section class="terminal-panel">
         <div class="terminal-toolbar">
           <span id="workspace-title">Remote workspace</span>
-          <span class="toolbar-hint">Click a panel, then type</span>
+          <div class="terminal-actions">
+            <span class="control-state" id="control-state">Read-only</span>
+            <button type="button" class="control-button" id="request-control-button">Request control</button>
+            <span class="toolbar-hint">Read-only until local approval</span>
+          </div>
         </div>
         <div id="remote-panels" class="panels-stage empty">
           <div class="empty-state">Connected panels will appear here.</div>
@@ -161,6 +168,9 @@ function renderConsole(): void {
     const data = new FormData(form);
     connect(String(data.get("session") ?? "").trim());
   });
+
+  document.querySelector<HTMLButtonElement>("#request-control-button")?.addEventListener("click", requestControl);
+  updateControlUi();
 }
 
 function connect(sessionKey: string): void {
@@ -170,19 +180,24 @@ function connect(sessionKey: string): void {
   layoutState = null;
   selectedSurfaceId = null;
   notices = [];
+  controlState = "idle";
   renderRemoteWorkspace();
+  updateControlUi();
 
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   socket = new WebSocket(`${protocol}//${location.host}/ws/browser?session=${encodeURIComponent(sessionKey)}`);
   setStatus("connecting", "Connecting...");
+  updateControlUi();
 
   socket.addEventListener("open", () => {
     setStatus("online", "Connected");
     addNotice("Connected. Waiting for Phantty layout...");
+    updateControlUi();
   });
 
   socket.addEventListener("close", () => {
     setStatus("offline", "Disconnected");
+    applyControlState("idle");
   });
 
   socket.addEventListener("message", (event) => {
@@ -212,6 +227,14 @@ function connect(sessionKey: string): void {
       const surfaceId = typeof message.surfaceId === "string" ? message.surfaceId : selectedSurfaceId;
       const bytes = decodeHex(message.data);
       if (surfaceId && bytes) writeSurfaceBytes(surfaceId, bytes);
+    } else if (message.type === "control-requested") {
+      applyControlState("pending", "Waiting for local approval in Phantty...");
+    } else if (message.type === "control-granted") {
+      applyControlState("granted", "Remote input is enabled");
+    } else if (message.type === "control-revoked") {
+      applyControlState("idle", "Remote input returned to read-only");
+    } else if (message.type === "input-denied" && typeof message.message === "string") {
+      addNotice(message.message);
     } else if (message.type === "notice" && typeof message.message === "string") {
       addNotice(message.message);
     }
@@ -222,6 +245,7 @@ function renderRemoteWorkspace(): void {
   renderRemoteTabs();
   renderRemotePanels();
   renderNotices();
+  updateControlUi();
 }
 
 function renderRemoteTabs(): void {
@@ -320,7 +344,7 @@ function ensureSurfaceView(surfaceId: string): SurfaceView {
   const term = new Terminal({
     cursorBlink: true,
     convertEol: true,
-    disableStdin: false,
+    disableStdin: controlState !== "granted",
     fontFamily: '"JetBrains Mono", "Cascadia Mono", monospace',
     fontSize: 13,
     scrollback: 0,
@@ -374,6 +398,7 @@ function writeLegacyOutput(data: string): void {
 
 function sendInputBytes(surfaceId: string, data: string): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (controlState !== "granted") return;
   socket.send(
     JSON.stringify({
       type: "input-bytes",
@@ -382,6 +407,50 @@ function sendInputBytes(surfaceId: string, data: string): void {
       data: encodeHex(encoder.encode(data)),
     }),
   );
+}
+
+function requestControl(): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    addNotice("Connect a Phantty session first.");
+    return;
+  }
+  if (controlState === "granted") return;
+
+  applyControlState("pending");
+  socket.send(JSON.stringify({ type: "request-control" }));
+  addNotice("Control request sent. Grant it in Phantty with Ctrl+Shift+Y.");
+}
+
+function applyControlState(next: ControlState, notice?: string): void {
+  const changed = controlState !== next;
+  controlState = next;
+  updateControlUi();
+  if (notice && changed) addNotice(notice);
+}
+
+function updateControlUi(): void {
+  const connected = socket?.readyState === WebSocket.OPEN;
+  const button = document.querySelector<HTMLButtonElement>("#request-control-button");
+  const label = document.querySelector<HTMLSpanElement>("#control-state");
+  const hint = document.querySelector<HTMLSpanElement>(".toolbar-hint");
+
+  if (button) {
+    button.disabled = !connected || controlState === "pending" || controlState === "granted";
+    button.textContent =
+      controlState === "granted" ? "Control enabled" : controlState === "pending" ? "Waiting local grant" : "Request control";
+  }
+  if (label) {
+    label.dataset.state = controlState;
+    label.textContent =
+      controlState === "granted" ? "Input enabled" : controlState === "pending" ? "Pending approval" : "Read-only";
+  }
+  if (hint) {
+    hint.textContent = controlState === "granted" ? "Click a panel, then type" : "Read-only until local approval";
+  }
+
+  for (const view of surfaceViews.values()) {
+    view.term.options.disableStdin = controlState !== "granted";
+  }
 }
 
 function currentTab(): LayoutTab | null {

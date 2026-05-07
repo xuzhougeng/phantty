@@ -28,6 +28,8 @@ export class RemoteSession extends DurableObject<Env> {
   private phantty: WebSocket | null = null;
   private browsers = new Set<WebSocket>();
   private lastLayout: RelayMessage | null = null;
+  private controlEnabled = false;
+  private controlPending = false;
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -56,7 +58,10 @@ export class RemoteSession extends DurableObject<Env> {
   private attachPhantty(socket: WebSocket): void {
     this.phantty?.close(1012, "replaced by a new Phantty connection");
     this.phantty = socket;
+    this.controlEnabled = false;
+    this.controlPending = false;
     this.broadcast({ type: "notice", message: "Phantty connected" });
+    this.broadcast({ type: "control-revoked" });
 
     socket.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
@@ -75,31 +80,57 @@ export class RemoteSession extends DurableObject<Env> {
       } else if (message.type === "layout") {
         this.lastLayout = message;
         this.broadcast(message);
+      } else if (message.type === "control-requested") {
+        this.controlPending = true;
+        this.broadcast({ type: "control-requested" });
+      } else if (message.type === "control-granted") {
+        this.controlPending = false;
+        this.controlEnabled = true;
+        this.broadcast({ type: "control-granted" });
+      } else if (message.type === "control-revoked") {
+        this.controlPending = false;
+        this.controlEnabled = false;
+        this.broadcast({ type: "control-revoked" });
       }
     });
 
     socket.addEventListener("close", () => {
-      if (this.phantty === socket) this.phantty = null;
+      if (this.phantty !== socket) return;
+      this.phantty = null;
+      this.controlEnabled = false;
+      this.controlPending = false;
+      this.broadcast({ type: "control-revoked" });
       this.broadcast({ type: "notice", message: "Phantty disconnected" });
     });
   }
 
   private attachBrowser(socket: WebSocket): void {
     this.browsers.add(socket);
-    socket.send(JSON.stringify({ type: "notice", message: "Browser paired in read-only mode" }));
+    socket.send(JSON.stringify({ type: "notice", message: "Browser paired" }));
     if (this.phantty) socket.send(JSON.stringify({ type: "notice", message: "Phantty connected" }));
     if (this.lastLayout) socket.send(JSON.stringify(this.lastLayout));
+    socket.send(
+      JSON.stringify({
+        type: this.controlEnabled ? "control-granted" : this.controlPending ? "control-requested" : "control-revoked",
+      }),
+    );
 
     socket.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
       const message = safeJson(event.data);
       if (!message) return;
 
-      if (
+      if (message.type === "request-control") {
+        this.requestControl(socket);
+      } else if (
         message.type === "input-bytes" &&
         typeof message.surfaceId === "string" &&
         typeof message.data === "string"
       ) {
+        if (!this.controlEnabled) {
+          socket.send(JSON.stringify({ type: "input-denied", message: "Remote input is waiting for local approval" }));
+          return;
+        }
         this.phantty?.send(
           JSON.stringify({
             type: "input-bytes",
@@ -113,7 +144,27 @@ export class RemoteSession extends DurableObject<Env> {
 
     socket.addEventListener("close", () => {
       this.browsers.delete(socket);
+      if (this.browsers.size === 0 && (this.controlEnabled || this.controlPending)) {
+        this.controlEnabled = false;
+        this.controlPending = false;
+        this.phantty?.send(JSON.stringify({ type: "control-revoked" }));
+      }
     });
+  }
+
+  private requestControl(socket: WebSocket): void {
+    if (!this.phantty) {
+      socket.send(JSON.stringify({ type: "notice", message: "Phantty is not connected yet" }));
+      return;
+    }
+    if (this.controlEnabled) {
+      socket.send(JSON.stringify({ type: "control-granted" }));
+      return;
+    }
+
+    this.controlPending = true;
+    this.broadcast({ type: "control-requested" });
+    this.phantty.send(JSON.stringify({ type: "request-control" }));
   }
 
   private broadcast(message: RelayMessage): void {
