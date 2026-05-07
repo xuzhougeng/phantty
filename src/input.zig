@@ -478,8 +478,10 @@ pub fn adjustFontSize(delta: i32) void {
 pub fn copyRemoteSessionKeyToClipboard() bool {
     const app = AppWindow.g_app orelse return false;
     const client = app.remote_client orelse return false;
-    if (!copyTextToClipboard(client.sessionKey())) return false;
+    const key = client.sessionKey();
+    if (!copyTextToClipboard(key)) return false;
     overlays.remoteKeyCopiedFlash();
+    overlays.remoteKeyOverlayDismiss(key);
     AppWindow.g_force_rebuild = true;
     AppWindow.g_cells_valid = false;
     std.debug.print("Remote session key copied to clipboard\n", .{});
