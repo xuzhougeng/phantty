@@ -56,7 +56,6 @@ type SurfaceView = {
   remoteRows: number | null;
 };
 
-type ControlState = "idle" | "pending" | "granted";
 const SESSION_KEY_STORAGE_KEY = "phantty.remote.sessionKey";
 
 const appRoot = document.querySelector<HTMLElement>("#app");
@@ -74,7 +73,6 @@ let selectedTabIndex = 0;
 let selectedSurfaceId: string | null = null;
 let surfaceViews = new Map<string, SurfaceView>();
 let notices: string[] = [];
-let controlState: ControlState = "idle";
 let hasSeenLayout = false;
 
 function api(path: string, init?: RequestInit): Promise<Response> {
@@ -167,9 +165,8 @@ function renderConsole(): void {
         <div class="terminal-toolbar">
           <span id="workspace-title">Remote workspace</span>
           <div class="terminal-actions">
-            <span class="control-state" id="control-state">Read-only</span>
-            <button type="button" class="control-button" id="request-control-button">Request control</button>
-            <span class="toolbar-hint">Read-only until local approval</span>
+            <span class="control-state" id="control-state" data-state="granted">Input enabled</span>
+            <span class="toolbar-hint">Click a panel, then type</span>
           </div>
         </div>
         <div id="remote-panels" class="panels-stage empty">
@@ -205,8 +202,7 @@ function renderConsole(): void {
     addNotice("Saved session key cleared.");
   });
 
-  document.querySelector<HTMLButtonElement>("#request-control-button")?.addEventListener("click", requestControl);
-  updateControlUi();
+  updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
 
@@ -217,26 +213,25 @@ function connect(sessionKey: string): void {
   layoutState = null;
   selectedSurfaceId = null;
   notices = [];
-  controlState = "idle";
   hasSeenLayout = false;
   saveSessionKey(sessionKey);
   renderRemoteWorkspace();
-  updateControlUi();
+  updateInputUi();
 
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   socket = new WebSocket(`${protocol}//${location.host}/ws/browser?session=${encodeURIComponent(sessionKey)}`);
   setStatus("connecting", "Connecting...");
-  updateControlUi();
+  updateInputUi();
 
   socket.addEventListener("open", () => {
     setStatus("online", "Connected");
     addNotice("Connected. Waiting for Phantty layout...");
-    updateControlUi();
+    updateInputUi();
   });
 
   socket.addEventListener("close", () => {
     setStatus("offline", "Disconnected");
-    applyControlState("idle");
+    updateInputUi();
   });
 
   socket.addEventListener("message", (event) => {
@@ -271,14 +266,6 @@ function connect(sessionKey: string): void {
       const surfaceId = typeof message.surfaceId === "string" ? message.surfaceId : selectedSurfaceId;
       const bytes = decodeHex(message.data);
       if (surfaceId && bytes) writeSurfaceBytes(surfaceId, bytes);
-    } else if (message.type === "control-requested") {
-      applyControlState("pending", "Waiting for local approval in Phantty...");
-    } else if (message.type === "control-granted") {
-      applyControlState("granted", "Remote input is enabled");
-    } else if (message.type === "control-revoked") {
-      applyControlState("idle", "Remote input returned to read-only");
-    } else if (message.type === "input-denied" && typeof message.message === "string") {
-      addNotice(message.message);
     } else if (message.type === "notice" && typeof message.message === "string") {
       addNotice(message.message);
     }
@@ -289,7 +276,7 @@ function renderRemoteWorkspace(): void {
   renderRemoteTabs();
   renderRemotePanels();
   renderNotices();
-  updateControlUi();
+  updateInputUi();
 }
 
 function renderRemoteTabs(): void {
@@ -415,7 +402,7 @@ function ensureSurfaceView(surfaceId: string): SurfaceView {
     cursorStyle: "bar",
     cursorWidth: 2,
     convertEol: true,
-    disableStdin: controlState !== "granted",
+    disableStdin: false,
     fontFamily: '"JetBrains Mono", "Cascadia Mono", monospace',
     fontSize: 13,
     scrollback: 0,
@@ -487,7 +474,6 @@ function writeLegacyOutput(data: string): void {
 
 function sendInputBytes(surfaceId: string, data: string): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  if (controlState !== "granted") return;
   socket.send(
     JSON.stringify({
       type: "input-bytes",
@@ -498,54 +484,28 @@ function sendInputBytes(surfaceId: string, data: string): void {
   );
 }
 
-function requestControl(): void {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
-    addNotice("Connect a Phantty session first.");
-    return;
-  }
-  if (controlState === "granted") return;
-
-  applyControlState("pending");
-  socket.send(JSON.stringify({ type: "request-control" }));
-  addNotice("Control request sent. Grant it in Phantty with Ctrl+Shift+Y.");
-}
-
-function applyControlState(next: ControlState, notice?: string): void {
-  const changed = controlState !== next;
-  controlState = next;
-  updateControlUi();
-  if (notice && changed) addNotice(notice);
-}
-
-function updateControlUi(): void {
+function updateInputUi(): void {
   const connected = socket?.readyState === WebSocket.OPEN;
-  const button = document.querySelector<HTMLButtonElement>("#request-control-button");
   const label = document.querySelector<HTMLSpanElement>("#control-state");
   const hint = document.querySelector<HTMLSpanElement>(".toolbar-hint");
 
-  if (button) {
-    button.disabled = !connected || controlState === "pending" || controlState === "granted";
-    button.textContent =
-      controlState === "granted" ? "Control enabled" : controlState === "pending" ? "Waiting local grant" : "Request control";
-  }
   if (label) {
-    label.dataset.state = controlState;
-    label.textContent =
-      controlState === "granted" ? "Input enabled" : controlState === "pending" ? "Pending approval" : "Read-only";
+    label.dataset.state = connected ? "granted" : "idle";
+    label.textContent = connected ? "Input enabled" : "Input ready";
   }
   if (hint) {
-    hint.textContent = controlState === "granted" ? "Click a panel, then type" : "Read-only until local approval";
+    hint.textContent = connected ? "Click a panel, then type" : "Connect a session to begin";
   }
 
   for (const [surfaceId, view] of surfaceViews) {
-    view.term.options.disableStdin = controlState !== "granted";
+    view.term.options.disableStdin = false;
     updateSurfaceCursor(view, surfaceId);
   }
 }
 
 function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {
   const selected = surfaceId === selectedSurfaceId;
-  view.term.options.cursorBlink = selected && controlState === "granted";
+  view.term.options.cursorBlink = selected;
   view.term.options.cursorInactiveStyle = selected ? "outline" : "none";
 }
 

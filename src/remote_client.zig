@@ -171,8 +171,6 @@ pub const Client = struct {
     last_layout: ?[]u8 = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.disconnected),
-    control_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    control_granted: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
 
     pub fn create(allocator: std.mem.Allocator, options: Options) !*Client {
@@ -232,26 +230,6 @@ pub const Client = struct {
 
     pub fn loadState(self: *const Client) State {
         return self.state.load(.acquire);
-    }
-
-    pub fn hasControlRequest(self: *const Client) bool {
-        return self.control_requested.load(.acquire);
-    }
-
-    pub fn controlGranted(self: *const Client) bool {
-        return self.control_granted.load(.acquire);
-    }
-
-    pub fn grantControl(self: *Client) void {
-        self.control_requested.store(false, .release);
-        self.control_granted.store(true, .release);
-        self.enqueueControlMessage("control-granted");
-    }
-
-    pub fn revokeControl(self: *Client) void {
-        self.control_requested.store(false, .release);
-        self.control_granted.store(false, .release);
-        self.enqueueControlMessage("control-revoked");
     }
 
     pub fn sendOutput(self: *Client, surface_id: []const u8, data: []const u8) void {
@@ -345,16 +323,6 @@ pub const Client = struct {
         self.enqueueOwnedMessageLocked(queued);
     }
 
-    fn replayControlState(self: *Client) void {
-        if (self.control_granted.load(.acquire)) {
-            self.enqueueControlMessage("control-granted");
-        } else if (self.control_requested.load(.acquire)) {
-            self.enqueueControlMessage("control-requested");
-        } else {
-            self.enqueueControlMessage("control-revoked");
-        }
-    }
-
     fn popMessage(self: *Client) ?[]u8 {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -376,7 +344,7 @@ pub const Client = struct {
     }
 
     fn dispatchInput(self: *Client, surface_id: []const u8, data: []const u8) void {
-        if (data.len == 0 or !self.control_granted.load(.acquire)) return;
+        if (data.len == 0) return;
 
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -387,27 +355,6 @@ pub const Client = struct {
                 return;
             }
         }
-    }
-
-    fn markControlRequested(self: *Client) void {
-        if (self.control_granted.load(.acquire)) {
-            self.enqueueControlMessage("control-granted");
-            return;
-        }
-
-        self.control_requested.store(true, .release);
-        self.enqueueControlMessage("control-requested");
-    }
-
-    fn markControlRevokedByRelay(self: *Client) void {
-        self.control_requested.store(false, .release);
-        self.control_granted.store(false, .release);
-    }
-
-    fn enqueueControlMessage(self: *Client, message_type: []const u8) void {
-        if (self.stop_requested.load(.acquire)) return;
-        const message = buildTypeMessage(self.allocator, message_type) catch return;
-        self.enqueueOwnedMessage(message);
     }
 };
 
@@ -431,7 +378,6 @@ fn threadMain(client: *Client) void {
         client.state.store(.connected, .release);
         std.debug.print("Remote client connected\n", .{});
         client.replayLastLayout();
-        client.replayControlState();
 
         while (!client.stop_requested.load(.acquire) and connection_alive.load(.acquire)) {
             const message = client.popMessage() orelse {
@@ -629,16 +575,6 @@ fn buildOutputMessage(allocator: std.mem.Allocator, surface_id: []const u8, data
 }
 
 fn handleIncomingMessage(client: *Client, message: []const u8) void {
-    if (std.mem.indexOf(u8, message, "\"type\":\"request-control\"") != null) {
-        client.markControlRequested();
-        return;
-    }
-
-    if (std.mem.indexOf(u8, message, "\"type\":\"control-revoked\"") != null) {
-        client.markControlRevokedByRelay();
-        return;
-    }
-
     if (std.mem.indexOf(u8, message, "\"type\":\"input-bytes\"") == null) return;
     const surface_id = extractJsonString(message, "surfaceId") orelse return;
     const hex_data = extractJsonString(message, "data") orelse return;
@@ -721,16 +657,6 @@ pub fn appendJsonString(out: *std.ArrayListUnmanaged(u8), allocator: std.mem.All
     }
 }
 
-fn buildTypeMessage(allocator: std.mem.Allocator, message_type: []const u8) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    try out.appendSlice(allocator, "{\"type\":\"");
-    try appendJsonString(&out, allocator, message_type);
-    try out.appendSlice(allocator, "\"}");
-    return out.toOwnedSlice(allocator);
-}
-
 test "buildEndpoint maps relay URL to Phantty websocket route" {
     const allocator = std.testing.allocator;
     const key = "0123456789abcdef0123456789abcdef";
@@ -761,12 +687,4 @@ test "decode input message bytes" {
     defer allocator.free(bytes);
 
     try std.testing.expectEqualSlices(u8, "\r\x1b[A", bytes);
-}
-
-test "buildTypeMessage emits a relay control event" {
-    const allocator = std.testing.allocator;
-    const message = try buildTypeMessage(allocator, "control-granted");
-    defer allocator.free(message);
-
-    try std.testing.expectEqualStrings("{\"type\":\"control-granted\"}", message);
 }

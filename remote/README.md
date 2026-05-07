@@ -8,10 +8,10 @@ This is the Cloudflare relay for Phantty remote access. It provides:
 - Signed login cookie.
 - Static `xterm.js` browser console.
 - Durable Object WebSocket relay.
-- Read-only default behavior with local approval before remote input.
+- Browser input forwarding after the session is paired.
 
 The browser mirrors Phantty tabs and split panels from layout snapshots, then
-routes approved input back to the selected surface.
+routes input back to the selected surface.
 
 ## Setup
 
@@ -95,15 +95,6 @@ Browser input is routed back to the selected surface:
 
 ```json
 { "type": "input-bytes", "surfaceId": "0000000000000001", "encoding": "hex", "data": "0d" }
-```
-
-Input stays read-only until the browser requests control and Phantty grants it:
-
-```json
-{ "type": "request-control" }
-{ "type": "control-requested" }
-{ "type": "control-granted" }
-{ "type": "control-revoked" }
 ```
 
 The browser also accepts the older mock format:

@@ -607,8 +607,8 @@ pub fn queueIo(self: *Surface, msg: termio.Message) void {
 }
 
 /// Queue bytes to the PTY input pipe through the IO writer thread.
-/// This mirrors Ghostty's write-message boundary and gives future remote
-/// control one central permission gate instead of direct pipe writes.
+/// This mirrors Ghostty's write-message boundary so local and remote input
+/// share the same PTY write path instead of writing directly to the pipe.
 pub fn queuePtyWrite(self: *Surface, data: []const u8) void {
     const msg = termio.Message.writeReq(self.allocator, data) catch return;
     self.queueIo(msg);

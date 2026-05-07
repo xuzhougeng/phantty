@@ -475,24 +475,6 @@ pub fn adjustFontSize(delta: i32) void {
     Config.setConfigValue(allocator, "font-size", value) catch {};
 }
 
-pub fn grantRemoteControl() bool {
-    const app = AppWindow.g_app orelse return false;
-    const client = app.remote_client orelse return false;
-    client.grantControl();
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
-    return true;
-}
-
-pub fn revokeRemoteControl() bool {
-    const app = AppWindow.g_app orelse return false;
-    const client = app.remote_client orelse return false;
-    client.revokeControl();
-    AppWindow.g_force_rebuild = true;
-    AppWindow.g_cells_valid = false;
-    return true;
-}
-
 pub fn copyRemoteSessionKeyToClipboard() bool {
     const app = AppWindow.g_app orelse return false;
     const client = app.remote_client orelse return false;
@@ -713,15 +695,6 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
     if (overlays.settingsPageVisible()) {
         overlays.settingsPageHandleKey(ev);
         return;
-    }
-    // Ctrl+Shift+Y / Ctrl+Shift+R = grant or revoke remote input control.
-    if (ev.ctrl and ev.shift and !ev.alt and ev.vk == 0x59) { // 'Y'
-        if (tab.g_tab_rename_active) tab.commitTabRename();
-        if (grantRemoteControl()) return;
-    }
-    if (ev.ctrl and ev.shift and !ev.alt and ev.vk == 0x52) { // 'R'
-        if (tab.g_tab_rename_active) tab.commitTabRename();
-        if (revokeRemoteControl()) return;
     }
     // File explorer key handling (when focused and in operation mode)
     if (file_explorer.g_focused and file_explorer.g_visible) {
