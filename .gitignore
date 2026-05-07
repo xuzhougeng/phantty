@@ -20,6 +20,10 @@ __pycache__/
 # Pi coding agent
 .pi/
 
+# Local agent / MCP tooling artifacts
+.codex
+.playwright-mcp/
+
 # Node/Cloudflare remote console artifacts
 node_modules/
 remote/dist/
