@@ -50,11 +50,21 @@ pub fn parseHttpUrl(url: []const u8) ?HttpUrl {
 
 pub fn isLoopbackHost(host: []const u8) bool {
     return std.ascii.eqlIgnoreCase(host, "localhost") or
-        std.mem.eql(u8, host, "127.0.0.1");
+        std.mem.eql(u8, host, "127.0.0.1") or
+        std.mem.eql(u8, host, "0.0.0.0");
 }
 
 pub fn localTunnelHost(host: []const u8) []const u8 {
     return if (std.ascii.eqlIgnoreCase(host, "localhost")) "localhost" else "127.0.0.1";
+}
+
+pub fn remoteTunnelHost(host: []const u8) []const u8 {
+    if (std.ascii.eqlIgnoreCase(host, "localhost")) return "localhost";
+    return "127.0.0.1";
+}
+
+pub fn isUnspecifiedHost(host: []const u8) bool {
+    return std.mem.eql(u8, host, "0.0.0.0");
 }
 
 pub fn buildLocalTunnelUrl(allocator: std.mem.Allocator, parsed: HttpUrl, local_port: u16) ?[]u8 {
@@ -95,6 +105,14 @@ test "non-loopback host remains direct" {
     try std.testing.expectEqualStrings("10.10.1.20", parsed.host);
     try std.testing.expectEqual(@as(u16, 8443), parsed.port);
     try std.testing.expect(!isLoopbackHost(parsed.host));
+}
+
+test "0.0.0.0 maps to loopback tunnel targets" {
+    const parsed = parseHttpUrl("http://0.0.0.0:1234") orelse unreachable;
+    try std.testing.expectEqualStrings("0.0.0.0", parsed.host);
+    try std.testing.expect(isLoopbackHost(parsed.host));
+    try std.testing.expectEqualStrings("127.0.0.1", localTunnelHost(parsed.host));
+    try std.testing.expectEqualStrings("127.0.0.1", remoteTunnelHost(parsed.host));
 }
 
 test "build local tunnel URL preserves suffix" {

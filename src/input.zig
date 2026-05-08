@@ -529,8 +529,14 @@ pub fn copyRemoteSessionKeyToClipboard() bool {
 /// Row 0 on screen corresponds to absolute row `viewportOffset()`.
 pub fn viewportOffset() usize {
     const surface = AppWindow.activeSurface() orelse return 0;
-    return surface.terminal.screens.active.pages.scrollbar().offset;
+    return viewportOffsetForSurface(surface);
 }
+
+pub const ScrollbarState = struct {
+    total: usize,
+    offset: usize,
+    len: usize,
+};
 
 /// Convert mouse position to terminal cell coordinates.
 pub fn mouseToCell(xpos: f64, ypos: f64) CellPos {
@@ -555,7 +561,26 @@ fn splitRectForSurface(surface: *Surface) ?split_layout.SplitRect {
 }
 
 pub fn viewportOffsetForSurface(surface: *Surface) usize {
-    return surface.terminal.screens.active.pages.scrollbar().offset;
+    return scrollbarForSurface(surface).offset;
+}
+
+pub fn scrollbarForSurface(surface: *Surface) ScrollbarState {
+    var pages = &surface.terminal.screens.active.pages;
+    const rows: usize = @intCast(pages.rows);
+    if (pages.total_rows <= rows) {
+        return .{
+            .total = rows,
+            .offset = 0,
+            .len = rows,
+        };
+    }
+
+    const sb = pages.scrollbar();
+    return .{
+        .total = sb.total,
+        .offset = sb.offset,
+        .len = sb.len,
+    };
 }
 
 /// Convert a window mouse position to a cell in the clicked split surface.
@@ -1568,7 +1593,9 @@ fn openUrlAtCell(surface: *Surface, cell_pos: CellPos) bool {
     const token = extractUrlRangeAtCell(allocator, surface, cell_pos) orelse return false;
     defer token.deinit(allocator);
     setUrlUnderline(surface, viewportOffsetForSurface(surface) + token.row, token.start_col, token.end_col);
-    return openUrl(surface, token.text);
+    const opened = openUrl(surface, token.text);
+    if (opened) clearUrlUnderline();
+    return opened;
 }
 
 fn updateUrlUnderlineAtMouse(xpos: f64, ypos: f64) void {
@@ -2630,7 +2657,7 @@ pub fn copySelectionToClipboard() void {
     // Lock while reading terminal cells
     surface.render_state.mutex.lock();
     const screen = surface.terminal.screens.active;
-    const vp_off = surface.terminal.screens.active.pages.scrollbar().offset;
+    const vp_off = viewportOffsetForSurface(surface);
     var row: usize = start_row;
     while (row <= end_row) : (row += 1) {
         // Convert absolute row to viewport-relative for getCell

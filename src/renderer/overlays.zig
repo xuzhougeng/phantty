@@ -1947,7 +1947,7 @@ pub const ScrollbarGeometry = struct {
 /// Compute scrollbar geometry for a specific surface.
 /// Returns null if there's no scrollback (nothing to scroll).
 pub fn scrollbarGeometryForSurface(surface: *Surface, view_height: f32, top_padding: f32) ?ScrollbarGeometry {
-    const sb = surface.terminal.screens.active.pages.scrollbar();
+    const sb = AppWindow.input.scrollbarForSurface(surface);
     if (sb.total <= sb.len) return null; // No scrollback, no scrollbar
 
     // Track spans the terminal content area (below top padding, all the way to bottom)
@@ -2074,7 +2074,7 @@ pub fn scrollbarThumbHitTest(ypos: f64, window_height: f32, top_padding: f32) bo
 /// Handle scrollbar drag: convert pixel y to scroll position.
 pub fn scrollbarDrag(ypos: f64, window_height: f32, top_padding: f32) void {
     const surface = AppWindow.activeSurface() orelse return;
-    const sb = surface.terminal.screens.active.pages.scrollbar();
+    const sb = AppWindow.input.scrollbarForSurface(surface);
     if (sb.total <= sb.len) return;
 
     const padding: f32 = 10;

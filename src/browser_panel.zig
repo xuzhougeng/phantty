@@ -157,11 +157,17 @@ pub fn openForSurface(allocator: std.mem.Allocator, parent: ?win32.HWND, url: []
     defer if (tunneled_url) |owned| allocator.free(owned);
 
     if (sshLoopbackUrl(surface, target)) |request| {
-        const local_port = ensureSshTunnel(allocator, &request.conn, request.parsed.port, browser_url.localTunnelHost(request.parsed.host), request.parsed.host) orelse return false;
+        const local_port = ensureSshTunnel(allocator, &request.conn, request.parsed.port, browser_url.localTunnelHost(request.parsed.host), browser_url.remoteTunnelHost(request.parsed.host)) orelse return false;
         tunneled_url = browser_url.buildLocalTunnelUrl(allocator, request.parsed, local_port) orelse return false;
         target = tunneled_url.?;
     } else {
         stopTunnel();
+        if (browser_url.parseHttpUrl(target)) |parsed| {
+            if (browser_url.isUnspecifiedHost(parsed.host)) {
+                tunneled_url = browser_url.buildLocalTunnelUrl(allocator, parsed, parsed.port) orelse return false;
+                target = tunneled_url.?;
+            }
+        }
     }
 
     open(parent, target);
