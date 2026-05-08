@@ -59,6 +59,86 @@ type SurfaceView = {
 
 const SESSION_KEY_STORAGE_KEY = "phantty.remote.sessionKey";
 const KBD_VISIBLE_STORAGE_KEY = "phantty.remote.kbdVisible";
+const THEME_STORAGE_KEY = "phantty.remote.theme";
+
+type ThemeMode = "dark" | "light";
+
+const THEME_TERMINAL_PALETTES: Record<ThemeMode, {
+  background: string;
+  foreground: string;
+  cursor: string;
+  selectionBackground: string;
+}> = {
+  dark: {
+    background: "#090f17",
+    foreground: "#dce7f3",
+    cursor: "#ffd479",
+    selectionBackground: "#334155",
+  },
+  light: {
+    background: "#fbf6ec",
+    foreground: "#1c2330",
+    cursor: "#b97a3d",
+    selectionBackground: "#d6cdb8",
+  },
+};
+
+let themeMode: ThemeMode = readSavedTheme();
+applyThemeAttribute(themeMode);
+
+function readSavedTheme(): ThemeMode {
+  try {
+    const raw = localStorage.getItem(THEME_STORAGE_KEY);
+    if (raw === "light" || raw === "dark") return raw;
+  } catch {
+    // localStorage may be unavailable.
+  }
+  return "dark";
+}
+
+function applyThemeAttribute(mode: ThemeMode): void {
+  if (mode === "light") {
+    document.documentElement.dataset.theme = "light";
+  } else {
+    delete document.documentElement.dataset.theme;
+  }
+}
+
+function setTheme(mode: ThemeMode): void {
+  themeMode = mode;
+  applyThemeAttribute(mode);
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, mode);
+  } catch {
+    // Storage may be unavailable.
+  }
+  const palette = THEME_TERMINAL_PALETTES[mode];
+  for (const view of surfaceViews.values()) {
+    view.term.options.theme = palette;
+  }
+  updateThemeToggleButtons();
+}
+
+function toggleTheme(): void {
+  setTheme(themeMode === "dark" ? "light" : "dark");
+}
+
+function updateThemeToggleButtons(): void {
+  const label = themeMode === "dark" ? "Switch to light theme" : "Switch to dark theme";
+  const icon = themeMode === "dark" ? iconSun() : iconMoon();
+  document.querySelectorAll<HTMLButtonElement>("[data-theme-toggle]").forEach((button) => {
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.innerHTML = icon;
+  });
+}
+
+function bindThemeToggleButtons(): void {
+  document.querySelectorAll<HTMLButtonElement>("[data-theme-toggle]").forEach((button) => {
+    button.addEventListener("click", toggleTheme);
+  });
+  updateThemeToggleButtons();
+}
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HEARTBEAT_WATCHDOG_MS = 50_000;
 const RECONNECT_MIN_DELAY_MS = 1_000;
@@ -112,6 +192,7 @@ async function loadMe(): Promise<MeResponse> {
 function renderLogin(message = ""): void {
   app.innerHTML = `
     <section class="shell auth-shell">
+      ${themeToggleMarkup("theme-toggle-floating")}
       <div class="brand">Phantty Remote</div>
       <form class="panel auth-panel" id="login-form">
         <h1>Sign in to your relay</h1>
@@ -147,6 +228,8 @@ function renderLogin(message = ""): void {
     }
     renderConsole();
   });
+
+  bindThemeToggleButtons();
 }
 
 function renderConsole(): void {
@@ -157,9 +240,12 @@ function renderConsole(): void {
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
           <div class="brand">Phantty Remote</div>
-          <button type="button" class="icon-button" id="drawer-close" aria-label="Close menu">
-            ${iconClose()}
-          </button>
+          <div class="sidebar-head-actions">
+            ${themeToggleMarkup()}
+            <button type="button" class="icon-button" id="drawer-close" aria-label="Close menu">
+              ${iconClose()}
+            </button>
+          </div>
         </div>
         <form id="connect-form" class="panel">
           <h1>Connect session</h1>
@@ -245,6 +331,7 @@ function renderConsole(): void {
 
   bindMobileChrome();
   bindVirtualKeyboard();
+  bindThemeToggleButtons();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
@@ -259,6 +346,18 @@ function iconClose(): string {
 
 function iconKeyboard(): string {
   return `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="2.4"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h12"/></svg>`;
+}
+
+function iconSun(): string {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`;
+}
+
+function iconMoon(): string {
+  return `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
+}
+
+function themeToggleMarkup(extraClass = ""): string {
+  return `<button type="button" class="icon-button theme-toggle${extraClass ? ` ${extraClass}` : ""}" data-theme-toggle aria-label="Toggle theme" title="Toggle theme"></button>`;
 }
 
 function renderVirtualKeyboardMarkup(): string {
@@ -775,12 +874,7 @@ function ensureSurfaceView(surfaceId: string): SurfaceView {
     fontFamily: '"JetBrains Mono", "Cascadia Mono", monospace',
     fontSize: 13,
     scrollback: 0,
-    theme: {
-      background: "#090f17",
-      foreground: "#dce7f3",
-      cursor: "#ffd479",
-      selectionBackground: "#334155",
-    },
+    theme: THEME_TERMINAL_PALETTES[themeMode],
   });
   term.loadAddon(fit);
 

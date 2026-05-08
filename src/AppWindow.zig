@@ -1031,7 +1031,20 @@ pub fn resetCursorBlink() void {
     g_last_blink_time = std.time.milliTimestamp();
 }
 
+// Cached cursor sampling state for the IME caret. TUIs (e.g. Claude Code)
+// emit cursor save/restore sequences many times per second to animate a
+// status line; the render-loop sampler would otherwise catch the cursor
+// mid-animation and re-anchor the IME popup / inline preedit on the wrong row.
+threadlocal var g_ime_caret_last_sample_x: i64 = -1;
+threadlocal var g_ime_caret_last_sample_y: i64 = -1;
+threadlocal var g_ime_caret_committed_x: i64 = -1;
+threadlocal var g_ime_caret_committed_y: i64 = -1;
+
 fn syncImeCaretPosition(win: *win32_backend.Window, split_count: usize) void {
+    // Freeze the caret during composition so the IMM popup, anchored when the
+    // composition started, doesn't drift onto another line as the cursor moves.
+    if (win.ime_composing) return;
+
     const surface = activeSurface() orelse return;
 
     var cursor_x: usize = 0;
@@ -1043,6 +1056,19 @@ fn syncImeCaretPosition(win: *win32_backend.Window, split_count: usize) void {
         cursor_x = screen.cursor.x;
         cursor_y = screen.cursor.y;
     }
+
+    // Require two consecutive frames at the same position before committing,
+    // so single-frame transients during status-line animations are skipped.
+    const sx: i64 = @intCast(cursor_x);
+    const sy: i64 = @intCast(cursor_y);
+    if (sx != g_ime_caret_last_sample_x or sy != g_ime_caret_last_sample_y) {
+        g_ime_caret_last_sample_x = sx;
+        g_ime_caret_last_sample_y = sy;
+        return;
+    }
+    if (sx == g_ime_caret_committed_x and sy == g_ime_caret_committed_y) return;
+    g_ime_caret_committed_x = sx;
+    g_ime_caret_committed_y = sy;
 
     const pad = surface.getPadding();
     const cell_w = font.cell_width;
