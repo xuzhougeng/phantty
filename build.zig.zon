@@ -1,6 +1,6 @@
 .{
     .name = .phantty,
-    .version = "0.13.0",
+    .version = "0.14.0",
     .fingerprint = 0xdb7ae949ae4818ac,
     .minimum_zig_version = "0.15.2",
 
