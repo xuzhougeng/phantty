@@ -133,7 +133,7 @@ Default chords are implemented in [`src/input.zig`](src/input.zig). Some keys ar
 | Right-click a selection | Copy selection |
 | **Ctrl+V** | Paste text |
 | **Ctrl+Shift+V** | Paste clipboard image |
-| **Alt** + arrow keys | Move focus to adjacent panel (spatial) |
+| **Ctrl+Shift** + arrow keys | Move focus to adjacent panel (spatial) |
 | **Ctrl+Shift+[** | Focus previous panel (cycle) |
 | **Ctrl+Shift+]** | Focus next panel (cycle) |
 | **Ctrl+Shift+Z** | Equalize split sizes |

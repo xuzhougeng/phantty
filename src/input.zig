@@ -18,6 +18,7 @@ const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
 const browser_panel = AppWindow.browser_panel;
 const scp = @import("scp.zig");
+const input_shortcuts = @import("input_shortcuts.zig");
 const win32_backend = @import("apprt/win32.zig");
 const Config = @import("config.zig");
 const Surface = @import("Surface.zig");
@@ -891,19 +892,10 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         return;
     }
     // Ctrl+Shift+T and Ctrl+Shift+N are handled above (before rename guard)
-    // Alt+Arrows = goto split (spatial navigation)
-    if (ev.alt and !ev.ctrl and !ev.shift) {
-        const dir: ?SplitTree.Spatial.Direction = switch (ev.vk) {
-            win32_backend.VK_LEFT => .left,
-            win32_backend.VK_RIGHT => .right,
-            win32_backend.VK_UP => .up,
-            win32_backend.VK_DOWN => .down,
-            else => null,
-        };
-        if (dir) |d| {
-            AppWindow.gotoSplit(.{ .spatial = d });
-            return;
-        }
+    // Ctrl+Shift+Arrows = goto split (spatial navigation)
+    if (input_shortcuts.spatialFocusDirection(ev)) |dir| {
+        AppWindow.gotoSplit(.{ .spatial = dir });
+        return;
     }
     // Ctrl+Shift+[ = goto previous split
     if (ev.ctrl and ev.shift and ev.vk == win32_backend.VK_OEM_4) { // '['

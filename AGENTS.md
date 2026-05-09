@@ -22,6 +22,8 @@ This is the gold standard, we want to be as close to their implementation as pos
 
 Use the github cli gh to browse https://github.com/ghostty-org/ghostty and always add descriptions on how ghostty does things. 
 
+Exception: work under `remote/` is Phantty's own web remote console and relay implementation. Ghostty does not have an equivalent feature, so `remote/` planning and implementation **does not need to compare against or reference Ghostty**. For `remote/`, follow the existing `remote/` architecture, browser platform constraints, and the user-approved design/plan for that feature.
+
 ## Build Commands
 
 ```powershell
@@ -146,39 +148,62 @@ Rules of thumb:
 ## Project Structure
 
 ```
-src/
-├── main.zig            # Entry point, GLFW window, OpenGL rendering, input handling, main loop
-├── config.zig          # Config loading (file + CLI), theme resolution, key=value parser
-├── config_watcher.zig  # Hot-reload via ReadDirectoryChangesW (watches config directory)
-├── pty.zig             # Windows ConPTY pseudo-terminal
-├── directwrite.zig     # DirectWrite FFI for Windows font discovery
-├── themes.zig          # Embedded theme data (453 Ghostty-compatible themes)
-├── renderer.zig        # Renderer module entry point / re-exports
-├── renderer/
-│   ├── Renderer.zig    # Per-surface renderer implementation
-│   ├── State.zig       # Shared renderer state
-│   ├── cell_renderer.zig
-│   ├── fbo.zig
-│   ├── gl_init.zig
-│   └── post_process.zig
-└── font/
-    ├── embedded.zig    # Embedded fallback font (Cozette bitmap font)
-    ├── sprite.zig      # Sprite font for box drawing, block elements, braille, powerline
-    └── sprite/
-        ├── canvas.zig          # 2D canvas for sprite rasterization
-        └── draw/
-            ├── common.zig      # Shared sprite drawing utilities
-            ├── box.zig         # Box drawing characters (U+2500–U+257F)
-            └── braille.zig     # Braille patterns (U+2800–U+28FF)
+src/                         # Windows desktop terminal application
+├── main.zig                 # Entry point, GLFW window, OpenGL setup, main loop
+├── App.zig                  # Application-level state, config reload, remote client lifecycle
+├── AppWindow.zig            # Window-level tabs, splits, rendering and input routing
+├── Surface.zig              # Per-terminal surface state and PTY integration
+├── input.zig                # Keyboard/mouse shortcuts and command dispatch
+├── config.zig               # Config loading (file + CLI), theme resolution, key=value parser
+├── config_watcher.zig       # Hot-reload via ReadDirectoryChangesW
+├── pty.zig                  # Windows ConPTY pseudo-terminal
+├── remote_client.zig        # Outbound Phantty Remote relay client
+├── file_explorer.zig        # Local/SSH file explorer state and operations
+├── browser_panel.zig        # Embedded browser panel and SSH tunnel handling
+├── directwrite.zig          # DirectWrite FFI for Windows font discovery
+├── themes.zig              # Embedded Ghostty-compatible themes
+├── appwindow/               # Tab and split-tree helpers for AppWindow
+├── apprt/                   # Win32/windowing support code
+├── font/                    # Font manager, atlas, embedded fallback, sprite glyphs
+├── renderer/                # OpenGL renderer, cell renderer, overlays, titlebar, panels
+└── termio/                  # PTY read/write threads and terminal IO mailbox
 
-debug/                  # Test scripts (run inside phantty terminal)
-pkg/                    # Vendored build dependencies (freetype, zlib, libpng, opengl)
-vendor/                 # Vendored source code
+remote/                      # Phantty-specific web remote console and relay
+├── src/client/              # Browser app: xterm surfaces, layout, virtual keyboard, styles
+│   ├── views/               # Login and remote console views
+│   └── styles/              # Base, console, responsive, token, and virtual keyboard CSS
+├── src/server/              # Node.js relay server for Docker/local hosting
+├── src/worker.ts            # Cloudflare Worker + Durable Object relay
+├── index.html               # Vite browser entry
+├── package.json             # Remote build/dev/typecheck scripts
+├── Dockerfile               # Container build for the Node relay
+├── docker-compose.yml       # Local/VPS Docker deployment helper
+├── nginx.conf.example       # Reverse proxy example for Docker deployment
+└── wrangler.toml.example    # Cloudflare deployment template
+
+docs/                        # Static website and generated/project documentation
+├── index.html
+├── zh.html
+├── style.css
+├── assets/
+└── superpowers/             # Approved design specs and implementation plans
+
+plans/                       # Project planning notes and historical implementation plans
+release-notes/               # Versioned release notes
+debug/                       # Test/debug scripts, including Windows UI automation
+packaging/windows/           # Windows installer and packaging scripts
+assets/                      # Application icon and source art
+shaders/                     # GLSL shader files
+tools/                       # Terminal helper scripts such as imgcat/pdfcat
+pkg/                         # Vendored build dependencies (freetype, zlib, libpng, opengl, etc.)
+vendor/                      # Vendored source code
 ```
 
 ## Ghostty Reference
 
-Phantty intentionally follows Ghostty's design and behavior. When implementing or modifying features, **cross-reference the Ghostty source** at https://github.com/ghostty-org/ghostty.
+Phantty intentionally follows Ghostty's design and behavior for terminal emulator functionality. When implementing or modifying features in the main Zig terminal app, **cross-reference the Ghostty source** at https://github.com/ghostty-org/ghostty.
+
+This Ghostty reference requirement does **not** apply to `remote/`. The `remote/` directory contains Phantty-specific web remote console and relay code; develop it from the existing remote codebase, web/mobile UX requirements, and local plans rather than trying to match Ghostty.
 
 Key mapping of Phantty files to Ghostty counterparts:
 

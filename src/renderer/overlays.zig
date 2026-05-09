@@ -122,7 +122,7 @@ const STARTUP_SHORTCUT_ENTRIES = [_]StartupShortcut{
     .{ .keys = "Ctrl+Shift+E", .action = "File explorer" },
     .{ .keys = "Ctrl-click .md/.txt", .action = "Preview file" },
     .{ .keys = "Ctrl+Shift+[ / ]", .action = "Previous / next panel" },
-    .{ .keys = "Alt+Arrows", .action = "Focus panel" },
+    .{ .keys = "Ctrl+Shift+Arrows", .action = "Focus panel" },
     .{ .keys = "Ctrl+Shift+Z", .action = "Equalize panels" },
     .{ .keys = "Ctrl+Shift+W", .action = "Close panel / tab" },
     .{ .keys = "Ctrl+Shift+C / Ctrl+V", .action = "Copy / paste text" },

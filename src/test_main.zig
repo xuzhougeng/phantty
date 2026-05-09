@@ -7,6 +7,7 @@ comptime {
     _ = @import("browser_url.zig");
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
+    _ = @import("input_shortcuts.zig");
     _ = @import("markdown_preview.zig");
     _ = @import("remote_client.zig");
 }
