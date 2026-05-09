@@ -53,13 +53,20 @@ code {
 kbd {
   font-family: var(--font-mono);
   font-size: 0.78em;
-  background: var(--bg-elev-2);
+  background: linear-gradient(180deg, #2d3340, #232838);
   border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 5px;
-  padding: 0.15em 0.5em;
+  border-bottom-color: #1a1f2c;
+  border-radius: 6px;
+  padding: 3px 8px;
   color: var(--fg);
   white-space: nowrap;
+  box-shadow:
+    0 1px 0 rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  min-width: 22px;
+  display: inline-block;
+  text-align: center;
+  line-height: 1.4;
 }
 
 .container {
@@ -469,23 +476,46 @@ pre.code-block code {
 /* Shortcuts */
 .shortcut-grid {
   display: grid;
-  gap: 10px 22px;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 8px 16px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .shortcut-grid > div {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
+  gap: 16px;
+  padding: 12px 16px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  gap: 12px;
+  border-radius: 9px;
+  transition: border-color 0.15s ease, background 0.15s ease;
 }
-.shortcut-grid > div span {
-  color: var(--fg-muted);
-  font-size: 0.92rem;
-  text-align: right;
+.shortcut-grid > div:hover {
+  border-color: rgba(93, 228, 199, 0.35);
+  background: var(--bg-elev-2);
+}
+.shortcut-grid .label {
+  color: var(--fg);
+  font-size: 0.93rem;
+  font-weight: 500;
+  min-width: 0;
+}
+.shortcut-grid .keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.shortcut-grid .keys .sep {
+  color: var(--fg-dim);
+  font-size: 0.78rem;
+  margin: 0 2px;
+  font-family: var(--font-mono);
+}
+
+@media (max-width: 720px) {
+  .shortcut-grid { grid-template-columns: 1fr; }
 }
 
 /* Credits */
@@ -526,5 +556,4 @@ pre.code-block code {
   .section { padding: 56px 0; }
   .tp-tab { padding: 8px 10px; font-size: 0.78rem; }
   .tp-body { padding: 16px 18px; font-size: 0.84rem; }
-  .shortcut-grid > div { font-size: 0.88rem; }
 }
