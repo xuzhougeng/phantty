@@ -958,10 +958,7 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         win32_backend.VK_BACK => "\x7f",
         win32_backend.VK_TAB => "\t",
         win32_backend.VK_ESCAPE => "\x1b",
-        win32_backend.VK_UP => "\x1b[A",
-        win32_backend.VK_DOWN => "\x1b[B",
-        win32_backend.VK_RIGHT => "\x1b[C",
-        win32_backend.VK_LEFT => "\x1b[D",
+        win32_backend.VK_UP, win32_backend.VK_DOWN, win32_backend.VK_RIGHT, win32_backend.VK_LEFT => input_shortcuts.terminalArrowSequence(ev),
         win32_backend.VK_HOME => "\x1b[H",
         win32_backend.VK_END => "\x1b[F",
         win32_backend.VK_PRIOR => blk: { // Page Up
