@@ -7,10 +7,11 @@ import {
   defaultCanvasPan,
   isCanvasDrag,
   panCanvasBy,
+  panCanvasByWheel,
   type CanvasPoint,
   type CanvasSize,
 } from "./mobile_canvas";
-import { isMobileRemoteShell, shouldUseViewportFit } from "./mobile_layout";
+import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from "./mobile_layout";
 import { focusMobileTextInput } from "./mobile_text_input";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
@@ -106,7 +107,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     remoteRows: null,
   };
   view.disposeMiddleClickGesture = bindTwoFingerMiddleClick(view);
-  view.disposeCanvasPan = bindMobileCanvasPan(view);
+  view.disposeCanvasPan = bindCanvasPan(view);
   state.surfaceViews.set(surfaceId, view);
   return view;
 }
@@ -321,7 +322,7 @@ function capPendingOutput(value: string): string {
   return value.length > PENDING_OUTPUT_LIMIT ? value.slice(value.length - PENDING_OUTPUT_LIMIT) : value;
 }
 
-function bindMobileCanvasPan(view: SurfaceView): () => void {
+function bindCanvasPan(view: SurfaceView): () => void {
   const mount = view.mount;
   let activePointerId: number | null = null;
   let startClient: CanvasPoint = { x: 0, y: 0 };
@@ -357,6 +358,27 @@ function bindMobileCanvasPan(view: SurfaceView): () => void {
     applyCanvasPan(view);
   };
 
+  const onWheel = (event: WheelEvent): void => {
+    const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
+    if (isMobileRemoteShell() || !shouldUseCanvasPan(hasRemoteGridDimensions)) return;
+    updateCanvasPan(view);
+    const viewport = canvasViewportSize(view);
+    const canvas = canvasContentSize(view);
+    if (canvas.width <= viewport.width && canvas.height <= viewport.height) return;
+
+    const nextPan = panCanvasByWheel(
+      view.canvasPan,
+      wheelDelta(event, viewport),
+      viewport,
+      canvas,
+    );
+    if (nextPan.x === view.canvasPan.x && nextPan.y === view.canvasPan.y) return;
+
+    event.preventDefault();
+    view.canvasPan = nextPan;
+    applyCanvasPan(view);
+  };
+
   const finishPointer = (event: PointerEvent): void => {
     if (activePointerId !== event.pointerId) return;
     activePointerId = null;
@@ -383,6 +405,7 @@ function bindMobileCanvasPan(view: SurfaceView): () => void {
   mount.addEventListener("pointerup", finishPointer);
   mount.addEventListener("pointercancel", finishPointer);
   mount.addEventListener("click", onClick, true);
+  mount.addEventListener("wheel", onWheel, { passive: false });
 
   return () => {
     mount.removeEventListener("pointerdown", onPointerDown);
@@ -390,6 +413,7 @@ function bindMobileCanvasPan(view: SurfaceView): () => void {
     mount.removeEventListener("pointerup", finishPointer);
     mount.removeEventListener("pointercancel", finishPointer);
     mount.removeEventListener("click", onClick, true);
+    mount.removeEventListener("wheel", onWheel);
   };
 }
 
@@ -399,7 +423,8 @@ function resetCanvasPan(view: SurfaceView): void {
 }
 
 function updateCanvasPan(view: SurfaceView): void {
-  if (!isMobileRemoteShell()) {
+  const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
+  if (!shouldUseCanvasPan(hasRemoteGridDimensions)) {
     view.needsDefaultCanvasPan = false;
     resetCanvasPan(view);
     return;
@@ -451,6 +476,16 @@ function canvasContentSize(view: SurfaceView): CanvasSize {
       screen?.scrollHeight ?? 0,
     ),
   };
+}
+
+function wheelDelta(event: WheelEvent, viewport: CanvasSize): CanvasPoint {
+  const scale =
+    event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 24
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+        ? viewport.height
+        : 1;
+  return { x: event.deltaX * scale, y: event.deltaY * scale };
 }
 
 function bindTwoFingerMiddleClick(view: SurfaceView): () => void {

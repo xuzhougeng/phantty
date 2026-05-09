@@ -7,6 +7,7 @@ import {
   defaultCanvasPan,
   isCanvasDrag,
   panCanvasBy,
+  panCanvasByWheel,
 } from "../../src/client/mobile_canvas";
 
 test("clampCanvasPan keeps an oversized canvas inside the viewport", () => {
@@ -41,6 +42,17 @@ test("panCanvasBy accumulates drag deltas and clamps to available canvas", () =>
   );
   assert.deepEqual(
     panCanvasBy({ x: -480, y: -350 }, { x: -80, y: -100 }, { width: 390, height: 500 }, { width: 900, height: 900 }),
+    { x: -510, y: -400 },
+  );
+});
+
+test("panCanvasByWheel maps wheel deltas to terminal canvas movement", () => {
+  assert.deepEqual(
+    panCanvasByWheel({ x: 0, y: 0 }, { x: 0, y: 180 }, { width: 390, height: 500 }, { width: 900, height: 900 }),
+    { x: 0, y: -180 },
+  );
+  assert.deepEqual(
+    panCanvasByWheel({ x: -480, y: -350 }, { x: 80, y: 100 }, { width: 390, height: 500 }, { width: 900, height: 900 }),
     { x: -510, y: -400 },
   );
 });

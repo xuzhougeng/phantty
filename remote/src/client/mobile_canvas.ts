@@ -39,6 +39,15 @@ export function panCanvasBy(
   );
 }
 
+export function panCanvasByWheel(
+  startPan: CanvasPoint,
+  delta: CanvasPoint,
+  viewport: CanvasSize,
+  canvas: CanvasSize,
+): CanvasPoint {
+  return panCanvasBy(startPan, { x: -delta.x, y: -delta.y }, viewport, canvas);
+}
+
 export function isCanvasDrag(delta: CanvasPoint): boolean {
   return Math.hypot(delta.x, delta.y) > CANVAS_PAN_TAP_THRESHOLD;
 }

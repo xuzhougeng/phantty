@@ -11,6 +11,13 @@ export function shouldUseViewportFit(hasRemoteGridDimensions: boolean): boolean 
   return fitModeForSurface(hasRemoteGridDimensions) === "viewport";
 }
 
+export function shouldUseCanvasPan(
+  hasRemoteGridDimensions: boolean,
+  win: Pick<Window, "matchMedia"> = window,
+): boolean {
+  return hasRemoteGridDimensions || isMobileRemoteShell(win);
+}
+
 export function isMobileRemoteShell(win: Pick<Window, "matchMedia"> = window): boolean {
   return win.matchMedia(MOBILE_REMOTE_MEDIA_QUERY).matches;
 }
