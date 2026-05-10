@@ -167,3 +167,47 @@ test "session_persist: round-trip nested split with SSH leaf" {
     try std.testing.expectEqualStrings("work", parsed.value.tabs[0].title_override.?);
     try std.testing.expectEqual(@as(u32, 1), parsed.value.tabs[0].focused_leaf);
 }
+
+test "session_persist: corrupt JSON returns error" {
+    const allocator = std.testing.allocator;
+    const bad_inputs = [_][]const u8{
+        "",
+        "{ broken",
+        "not json at all",
+        "{\"version\": \"not a number\"}",
+        "[1,2,3]",
+    };
+    for (bad_inputs) |bad| {
+        if (loadSessionFromString(allocator, bad)) |*ok| {
+            var pm = ok.*;
+            pm.deinit();
+            std.debug.print("expected error for input: {s}\n", .{bad});
+            return error.ExpectedFailure;
+        } else |_| {
+            // any error is acceptable
+        }
+    }
+}
+
+test "session_persist: parses JSON with extra unknown fields" {
+    const allocator = std.testing.allocator;
+    const future_json =
+        \\{
+        \\  "version": 1,
+        \\  "active_tab": 0,
+        \\  "future_thing": "hello",
+        \\  "tabs": [
+        \\    {
+        \\      "title_override": null,
+        \\      "focused_leaf": 0,
+        \\      "zoomed_leaf": null,
+        \\      "extra_per_tab": 42,
+        \\      "tree": { "leaf": { "surface": { "local_shell": { "cwd": null, "command": null } } } }
+        \\    }
+        \\  ]
+        \\}
+    ;
+    var parsed = try loadSessionFromString(allocator, future_json);
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.tabs.len);
+}
