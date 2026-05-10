@@ -529,3 +529,33 @@ test "session_persist: dumpSession writes atomically and loadSession reads back"
     };
     try std.testing.expect(!tmp_exists);
 }
+
+test "session_persist: corrupt file is renamed to .bak and loadSession returns null" {
+    const allocator = std.testing.allocator;
+    var tmpdir = std.testing.tmpDir(.{});
+    defer tmpdir.cleanup();
+
+    const realpath = try tmpdir.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(realpath);
+    const path = try std.fs.path.join(allocator, &.{ realpath, "sess.json" });
+    defer allocator.free(path);
+
+    {
+        const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        defer f.close();
+        try f.writeAll("{ totally broken");
+    }
+
+    const result = try loadSession(allocator, path);
+    try std.testing.expect(result == null);
+
+    const bak = try std.mem.concat(allocator, u8, &.{ path, ".bak" });
+    defer allocator.free(bak);
+    try std.fs.cwd().access(bak, .{}); // should exist; throws if missing
+
+    const orig_exists = blk: {
+        std.fs.cwd().access(path, .{}) catch break :blk false;
+        break :blk true;
+    };
+    try std.testing.expect(!orig_exists);
+}
