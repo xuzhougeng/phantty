@@ -211,3 +211,25 @@ test "session_persist: parses JSON with extra unknown fields" {
     defer parsed.deinit();
     try std.testing.expectEqual(@as(usize, 1), parsed.value.tabs.len);
 }
+
+test "session_persist: I1 — serialized SSH leaf contains no 'password' substring" {
+    const allocator = std.testing.allocator;
+
+    const leaf = NodeSnap{ .leaf = .{ .surface = .{ .ssh = .{
+        .cwd = "/etc",
+        .user = "admin",
+        .host = "vault.example.com",
+        .port = 22,
+    } } } };
+    const tabs = [_]TabSnap{.{ .focused_leaf = 0, .tree = leaf }};
+    const session: Session = .{ .active_tab = 0, .tabs = @constCast(&tabs) };
+
+    const json = try dumpSessionToString(allocator, session);
+    defer allocator.free(json);
+
+    if (std.mem.indexOf(u8, json, "password") != null) {
+        std.debug.print("\n[I1 violation] serialized JSON contained 'password':\n{s}\n", .{json});
+        return error.PasswordSerialized;
+    }
+    if (std.mem.indexOf(u8, json, "secret") != null) return error.SecretSerialized;
+}
