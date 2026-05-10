@@ -1,5 +1,5 @@
 import type { LayoutState, LayoutTab, SurfaceView } from "./types";
-import { readSavedKbdVisible } from "./storage";
+import { readSavedKbdVisible, readSavedSidebarCollapsed } from "./storage";
 
 type Listener = () => void;
 
@@ -19,6 +19,7 @@ export const state = {
   hasSeenLayout: false,
   kbdVisible: readSavedKbdVisible() ?? true,
   drawerOpen: false,
+  sidebarCollapsed: readSavedSidebarCollapsed() ?? false,
   activeSessionKey: null as string | null,
 };
 

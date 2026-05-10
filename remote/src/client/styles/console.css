@@ -16,6 +16,7 @@
 .sidebar {
   grid-column: 1;
   grid-row: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -27,6 +28,9 @@
   border-right: 1px solid var(--line);
   background: var(--surface-overlay-strong);
   backdrop-filter: blur(20px);
+  transition:
+    transform 180ms ease,
+    opacity 180ms ease;
 }
 
 .sidebar-head {
@@ -41,6 +45,10 @@
 }
 
 .sidebar-head .icon-button.theme-toggle {
+  display: grid;
+}
+
+.sidebar-head #drawer-close {
   display: grid;
 }
 
@@ -98,6 +106,24 @@
   color: var(--muted);
   font-size: 13px;
   font-weight: 800;
+}
+
+.terminal-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.terminal-title-group #workspace-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-sidebar-toggle {
+  display: none;
+  flex: 0 0 auto;
 }
 
 .toolbar-hint {
@@ -218,6 +244,22 @@
 
 .console-shell[data-drawer-open="true"] .sidebar-backdrop {
   display: block;
+}
+
+@media (min-width: 861px) {
+  .console-shell[data-sidebar-collapsed="true"] {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .console-shell[data-sidebar-collapsed="true"] .sidebar {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-100%);
+  }
+
+  .console-shell[data-sidebar-collapsed="true"] .desktop-sidebar-toggle {
+    display: grid;
+  }
 }
 
 /* ─── Panels stage (terminal surfaces) ───────────────────────── */

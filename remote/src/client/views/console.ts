@@ -2,7 +2,14 @@ import type { StatusKind } from "../types";
 import { iconClose, iconKeyboard, iconMenu, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { currentTab, state, pushNotice } from "../state";
-import { clearSessionKey, maskSessionKey, readSavedSessionKey, saveKbdVisible, saveSessionKey } from "../storage";
+import {
+  clearSessionKey,
+  maskSessionKey,
+  readSavedSessionKey,
+  saveKbdVisible,
+  saveSessionKey,
+  saveSidebarCollapsed,
+} from "../storage";
 import { escapeText, shortSurfaceId } from "../utils";
 import { api, connect, disconnect } from "../transport";
 import { webVersionLabel } from "../version";
@@ -13,7 +20,7 @@ import {
   renderRemotePanels,
   updateSurfaceCursors,
 } from "../surfaces";
-import { applyVisualViewportSizing } from "../mobile_layout";
+import { applyVisualViewportSizing, isMobileRemoteShell } from "../mobile_layout";
 import { bindMobileTextInput, renderMobileTextInputMarkup } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
 
@@ -26,14 +33,14 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const initialSessionInputValue = hasSavedSessionKey ? maskSessionKey(savedSessionKey) : savedSessionKey;
 
   app.innerHTML = `
-    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-drawer-open="${state.drawerOpen}">
+    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
           <div class="brand">Phantty Remote <span class="web-version">${webVersionLabel()}</span></div>
           <div class="sidebar-head-actions">
             ${themeToggleMarkup()}
-            <button type="button" class="icon-button" id="drawer-close" aria-label="Close menu">
+            <button type="button" class="icon-button" id="drawer-close" aria-label="Close menu" title="Close menu">
               ${iconClose()}
             </button>
           </div>
@@ -78,7 +85,12 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
         <div class="surface-strip" id="surface-strip"></div>
         <section class="terminal-panel">
           <div class="terminal-toolbar">
-            <span id="workspace-title">Remote workspace</span>
+            <div class="terminal-title-group">
+              <button type="button" class="icon-button desktop-sidebar-toggle" id="sidebar-expand" aria-label="Open sidebar" title="Open sidebar">
+                ${iconMenu()}
+              </button>
+              <span id="workspace-title">Remote workspace</span>
+            </div>
             <div class="terminal-actions">
               <span class="control-state" id="control-state" data-state="granted">Input enabled</span>
               <span class="toolbar-hint">Click a panel, then type</span>
@@ -254,10 +266,17 @@ function bindMobileChrome(): void {
     setDrawerOpen(true);
   });
   document.querySelector<HTMLButtonElement>("#drawer-close")?.addEventListener("click", () => {
-    setDrawerOpen(false);
+    if (isMobileRemoteShell()) {
+      setDrawerOpen(false);
+    } else {
+      setSidebarCollapsed(true);
+    }
   });
   document.querySelector<HTMLDivElement>("#sidebar-backdrop")?.addEventListener("click", () => {
     setDrawerOpen(false);
+  });
+  document.querySelector<HTMLButtonElement>("#sidebar-expand")?.addEventListener("click", () => {
+    setSidebarCollapsed(false);
   });
   document.querySelector<HTMLButtonElement>("#kbd-toggle")?.addEventListener("click", () => {
     setKbdVisible(!state.kbdVisible);
@@ -283,6 +302,14 @@ function setDrawerOpen(open: boolean): void {
   state.drawerOpen = open;
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.drawerOpen = String(open);
+}
+
+function setSidebarCollapsed(collapsed: boolean): void {
+  state.sidebarCollapsed = collapsed;
+  saveSidebarCollapsed(collapsed);
+  const shell = document.querySelector<HTMLElement>(".console-shell");
+  if (shell) shell.dataset.sidebarCollapsed = String(collapsed);
+  requestAnimationFrame(() => refitAllSurfaces());
 }
 
 function setKbdVisible(visible: boolean): void {
