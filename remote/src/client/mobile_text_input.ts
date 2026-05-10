@@ -110,6 +110,19 @@ export function focusMobileTextInput(): boolean {
   return document.activeElement === input;
 }
 
+export function toggleMobileTextInput(): boolean {
+  if (!isMobileRemoteShell()) return false;
+  const input = inputEl ?? document.querySelector<HTMLTextAreaElement>("#mobile-text-input");
+  if (!input) return false;
+  inputEl = input;
+  if (document.activeElement === input) {
+    input.blur();
+    return false;
+  }
+  input.focus({ preventScroll: true });
+  return document.activeElement === input;
+}
+
 function dispatchText(text: string): void {
   if (!shouldHandleMobileInput()) return;
   const surfaceId = activeSurfaceIdForInput();

@@ -28,10 +28,21 @@ test("clampCanvasPan keeps an oversized canvas inside the viewport", () => {
   );
 });
 
-test("clampCanvasPan disables panning when the canvas fits", () => {
+test("clampCanvasPan allows a shorter terminal canvas to anchor to the bottom", () => {
   assert.deepEqual(
-    clampCanvasPan({ x: -20, y: -20 }, { width: 900, height: 900 }, { width: 390, height: 500 }),
-    { x: 0, y: 0 },
+    clampCanvasPan({ x: -20, y: 120 }, { width: 900, height: 900 }, { width: 390, height: 500 }),
+    { x: 0, y: 120 },
+  );
+  assert.deepEqual(
+    clampCanvasPan({ x: -20, y: 900 }, { width: 900, height: 900 }, { width: 390, height: 500 }),
+    { x: 0, y: 400 },
+  );
+});
+
+test("defaultCanvasPan bottom-aligns a shorter terminal canvas", () => {
+  assert.deepEqual(
+    defaultCanvasPan({ width: 727, height: 1135 }, { width: 744, height: 855 }),
+    { x: 0, y: 280 },
   );
 });
 

@@ -6,6 +6,7 @@ import {
   focusMobileTextInput,
   renderMobileTextInputMarkup,
   setMobileTextInputSender,
+  toggleMobileTextInput,
 } from "../../src/client/mobile_text_input";
 import { state } from "../../src/client/state";
 
@@ -24,6 +25,7 @@ function preventableEvent(fields: Record<string, unknown>): Record<string, unkno
 class FakeTextArea {
   value = "";
   focusCalls = 0;
+  blurCalls = 0;
   private listeners = new Map<string, Listener[]>();
 
   addEventListener(type: string, listener: Listener): void {
@@ -37,6 +39,11 @@ class FakeTextArea {
   focus(): void {
     this.focusCalls += 1;
     fakeDocument.activeElement = this;
+  }
+
+  blur(): void {
+    this.blurCalls += 1;
+    if (fakeDocument.activeElement === this) fakeDocument.activeElement = null;
   }
 }
 
@@ -100,6 +107,18 @@ test("focusMobileTextInput focuses the hidden textarea on mobile", () => {
   assert.equal(focusMobileTextInput(), true);
   assert.equal(textarea.focusCalls, 1);
   assert.equal(fakeDocument.activeElement, textarea);
+});
+
+test("toggleMobileTextInput opens and closes the mobile IME target", () => {
+  const { textarea } = setup(true);
+
+  assert.equal(toggleMobileTextInput(), true);
+  assert.equal(textarea.focusCalls, 1);
+  assert.equal(fakeDocument.activeElement, textarea);
+
+  assert.equal(toggleMobileTextInput(), false);
+  assert.equal(textarea.blurCalls, 1);
+  assert.equal(fakeDocument.activeElement, null);
 });
 
 test("mobile text input dispatches committed composition text exactly once", () => {

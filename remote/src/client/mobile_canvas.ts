@@ -64,10 +64,12 @@ export function clampCanvasPan(
   options: CanvasPanOptions = {},
 ): CanvasPoint {
   const minX = Math.min(0, viewport.width - canvas.width);
-  const minY = bottomPanLimit(viewport, canvas, options);
+  const bottomY = bottomAlignedPanY(viewport, canvas, options);
+  const minY = Math.min(0, bottomY);
+  const maxY = Math.max(0, bottomY);
   return {
     x: clamp(pan.x, minX, 0),
-    y: clamp(pan.y, minY, 0),
+    y: clamp(pan.y, minY, maxY),
   };
 }
 
@@ -76,7 +78,7 @@ export function defaultCanvasPan(
   canvas: CanvasSize,
   options: CanvasPanOptions = {},
 ): CanvasPoint {
-  return clampCanvasPan({ x: 0, y: bottomPanLimit(viewport, canvas, options) }, viewport, canvas, options);
+  return clampCanvasPan({ x: 0, y: bottomAlignedPanY(viewport, canvas, options) }, viewport, canvas, options);
 }
 
 export function resizeCanvasPan(options: ResizeCanvasPanOptions): CanvasPoint {
@@ -198,13 +200,17 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 function bottomPanLimit(viewport: CanvasSize, canvas: CanvasSize, options: CanvasPanOptions): number {
+  return Math.min(0, bottomAlignedPanY(viewport, canvas, options));
+}
+
+function bottomAlignedPanY(viewport: CanvasSize, canvas: CanvasSize, options: CanvasPanOptions): number {
   const bottomGutter = Math.max(0, options.bottomGutter ?? 0);
-  return Math.min(0, viewport.height - canvas.height - bottomGutter);
+  return viewport.height - canvas.height - bottomGutter;
 }
 
 function shouldKeepBottomAnchored(options: ResizeCanvasPanOptions): boolean {
   if (!options.previousViewport) return true;
-  const previousBottom = bottomPanLimit(options.previousViewport, options.canvas, options);
+  const previousBottom = bottomAlignedPanY(options.previousViewport, options.canvas, options);
   const previousCanvasFit =
     options.canvas.height + Math.max(0, options.bottomGutter ?? 0) <= options.previousViewport.height;
   return previousCanvasFit || Math.abs(options.pan.y - previousBottom) <= BOTTOM_ANCHOR_EPSILON;

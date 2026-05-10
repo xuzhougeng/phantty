@@ -623,10 +623,7 @@ function canvasContentSize(view: SurfaceView): CanvasSize {
       screen?.offsetWidth ?? 0,
       screen?.scrollWidth ?? 0,
     ),
-    height: Math.max(
-      view.host.clientHeight,
-      terminalHeight,
-    ),
+    height: terminalHeight,
   };
 }
 

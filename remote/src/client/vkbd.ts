@@ -1,5 +1,5 @@
 import { applyStickyMods, ctrlLetter, keyToSequence } from "./input_sequences";
-import { focusMobileTextInput } from "./mobile_text_input";
+import { focusMobileTextInput, toggleMobileTextInput } from "./mobile_text_input";
 import { activeSurfaceIdForInput, state } from "./state";
 
 const kbdMods = { ctrl: false, alt: false };
@@ -22,33 +22,16 @@ export function renderVirtualKeyboardMarkup(): string {
         <div class="vkbd-row">
           ${key('data-vk-key="esc"', "Esc")}
           ${key('data-vk-key="tab"', "Tab")}
-          ${key('data-vk-mod="ctrl" data-active="false"', "Ctrl", "vkbd-mod")}
-          ${key('data-vk-mod="alt" data-active="false"', "Alt", "vkbd-mod")}
           ${key('data-vk-key="up"', "↑")}
           ${key('data-vk-key="left"', "←")}
           ${key('data-vk-key="down"', "↓")}
           ${key('data-vk-key="right"', "→")}
         </div>
         <div class="vkbd-row">
-          ${key('data-vk-text="|"', "|")}
-          ${key('data-vk-text="\\"', "\\")}
-          ${key('data-vk-text="/"', "/")}
-          ${key('data-vk-text="~"', "~")}
-          ${key('data-vk-text="\`"', "`")}
-          ${key('data-vk-text="-"', "-")}
-          ${key('data-vk-text="_"', "_")}
-          ${key('data-vk-text="="', "=")}
-          ${key('data-vk-text="*"', "*")}
-        </div>
-        <div class="vkbd-row">
           ${key('data-vk-ctrl="c"', "^C", "vkbd-pill")}
-          ${key('data-vk-ctrl="d"', "^D", "vkbd-pill")}
-          ${key('data-vk-ctrl="l"', "^L", "vkbd-pill")}
-          ${key('data-vk-ctrl="r"', "^R", "vkbd-pill")}
-          ${key('data-vk-ctrl="z"', "^Z", "vkbd-pill")}
           ${key('data-vk-key="bksp"', "⌫")}
           ${key('data-vk-key="enter"', "⏎")}
-          ${key('data-vk-key="type"', "Type", "vkbd-wide")}
+          ${key('data-vk-key="ime" data-active="false"', "IME", "vkbd-wide vkbd-mod")}
         </div>
       </div>
     </section>
@@ -113,6 +96,11 @@ function dispatchVirtualKey(button: HTMLButtonElement, onHide: () => void): void
 
   if (button.dataset.vkKey === "type") {
     if (!focusMobileTextInput()) state.surfaceViews.get(surfaceId)?.term.focus();
+    return;
+  }
+
+  if (button.dataset.vkKey === "ime") {
+    button.dataset.active = String(toggleMobileTextInput());
     return;
   }
 
