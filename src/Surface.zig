@@ -700,6 +700,16 @@ pub fn getInitialCwd(self: *const Surface) ?[]const u8 {
     return null;
 }
 
+pub const SurfaceKind = enum { local_shell, ssh };
+
+/// Classify the surface for session persistence. Currently distinguishes
+/// SSH from everything else; browser/markdown surfaces are not handled
+/// because they are out of scope for v1 of session restore.
+pub fn surfaceKind(self: *const Surface) SurfaceKind {
+    if (self.ssh_connection != null) return .ssh;
+    return .local_shell;
+}
+
 fn captureInitialCwd(self: *Surface, cwd: ?[*:0]const u16) void {
     if (cwd) |ptr| {
         var len: usize = 0;
