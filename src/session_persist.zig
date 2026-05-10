@@ -53,9 +53,58 @@ pub const Session = struct {
     tabs: []TabSnap,
 };
 
+pub fn dumpSessionToString(allocator: std.mem.Allocator, session: Session) ![]u8 {
+    return std.json.Stringify.valueAlloc(allocator, session, .{});
+}
+
+pub fn loadSessionFromString(
+    allocator: std.mem.Allocator,
+    bytes: []const u8,
+) !std.json.Parsed(Session) {
+    return std.json.parseFromSlice(Session, allocator, bytes, .{
+        .ignore_unknown_fields = true,
+    });
+}
+
 test "session_persist: empty Session compiles and has expected defaults" {
     const empty: Session = .{ .tabs = &.{} };
     try std.testing.expectEqual(@as(u32, 1), empty.version);
     try std.testing.expectEqual(@as(u32, 0), empty.active_tab);
     try std.testing.expectEqual(@as(usize, 0), empty.tabs.len);
+}
+
+test "session_persist: round-trip simple local-shell session via JSON" {
+    const allocator = std.testing.allocator;
+
+    const leaf_node = NodeSnap{ .leaf = .{ .surface = .{ .local_shell = .{
+        .cwd = "/home/user",
+        .command = null,
+    } } } };
+    const tabs = [_]TabSnap{.{
+        .title_override = null,
+        .focused_leaf = 0,
+        .zoomed_leaf = null,
+        .tree = leaf_node,
+    }};
+    const original: Session = .{ .active_tab = 0, .tabs = @constCast(&tabs) };
+
+    const json = try dumpSessionToString(allocator, original);
+    defer allocator.free(json);
+
+    var parsed = try loadSessionFromString(allocator, json);
+    defer parsed.deinit();
+
+    try std.testing.expectEqual(@as(u32, 1), parsed.value.version);
+    try std.testing.expectEqual(@as(u32, 0), parsed.value.active_tab);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.tabs.len);
+    const leaf = switch (parsed.value.tabs[0].tree) {
+        .leaf => |l| l,
+        .split => return error.UnexpectedSplit,
+    };
+    const sh = switch (leaf.surface) {
+        .local_shell => |s| s,
+        .ssh => return error.UnexpectedSsh,
+    };
+    try std.testing.expectEqualStrings("/home/user", sh.cwd.?);
+    try std.testing.expect(sh.command == null);
 }
