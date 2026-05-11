@@ -43,7 +43,7 @@ The full matrix of input → behavior. Rows in **bold** are new; everything else
 | Left-click | no | Unchanged: `start=end=clicked`, `active=false`, `g_selecting=true`, increment click count |
 | Left-drag | no | Unchanged: `end` follows mouse; `active=true` once movement exceeds threshold |
 | Double / triple / quad-click | no | Unchanged: select word / sentence / paragraph |
-| **Shift+left-click** | **yes** | **`end=clicked`, `start` unchanged (it's the last click position — the anchor), `active=true`, `g_selecting=true`, click count reset to 1, last-click position updated to current, `markSelectionChanged()`. The active selection is now `start..clicked`.** |
+| **Shift+left-click** | **yes** | **`end=clicked`, `start` unchanged (it's the last click position — the anchor), `active=true`, `g_selecting=true`, multi-click counter reset to 0 (so the next plain click starts a fresh click sequence), `markSelectionChanged()`. The active selection is now `start..clicked`.** |
 | **Shift+left-drag** | **yes** | **Automatic: Shift+click sets `g_selecting=true`, then existing `handleMouseMove` carries `end` to mouse position even after Shift is released mid-drag** |
 | Shift+double/triple-click | yes | Degrades to plain double/triple-click (select word/sentence at click point) |
 | Ctrl+Shift+click | yes | Treated as Shift+click; Ctrl ignored |
@@ -54,13 +54,9 @@ The full matrix of input → behavior. Rows in **bold** are new; everything else
 
 A fresh `Selection` initializes `start_col=0, start_row=0` (Zig zero-init for `u32` fields). If the user's first ever interaction is Shift+click — never having clicked — the resulting selection extends from cell (0, 0) to the click point. This produces a visually surprising selection but does not crash or corrupt state. The user can recover by clicking elsewhere (which resets `start`). YAGNI: not gating on "has any prior click happened" because it would require a new `Selection.anchor_set: bool` field, and no real user flow leads here in practice.
 
-### Why click count resets to 1 on Shift+click
+### Why multi-click counter resets to 0 on Shift+click
 
-If the count is left intact, a plain click in the same vicinity within 500 ms after Shift+click would be treated as the second click of a sequence and trigger word selection — destroying the just-extended range. Resetting to 1 means "this Shift+click is a fresh first click; the next plain click starts its own sequence."
-
-### Why we update last-click position to current
-
-So the same 500 ms / one-cell distance gate that drives click-count tracking is anchored on where the user actually clicked, not on a stale "Hello" position. Without this, a Shift+click far away followed by a plain click anywhere would not be misidentified as a double-click, but the gate state would be confusingly out of sync with the visible selection.
+If the count is left intact, a plain click in the same vicinity within 500 ms after Shift+click would be treated as the second click of a sequence and trigger word selection — destroying the just-extended range. Resetting to 0 means the next plain click computes both gates as false (because they require `count > 0`), resets cleanly, and behaves as a fresh first click of a new sequence.
 
 ### Reverse selection (anchor right of click)
 
@@ -75,19 +71,18 @@ Single insertion in `src/input.zig` `handleMouseButton`, before the existing lef
 // selection.start_*, since every prior click writes it) to this click.
 // See spec docs/superpowers/specs/2026-05-11-shift-extend-selection-design.md
 if (ev.shift) {
-    surface.selection.end_col = clicked_col;
-    surface.selection.end_row = clicked_row;
-    surface.selection.active = true;   // make the highlight visible
-    g_selecting = true;                // allow follow-up Shift+drag to keep extending
-    g_left_click_count = 1;            // don't let this count toward a double-click
-    g_last_left_click_ms = std.time.milliTimestamp();
-    g_last_left_click_xpos = xpos;
-    g_last_left_click_ypos = ypos;
+    clicked_surface.selection.end_col = cell_pos.col;
+    clicked_surface.selection.end_row = abs_row;
+    clicked_surface.selection.active = true;   // make the highlight visible
+    g_selecting = true;                        // allow follow-up Shift+drag to keep extending
+    g_left_click_count = 0;                    // forget any in-progress multi-click sequence
     markSelectionChanged();
     return;
 }
-// existing left-down path (nextLeftClickCount → switch on count → ...) follows
+// existing dispatch follows: switch (nextLeftClickCount(xpos, ypos)) { 1 => ..., 2 => ..., ... }
 ```
+
+Why `g_left_click_count = 0` (not `1`): `nextLeftClickCount` (`src/input.zig:1481-1498`) checks `g_left_click_count > 0` for both the time and distance gates. Setting to 0 makes both gates false on the next click, so the next plain click — even within 500 ms and within one cell — resets to 0 and increments to 1, behaving as a fresh first-click. This guarantees a plain click after Shift+click never accidentally triggers double-click word-selection.
 
 Field names of the click-tracking globals (`g_last_left_click_ms` / `_xpos` / `_ypos`) must be confirmed against the actual declarations near `src/input.zig:335-339`. If any name differs, use the actual one.
 
