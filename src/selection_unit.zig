@@ -94,6 +94,12 @@ pub fn rowIsBlank(row: []const u21) bool {
     return firstNonBlankCol(row) == null;
 }
 
+pub fn trimTrailingClipboardSpaces(row: []const u8) []const u8 {
+    var end = row.len;
+    while (end > 0 and row[end - 1] <= ' ') : (end -= 1) {}
+    return row[0..end];
+}
+
 pub fn isWordCodepoint(cp: u21) bool {
     if (cp >= '0' and cp <= '9') return true;
     if (cp >= 'A' and cp <= 'Z') return true;
@@ -139,6 +145,18 @@ test "selection unit: paragraph range selects contiguous nonblank rows" {
         .start_col = 2,
         .end_col = 10,
     }, paragraphRange(&rows, 2).?);
+}
+
+test "selection unit: clipboard row trim removes trailing terminal blanks only" {
+    try std.testing.expectEqualStrings(
+        "CC_AGENT_API_KEY=\"$(cat ~/.cc-agent-key)\" \\",
+        trimTrailingClipboardSpaces("CC_AGENT_API_KEY=\"$(cat ~/.cc-agent-key)\" \\     "),
+    );
+    try std.testing.expectEqualStrings(
+        "           -cwd ~/cc-agent/yard \\",
+        trimTrailingClipboardSpaces("           -cwd ~/cc-agent/yard \\     "),
+    );
+    try std.testing.expectEqualStrings("", trimTrailingClipboardSpaces("     \t  "));
 }
 
 fn toCodepoints(comptime text: []const u8) [text.len]u21 {

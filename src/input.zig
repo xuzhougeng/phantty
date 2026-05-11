@@ -2897,15 +2897,21 @@ pub fn copySelectionToClipboard() void {
     surface.render_state.mutex.lock();
     const screen = surface.terminal.screens.active;
     const vp_off = viewportOffsetForSurfaceLocked(surface);
+    const grid_cols = @max(@as(usize, 1), @as(usize, @intCast(surface.size.grid.cols)));
+    const grid_rows = @max(@as(usize, 1), @as(usize, @intCast(surface.size.grid.rows)));
     var row: usize = start_row;
     while (row <= end_row) : (row += 1) {
         // Convert absolute row to viewport-relative for getCell
         const vp_row = if (row >= vp_off) row - vp_off else continue;
-        if (vp_row >= AppWindow.term_rows) continue;
+        if (vp_row >= grid_rows) continue;
 
         const row_start_col = if (row == start_row) start_col else 0;
-        const row_end_col = if (row == end_row) end_col else AppWindow.term_cols - 1;
+        var row_end_col = if (row == end_row) end_col else grid_cols - 1;
+        if (row_start_col >= grid_cols) continue;
+        row_end_col = @min(row_end_col, grid_cols - 1);
+        if (row_start_col > row_end_col) continue;
 
+        const row_text_start = text.items.len;
         var col: usize = row_start_col;
         while (col <= row_end_col) : (col += 1) {
             const cell_data = screen.pages.getCell(.{ .viewport = .{
@@ -2938,6 +2944,7 @@ pub fn copySelectionToClipboard() void {
                 }
             }
         }
+        text.items.len = row_text_start + selection_unit.trimTrailingClipboardSpaces(text.items[row_text_start..]).len;
         if (row < end_row) {
             text.appendSlice(allocator, "\r\n") catch {};
         }
