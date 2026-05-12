@@ -1984,7 +1984,7 @@ fn sessionDesiredBoxWidth() f32 {
     desired = @max(desired, sessionTwoColumnWidth("PowerShell", "new terminal"));
     desired = @max(desired, sessionTwoColumnWidth("SSH", "connect server"));
     desired = @max(desired, sessionTwoColumnWidth("WSL", "wsl.exe ~"));
-    desired = @max(desired, sessionTwoColumnWidth("AI Chat", "DeepSeek"));
+    desired = @max(desired, sessionTwoColumnWidth("AI", defaultAiModeLabel()));
     return desired;
 }
 
@@ -2153,10 +2153,23 @@ fn renderSshProfileRow(layout: SessionLayout, window_height: f32, row: usize, pr
 
 fn renderAiProfileRow(layout: SessionLayout, window_height: f32, row: usize, profile: *const AiProfile, selected: bool) void {
     const name = aiProfileField(profile, .name);
-    const model = aiProfileField(profile, .model);
-    const base_url = aiProfileField(profile, .base_url);
-    const detail = if (model.len > 0) model else base_url;
+    const detail = aiProfileModeLabel(profile);
     renderSessionRow(layout, window_height, row, name, detail, selected);
+}
+
+fn aiModeText(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "true") or std.mem.eql(u8, value, "enabled")) return "Agent";
+    return "Chat";
+}
+
+fn aiProfileModeLabel(profile: *const AiProfile) []const u8 {
+    return aiModeText(aiProfileField(profile, .agent));
+}
+
+fn defaultAiModeLabel() []const u8 {
+    loadAiProfiles();
+    if (g_ai_profile_count > 0) return aiProfileModeLabel(&g_ai_profiles[0]);
+    return aiModeText(AppWindow.ai_chat.DEFAULT_AGENT);
 }
 
 pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: f32) void {
@@ -2236,7 +2249,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
         renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", g_session_launcher_selected == 0);
         renderSessionRow(layout, window_height, 1, "SSH", "connect server", g_session_launcher_selected == 1);
         renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", g_session_launcher_selected == 2);
-        renderSessionRow(layout, window_height, 3, "AI Chat", "DeepSeek", g_session_launcher_selected == 3);
+        renderSessionRow(layout, window_height, 3, "AI", defaultAiModeLabel(), g_session_launcher_selected == 3);
         return;
     }
 
