@@ -16,6 +16,7 @@ const file_explorer = AppWindow.file_explorer;
 const file_backend = @import("file_backend.zig");
 const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
+const preview_token = @import("preview_token.zig");
 const browser_panel = AppWindow.browser_panel;
 const scp = @import("scp.zig");
 const input_shortcuts = @import("input_shortcuts.zig");
@@ -1649,28 +1650,6 @@ fn selectParagraphAtCell(surface: *Surface, cell_pos: CellPos) bool {
     return true;
 }
 
-fn isPreviewTokenDelimiter(cp: u21) bool {
-    if (cp == 0 or cp <= 0x20) return true;
-    return switch (cp) {
-        '"', '\'', '`', '<', '>', '(', ')', '[', ']', '{', '}', '|', '\t', '\r', '\n' => true,
-        else => false,
-    };
-}
-
-fn isPreviewTokenTrimByte(ch: u8) bool {
-    return switch (ch) {
-        '.', ',', ';', ':', '!', '?', ')', ']', '}', '"' => true,
-        else => false,
-    };
-}
-
-fn trimPreviewToken(token: []const u8) []const u8 {
-    var start: usize = 0;
-    var end: usize = token.len;
-    while (start < end and (token[start] == '\'' or token[start] == '"' or token[start] == '`')) : (start += 1) {}
-    while (end > start and isPreviewTokenTrimByte(token[end - 1])) : (end -= 1) {}
-    return token[start..end];
-}
 
 fn utf8CodepointCount(text: []const u8) usize {
     const view = std.unicode.Utf8View.init(text) catch return text.len;
@@ -1680,13 +1659,6 @@ fn utf8CodepointCount(text: []const u8) usize {
     return count;
 }
 
-fn trimPreviewTokenSpan(token: []const u8) struct { start: usize, end: usize } {
-    var start: usize = 0;
-    var end: usize = token.len;
-    while (start < end and (token[start] == '\'' or token[start] == '"' or token[start] == '`')) : (start += 1) {}
-    while (end > start and isPreviewTokenTrimByte(token[end - 1])) : (end -= 1) {}
-    return .{ .start = start, .end = end };
-}
 
 fn endsWithIgnoreCase(text: []const u8, suffix: []const u8) bool {
     if (text.len < suffix.len) return false;
@@ -1722,19 +1694,19 @@ fn extractTokenRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();
 
-    if (isPreviewTokenDelimiter(viewportCellCodepoint(surface, click_col, cell_pos.row))) return null;
+    if (preview_token.isDelimiter(viewportCellCodepoint(surface, click_col, cell_pos.row))) return null;
 
     var start = click_col;
     while (start > 0) {
         const cp = viewportCellCodepoint(surface, start - 1, cell_pos.row);
-        if (isPreviewTokenDelimiter(cp)) break;
+        if (preview_token.isDelimiter(cp)) break;
         start -= 1;
     }
 
     var end = click_col + 1;
     while (end < cols) : (end += 1) {
         const cp = viewportCellCodepoint(surface, end, cell_pos.row);
-        if (isPreviewTokenDelimiter(cp)) break;
+        if (preview_token.isDelimiter(cp)) break;
     }
 
     var token: std.ArrayListUnmanaged(u8) = .empty;
@@ -1742,13 +1714,13 @@ fn extractTokenRangeAtCell(allocator: std.mem.Allocator, surface: *Surface, cell
     var col = start;
     while (col < end) : (col += 1) {
         const cp = viewportCellCodepoint(surface, col, cell_pos.row);
-        if (isPreviewTokenDelimiter(cp)) break;
+        if (preview_token.isDelimiter(cp)) break;
         var buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(cp, &buf) catch continue;
         token.appendSlice(allocator, buf[0..len]) catch return null;
     }
 
-    const span = trimPreviewTokenSpan(token.items);
+    const span = preview_token.trimSpan(token.items);
     if (span.start >= span.end) return null;
 
     const leading_cols = utf8CodepointCount(token.items[0..span.start]);
