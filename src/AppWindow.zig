@@ -83,6 +83,18 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
 
     tab.g_scrollback_limit = app.scrollback_limit;
     tab.g_remote_client = app.remote_client;
+    ai_chat.configureAgent(.{
+        .enabled = app.ai_agent_enabled,
+        .permission = app.ai_agent_permission,
+        .command_timeout_ms = app.ai_agent_command_timeout_ms,
+        .output_limit = app.ai_agent_output_limit,
+    });
+    ai_chat.setToolHost(.{
+        .ctx = @ptrCast(app),
+        .collectSnapshot = collectAgentToolSnapshot,
+        .surfaceSnapshot = agentSurfaceSnapshot,
+        .writeSurface = agentWriteSurface,
+    });
 
     // Copy shell command from App
     @memcpy(tab.g_shell_cmd_buf[0..app.shell_cmd_len], app.shell_cmd_buf[0..app.shell_cmd_len]);
@@ -393,9 +405,10 @@ pub fn spawnAiChatTab(
     thinking: []const u8,
     reasoning_effort: []const u8,
     stream_val: []const u8,
+    agent_val: []const u8,
 ) bool {
     const allocator = g_allocator orelse return false;
-    if (!tab.spawnAiChatTab(allocator, name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream_val)) return false;
+    if (!tab.spawnAiChatTab(allocator, name, base_url, api_key, model, system_prompt, thinking, reasoning_effort, stream_val, agent_val)) return false;
     clearUiStateOnTabChange();
     return true;
 }
@@ -765,6 +778,12 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     if (g_app) |app| {
         app.updateConfig(cfg);
     }
+    ai_chat.configureAgent(.{
+        .enabled = cfg.@"ai-agent-enabled",
+        .permission = cfg.@"ai-agent-permission",
+        .command_timeout_ms = cfg.@"ai-agent-command-timeout-ms",
+        .output_limit = cfg.@"ai-agent-output-limit",
+    });
 
     if (g_window == null) return;
     const ft_lib = font.g_ft_lib orelse return;
@@ -1005,6 +1024,52 @@ fn buildRemoteSurfaceSnapshot(allocator: std.mem.Allocator, surface: *Surface) !
     }
 
     return out.toOwnedSlice(allocator);
+}
+
+fn collectAgentToolSnapshot(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror!ai_chat.ToolSnapshot {
+    _ = ctx;
+    var surfaces: std.ArrayListUnmanaged(ai_chat.ToolSurface) = .empty;
+    errdefer {
+        for (surfaces.items) |surface| surface.deinit(allocator);
+        surfaces.deinit(allocator);
+    }
+
+    for (0..tab.g_tab_count) |tab_index| {
+        const tab_state = tab.g_tabs[tab_index] orelse continue;
+        if (tab_state.kind != .terminal) continue;
+        var it = tab_state.tree.iterator();
+        while (it.next()) |entry| {
+            const surface = entry.surface;
+            try surfaces.append(allocator, .{
+                .id = try allocator.dupe(u8, surface.remote_id[0..]),
+                .title = try allocator.dupe(u8, surface.getTitle()),
+                .cwd = try allocator.dupe(u8, surface.getCwd() orelse surface.getInitialCwd() orelse ""),
+                .snapshot = buildRemoteSurfaceSnapshot(allocator, surface) catch try allocator.dupe(u8, ""),
+                .tab_index = tab_index,
+                .focused = tab_index == tab.g_active_tab and entry.handle == tab_state.focused,
+                .is_ssh = surface.launch_kind == .ssh and surface.ssh_connection != null,
+                .ptr = @ptrCast(surface),
+            });
+        }
+    }
+
+    return .{
+        .surfaces = try surfaces.toOwnedSlice(allocator),
+        .active_tab = tab.g_active_tab,
+    };
+}
+
+fn agentSurfaceSnapshot(ctx: *anyopaque, allocator: std.mem.Allocator, surface_ptr: *anyopaque) anyerror![]u8 {
+    _ = ctx;
+    const surface: *Surface = @ptrCast(@alignCast(surface_ptr));
+    return buildRemoteSurfaceSnapshot(allocator, surface);
+}
+
+fn agentWriteSurface(ctx: *anyopaque, surface_ptr: *anyopaque, data: []const u8) bool {
+    _ = ctx;
+    const surface: *Surface = @ptrCast(@alignCast(surface_ptr));
+    surface.queuePtyWrite(data);
+    return true;
 }
 
 fn uiFontSize(term_font_size: u32) u32 {

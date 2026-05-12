@@ -14,15 +14,22 @@ pub const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
 pub const DEFAULT_THINKING = "enabled";
 pub const DEFAULT_REASONING_EFFORT = "high";
 pub const DEFAULT_STREAM = "false";
+pub const DEFAULT_AGENT = "false";
+
+const MAX_AGENT_ITERATIONS = 12;
+const DEFAULT_AGENT_TIMEOUT_MS: u32 = 60_000;
+const DEFAULT_AGENT_OUTPUT_LIMIT: u32 = 16 * 1024;
 
 pub const Role = enum {
     user,
     assistant,
+    tool,
 
     pub fn label(self: Role) []const u8 {
         return switch (self) {
             .user => "You",
             .assistant => "AI",
+            .tool => "Tool",
         };
     }
 
@@ -30,6 +37,7 @@ pub const Role = enum {
         return switch (self) {
             .user => "user",
             .assistant => "assistant",
+            .tool => "tool",
         };
     }
 };
@@ -43,6 +51,89 @@ pub const Message = struct {
 const RequestMessage = struct {
     role: Role,
     content: []u8,
+    tool_call_id: ?[]u8 = null,
+    tool_calls: ?[]ToolCall = null,
+
+    fn deinit(self: RequestMessage, allocator: std.mem.Allocator) void {
+        allocator.free(self.content);
+        if (self.tool_call_id) |id| allocator.free(id);
+        if (self.tool_calls) |calls| {
+            for (calls) |call| call.deinit(allocator);
+            allocator.free(calls);
+        }
+    }
+};
+
+const ToolCall = struct {
+    id: []u8,
+    name: []u8,
+    arguments: []u8,
+
+    fn deinit(self: ToolCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.name);
+        allocator.free(self.arguments);
+    }
+};
+
+pub const AgentPermission = enum {
+    confirm,
+    full,
+
+    pub fn parse(value: []const u8) ?AgentPermission {
+        if (std.mem.eql(u8, value, "confirm")) return .confirm;
+        if (std.mem.eql(u8, value, "full") or std.mem.eql(u8, value, "full-permission")) return .full;
+        return null;
+    }
+
+    pub fn name(self: AgentPermission) []const u8 {
+        return switch (self) {
+            .confirm => "confirm",
+            .full => "full",
+        };
+    }
+};
+
+pub const AgentSettings = struct {
+    enabled: bool = false,
+    permission: AgentPermission = .confirm,
+    command_timeout_ms: u32 = DEFAULT_AGENT_TIMEOUT_MS,
+    output_limit: u32 = DEFAULT_AGENT_OUTPUT_LIMIT,
+};
+
+pub const ToolSurface = struct {
+    id: []u8,
+    title: []u8,
+    cwd: []u8,
+    snapshot: []u8,
+    tab_index: usize,
+    focused: bool,
+    is_ssh: bool,
+    ptr: *anyopaque,
+
+    pub fn deinit(self: ToolSurface, allocator: std.mem.Allocator) void {
+        allocator.free(self.id);
+        allocator.free(self.title);
+        allocator.free(self.cwd);
+        allocator.free(self.snapshot);
+    }
+};
+
+pub const ToolSnapshot = struct {
+    surfaces: []ToolSurface,
+    active_tab: usize,
+
+    pub fn deinit(self: ToolSnapshot, allocator: std.mem.Allocator) void {
+        for (self.surfaces) |surface| surface.deinit(allocator);
+        allocator.free(self.surfaces);
+    }
+};
+
+pub const ToolHost = struct {
+    ctx: *anyopaque,
+    collectSnapshot: *const fn (*anyopaque, std.mem.Allocator) anyerror!ToolSnapshot,
+    surfaceSnapshot: *const fn (*anyopaque, std.mem.Allocator, *anyopaque) anyerror![]u8,
+    writeSurface: *const fn (*anyopaque, *anyopaque, []const u8) bool,
 };
 
 const ChatRequest = struct {
@@ -56,6 +147,9 @@ const ChatRequest = struct {
     thinking_enabled: bool,
     reasoning_effort: []u8,
     stream: bool,
+    agent_enabled: bool,
+    tool_host: ?ToolHost,
+    tool_snapshot: ?ToolSnapshot,
 
     fn deinit(self: *ChatRequest) void {
         self.allocator.free(self.base_url);
@@ -63,8 +157,9 @@ const ChatRequest = struct {
         self.allocator.free(self.model);
         self.allocator.free(self.system_prompt);
         self.allocator.free(self.reasoning_effort);
-        for (self.messages) |msg| self.allocator.free(msg.content);
+        for (self.messages) |msg| msg.deinit(self.allocator);
         self.allocator.free(self.messages);
+        if (self.tool_snapshot) |snapshot| snapshot.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };
@@ -72,12 +167,45 @@ const ChatRequest = struct {
 const ApiResult = struct {
     content: []u8,
     reasoning: ?[]u8 = null,
+    tool_calls: ?[]ToolCall = null,
 
     fn deinit(self: ApiResult, allocator: std.mem.Allocator) void {
         allocator.free(self.content);
         if (self.reasoning) |reasoning| allocator.free(reasoning);
+        if (self.tool_calls) |calls| {
+            for (calls) |call| call.deinit(allocator);
+            allocator.free(calls);
+        }
     }
 };
+
+var g_agent_mutex: std.Thread.Mutex = .{};
+var g_agent_settings: AgentSettings = .{};
+var g_tool_host: ?ToolHost = null;
+
+pub fn configureAgent(settings: AgentSettings) void {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    g_agent_settings = settings;
+}
+
+pub fn setToolHost(host: ?ToolHost) void {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    g_tool_host = host;
+}
+
+fn currentAgentSettings() AgentSettings {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    return g_agent_settings;
+}
+
+fn currentToolHost() ?ToolHost {
+    g_agent_mutex.lock();
+    defer g_agent_mutex.unlock();
+    return g_tool_host;
+}
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -101,6 +229,7 @@ pub const Session = struct {
     reasoning_effort_buf: [16]u8 = undefined,
     reasoning_effort_len: usize = 0,
     stream: bool = false,
+    agent_enabled: bool = false,
     request_inflight: bool = false,
     request_thread: ?std.Thread = null,
     closing: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -120,6 +249,7 @@ pub const Session = struct {
         thinking: []const u8,
         reasoning_effort: []const u8,
         stream_val: []const u8,
+        agent_val: []const u8,
     ) !*Session {
         const session = try allocator.create(Session);
         session.* = .{
@@ -132,6 +262,7 @@ pub const Session = struct {
         session.thinking_enabled = !std.mem.eql(u8, thinking, "disabled");
         session.copyReasoningEffort(if (reasoning_effort.len > 0) reasoning_effort else DEFAULT_REASONING_EFFORT);
         session.stream = std.mem.eql(u8, stream_val, "true");
+        session.agent_enabled = std.mem.eql(u8, agent_val, "true") or std.mem.eql(u8, agent_val, "enabled");
         session.copyApiKey(api_key);
         if (session.api_key_len == 0 and isDeepSeekBaseUrl(session.baseUrl())) {
             if (std.process.getEnvVarOwned(allocator, "DEEPSEEK_API_KEY")) |env_key| {
@@ -332,21 +463,36 @@ pub const Session = struct {
         const req = try self.allocator.create(ChatRequest);
         errdefer self.allocator.destroy(req);
 
-        const messages = try self.allocator.alloc(RequestMessage, self.messages.items.len);
+        var visible_count: usize = 0;
+        for (self.messages.items) |msg| {
+            if (msg.role != .tool) visible_count += 1;
+        }
+
+        const messages = try self.allocator.alloc(RequestMessage, visible_count);
         errdefer self.allocator.free(messages);
 
         var written: usize = 0;
         errdefer {
-            for (messages[0..written]) |msg| self.allocator.free(msg.content);
+            for (messages[0..written]) |msg| msg.deinit(self.allocator);
         }
 
-        for (self.messages.items, 0..) |msg, i| {
-            messages[i] = .{
+        for (self.messages.items) |msg| {
+            if (msg.role == .tool) continue;
+            messages[written] = .{
                 .role = msg.role,
                 .content = try self.allocator.dupe(u8, msg.content),
             };
             written += 1;
         }
+
+        const settings = currentAgentSettings();
+        const agent_enabled = self.agent_enabled or settings.enabled;
+        const tool_host = if (agent_enabled) currentToolHost() else null;
+        var tool_snapshot: ?ToolSnapshot = null;
+        if (tool_host) |host| {
+            tool_snapshot = host.collectSnapshot(host.ctx, self.allocator) catch null;
+        }
+        errdefer if (tool_snapshot) |snapshot| snapshot.deinit(self.allocator);
 
         req.* = .{
             .allocator = self.allocator,
@@ -358,7 +504,10 @@ pub const Session = struct {
             .messages = messages,
             .thinking_enabled = self.thinking_enabled,
             .reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort()),
-            .stream = self.stream,
+            .stream = self.stream and !agent_enabled,
+            .agent_enabled = agent_enabled,
+            .tool_host = tool_host,
+            .tool_snapshot = tool_snapshot,
         };
         return req;
     }
@@ -409,6 +558,16 @@ fn requestThreadMain(request: *ChatRequest) void {
     const allocator = request.allocator;
     defer request.deinit();
 
+    if (request.agent_enabled) {
+        const result = runAgentRequest(request) catch |err| blk: {
+            const text = std.fmt.allocPrint(allocator, "Agent request failed: {}", .{err}) catch return;
+            break :blk ApiResult{ .content = text };
+        };
+        defer result.deinit(allocator);
+        appendAssistantResult(request.session, result);
+        return;
+    }
+
     if (request.stream) {
         runChatRequestStreaming(request) catch |err| {
             const text = std.fmt.allocPrint(allocator, "AI stream failed: {}", .{err}) catch return;
@@ -425,6 +584,81 @@ fn requestThreadMain(request: *ChatRequest) void {
     defer result.deinit(allocator);
 
     appendAssistantResult(request.session, result);
+}
+
+fn runAgentRequest(request: *const ChatRequest) !ApiResult {
+    var transcript: std.ArrayListUnmanaged(RequestMessage) = .empty;
+    defer {
+        for (transcript.items) |msg| msg.deinit(request.allocator);
+        transcript.deinit(request.allocator);
+    }
+
+    for (request.messages) |msg| {
+        try transcript.append(request.allocator, try cloneRequestMessage(request.allocator, msg));
+    }
+
+    for (0..MAX_AGENT_ITERATIONS) |_| {
+        if (request.session.closing.load(.acquire)) return error.Closing;
+        const result = try runChatRequestForMessages(request, transcript.items, true);
+        if (result.tool_calls == null or result.tool_calls.?.len == 0) return result;
+
+        if (result.content.len > 0) {
+            appendProgressMessage(request.session, result.content) catch {};
+        }
+
+        try transcript.append(request.allocator, try assistantToolCallMessage(request.allocator, result.content, result.tool_calls.?));
+        for (result.tool_calls.?) |call| {
+            const progress = try std.fmt.allocPrint(request.allocator, "running {s} {s}", .{ call.name, call.arguments });
+            defer request.allocator.free(progress);
+            appendProgressMessage(request.session, progress) catch {};
+
+            const tool_result = try executeToolCall(request, call);
+            defer request.allocator.free(tool_result);
+            try transcript.append(request.allocator, .{
+                .role = .tool,
+                .content = try request.allocator.dupe(u8, tool_result),
+                .tool_call_id = try request.allocator.dupe(u8, call.id),
+            });
+        }
+        result.deinit(request.allocator);
+    }
+
+    return ApiResult{ .content = try request.allocator.dupe(u8, "Agent stopped after reaching the max tool-iteration limit.") };
+}
+
+fn cloneRequestMessage(allocator: std.mem.Allocator, msg: RequestMessage) !RequestMessage {
+    return .{
+        .role = msg.role,
+        .content = try allocator.dupe(u8, msg.content),
+        .tool_call_id = if (msg.tool_call_id) |id| try allocator.dupe(u8, id) else null,
+        .tool_calls = if (msg.tool_calls) |calls| try cloneToolCalls(allocator, calls) else null,
+    };
+}
+
+fn cloneToolCalls(allocator: std.mem.Allocator, calls: []const ToolCall) ![]ToolCall {
+    const out = try allocator.alloc(ToolCall, calls.len);
+    errdefer allocator.free(out);
+    var written: usize = 0;
+    errdefer {
+        for (out[0..written]) |call| call.deinit(allocator);
+    }
+    for (calls, 0..) |call, i| {
+        out[i] = .{
+            .id = try allocator.dupe(u8, call.id),
+            .name = try allocator.dupe(u8, call.name),
+            .arguments = try allocator.dupe(u8, call.arguments),
+        };
+        written += 1;
+    }
+    return out;
+}
+
+fn assistantToolCallMessage(allocator: std.mem.Allocator, content: []const u8, calls: []const ToolCall) !RequestMessage {
+    return .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, content),
+        .tool_calls = try cloneToolCalls(allocator, calls),
+    };
 }
 
 fn appendAssistantResult(session: *Session, result: ApiResult) void {
@@ -458,6 +692,24 @@ fn appendAssistantResult(session: *Session, result: ApiResult) void {
     session.request_inflight = false;
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Ready");
+}
+
+fn appendProgressMessage(session: *Session, text: []const u8) !void {
+    if (session.closing.load(.acquire)) return error.Closing;
+    const allocator = session.allocator;
+    const content = try allocator.dupe(u8, text);
+    errdefer allocator.free(content);
+
+    session.mutex.lock();
+    defer session.mutex.unlock();
+    if (session.closing.load(.acquire)) return error.Closing;
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = content,
+        .reasoning = null,
+    });
+    session.scroll_px = 1_000_000;
+    session.setStatusLocked("Running tools...");
 }
 
 fn beginAssistantStream(session: *Session) !usize {
@@ -539,11 +791,15 @@ fn failAssistantStream(session: *Session, message_idx: ?usize, text: []const u8)
 }
 
 fn runChatRequest(request: *const ChatRequest) !ApiResult {
+    return runChatRequestForMessages(request, request.messages, request.agent_enabled);
+}
+
+fn runChatRequestForMessages(request: *const ChatRequest, messages: []const RequestMessage, include_tools: bool) !ApiResult {
     const allocator = request.allocator;
     const endpoint = try chatEndpoint(allocator, request.base_url);
     defer allocator.free(endpoint);
 
-    const body = try buildRequestJson(allocator, request);
+    const body = try buildRequestJsonForMessages(allocator, request, messages, include_tools);
     defer allocator.free(body);
 
     const bearer = try std.fmt.allocPrint(allocator, "Bearer {s}", .{request.api_key});
@@ -662,6 +918,15 @@ fn chatEndpoint(allocator: std.mem.Allocator, base_url_raw: []const u8) ![]u8 {
 }
 
 fn buildRequestJson(allocator: std.mem.Allocator, request: *const ChatRequest) ![]u8 {
+    return buildRequestJsonForMessages(allocator, request, request.messages, request.agent_enabled);
+}
+
+fn buildRequestJsonForMessages(
+    allocator: std.mem.Allocator,
+    request: *const ChatRequest,
+    messages: []const RequestMessage,
+    include_tools: bool,
+) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 
@@ -672,14 +937,34 @@ fn buildRequestJson(allocator: std.mem.Allocator, request: *const ChatRequest) !
         try out.appendSlice(allocator, "{\"role\":\"system\",\"content\":");
         try appendJsonString(allocator, &out, request.system_prompt);
         try out.append(allocator, '}');
-        if (request.messages.len > 0) try out.append(allocator, ',');
+        if (messages.len > 0) try out.append(allocator, ',');
     }
-    for (request.messages, 0..) |msg, i| {
+    for (messages, 0..) |msg, i| {
         if (i > 0) try out.append(allocator, ',');
         try out.appendSlice(allocator, "{\"role\":");
         try appendJsonString(allocator, &out, msg.role.apiName());
         try out.appendSlice(allocator, ",\"content\":");
         try appendJsonString(allocator, &out, msg.content);
+        if (msg.role == .tool) {
+            if (msg.tool_call_id) |id| {
+                try out.appendSlice(allocator, ",\"tool_call_id\":");
+                try appendJsonString(allocator, &out, id);
+            }
+        }
+        if (msg.tool_calls) |calls| {
+            try out.appendSlice(allocator, ",\"tool_calls\":[");
+            for (calls, 0..) |call, call_i| {
+                if (call_i > 0) try out.append(allocator, ',');
+                try out.appendSlice(allocator, "{\"id\":");
+                try appendJsonString(allocator, &out, call.id);
+                try out.appendSlice(allocator, ",\"type\":\"function\",\"function\":{\"name\":");
+                try appendJsonString(allocator, &out, call.name);
+                try out.appendSlice(allocator, ",\"arguments\":");
+                try appendJsonString(allocator, &out, call.arguments);
+                try out.appendSlice(allocator, "}}");
+            }
+            try out.append(allocator, ']');
+        }
         try out.append(allocator, '}');
     }
     try out.appendSlice(allocator, "],\"thinking\":{\"type\":");
@@ -688,9 +973,261 @@ fn buildRequestJson(allocator: std.mem.Allocator, request: *const ChatRequest) !
     try appendJsonString(allocator, &out, if (request.reasoning_effort.len > 0) request.reasoning_effort else "high");
     try out.appendSlice(allocator, ",\"stream\":");
     try out.appendSlice(allocator, if (request.stream) "true" else "false");
+    if (include_tools) {
+        try appendToolSchemas(allocator, &out);
+    }
     try out.append(allocator, '}');
 
     return out.toOwnedSlice(allocator);
+}
+
+fn appendToolSchemas(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u8)) !void {
+    try out.appendSlice(allocator, ",\"tools\":[");
+    try out.appendSlice(allocator, toolSchema("terminal_list", "List Phantty terminal surfaces visible to the agent.", "{}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, toolSchema("terminal_snapshot", "Read a bounded text snapshot from one terminal surface or all surfaces.", "{\"surface_id\":{\"type\":\"string\",\"description\":\"Optional surface id from terminal_list.\"}}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, toolSchema("powershell_exec", "Run a local PowerShell command on Windows and return stdout, stderr, and exit status.", "{\"command\":{\"type\":\"string\"},\"cwd\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}"));
+    try out.append(allocator, ',');
+    try out.appendSlice(allocator, toolSchema("ssh_session_exec", "Type a command into an already-open SSH terminal surface and observe the resulting terminal snapshot.", "{\"surface_id\":{\"type\":\"string\"},\"command\":{\"type\":\"string\"},\"timeout_ms\":{\"type\":\"integer\"}}"));
+    try out.append(allocator, ']');
+}
+
+fn toolSchema(comptime name: []const u8, comptime description: []const u8, comptime properties: []const u8) []const u8 {
+    return "{\"type\":\"function\",\"function\":{\"name\":\"" ++ name ++ "\",\"description\":\"" ++ description ++ "\",\"parameters\":{\"type\":\"object\",\"properties\":" ++ properties ++ ",\"additionalProperties\":false}}}";
+}
+
+fn executeToolCall(request: *const ChatRequest, call: ToolCall) ![]u8 {
+    if (std.mem.eql(u8, call.name, "terminal_list")) {
+        return terminalListTool(request);
+    }
+    if (std.mem.eql(u8, call.name, "terminal_snapshot")) {
+        const args = parseArgs(request.allocator, call.arguments);
+        defer if (args) |parsed| parsed.deinit();
+        const surface_id = if (args) |parsed| jsonStringArg(parsed.value, "surface_id") else null;
+        return terminalSnapshotTool(request, surface_id);
+    }
+    if (std.mem.eql(u8, call.name, "powershell_exec")) {
+        const args = parseArgs(request.allocator, call.arguments) orelse return request.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const command = jsonStringArg(args.value, "command") orelse return request.allocator.dupe(u8, "Missing command");
+        const cwd = jsonStringArg(args.value, "cwd");
+        return powershellExecTool(request, command, cwd);
+    }
+    if (std.mem.eql(u8, call.name, "ssh_session_exec")) {
+        const args = parseArgs(request.allocator, call.arguments) orelse return request.allocator.dupe(u8, "Invalid tool arguments");
+        defer args.deinit();
+        const surface_id = jsonStringArg(args.value, "surface_id") orelse return request.allocator.dupe(u8, "Missing surface_id");
+        const command = jsonStringArg(args.value, "command") orelse return request.allocator.dupe(u8, "Missing command");
+        const timeout_ms = jsonIntArg(args.value, "timeout_ms") orelse currentAgentSettings().command_timeout_ms;
+        return sshSessionExecTool(request, surface_id, command, timeout_ms);
+    }
+    return std.fmt.allocPrint(request.allocator, "Unknown tool: {s}", .{call.name});
+}
+
+fn parseArgs(allocator: std.mem.Allocator, text: []const u8) ?std.json.Parsed(std.json.Value) {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    const body = if (trimmed.len == 0) "{}" else trimmed;
+    return std.json.parseFromSlice(std.json.Value, allocator, body, .{}) catch null;
+}
+
+fn jsonStringArg(root: std.json.Value, name: []const u8) ?[]const u8 {
+    if (root != .object) return null;
+    const value = root.object.get(name) orelse return null;
+    if (value != .string or value.string.len == 0) return null;
+    return value.string;
+}
+
+fn jsonIntArg(root: std.json.Value, name: []const u8) ?u32 {
+    if (root != .object) return null;
+    const value = root.object.get(name) orelse return null;
+    return switch (value) {
+        .integer => |v| if (v > 0 and v <= std.math.maxInt(u32)) @intCast(v) else null,
+        .float => |v| if (v > 0 and v <= @as(f64, @floatFromInt(std.math.maxInt(u32)))) @intFromFloat(v) else null,
+        else => null,
+    };
+}
+
+fn terminalListTool(request: *const ChatRequest) ![]u8 {
+    const snapshot = request.tool_snapshot orelse return request.allocator.dupe(u8, "No terminal snapshot host is available.");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(request.allocator);
+    try out.print(request.allocator, "active_tab={d}\n", .{snapshot.active_tab});
+    for (snapshot.surfaces) |surface| {
+        try out.print(request.allocator, "- id={s} tab={d} focused={} kind={s} title=\"{s}\" cwd=\"{s}\"\n", .{
+            surface.id,
+            surface.tab_index,
+            surface.focused,
+            if (surface.is_ssh) "ssh" else "terminal",
+            surface.title,
+            surface.cwd,
+        });
+    }
+    return truncateOwned(request.allocator, try out.toOwnedSlice(request.allocator));
+}
+
+fn terminalSnapshotTool(request: *const ChatRequest, surface_id: ?[]const u8) ![]u8 {
+    const snapshot = request.tool_snapshot orelse return request.allocator.dupe(u8, "No terminal snapshot host is available.");
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(request.allocator);
+
+    for (snapshot.surfaces) |surface| {
+        if (surface_id) |id| {
+            if (!std.mem.eql(u8, surface.id, id)) continue;
+        }
+        try out.print(request.allocator, "surface={s} title=\"{s}\" kind={s} focused={}\n", .{
+            surface.id,
+            surface.title,
+            if (surface.is_ssh) "ssh" else "terminal",
+            surface.focused,
+        });
+        try out.appendSlice(request.allocator, surface.snapshot);
+        try out.appendSlice(request.allocator, "\n---\n");
+    }
+    if (out.items.len == 0) try out.appendSlice(request.allocator, "No matching terminal surface.");
+    return truncateOwned(request.allocator, try out.toOwnedSlice(request.allocator));
+}
+
+fn powershellExecTool(request: *const ChatRequest, command: []const u8, cwd: ?[]const u8) ![]u8 {
+    const settings = currentAgentSettings();
+    if (settings.permission != .full) {
+        return deniedResult(request.allocator, command, "local PowerShell execution requires ai-agent-permission = full");
+    }
+    const warning = if (isDangerousCommand(command)) "warning: command matched a dangerous-command pattern; full-permission allowed it.\n" else "";
+    const result = runShellCommand(request.allocator, command, cwd, settings.output_limit) catch |err| {
+        return std.fmt.allocPrint(request.allocator, "{s}PowerShell failed: {}", .{ warning, err });
+    };
+    defer request.allocator.free(result.stdout);
+    defer request.allocator.free(result.stderr);
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(request.allocator);
+    try out.appendSlice(request.allocator, warning);
+    try out.print(request.allocator, "exit_code={d}\nstdout:\n{s}\nstderr:\n{s}", .{ result.exit_code, result.stdout, result.stderr });
+    return truncateOwned(request.allocator, try out.toOwnedSlice(request.allocator));
+}
+
+const ShellResult = struct {
+    exit_code: i32,
+    stdout: []u8,
+    stderr: []u8,
+};
+
+fn runShellCommand(allocator: std.mem.Allocator, command: []const u8, cwd: ?[]const u8, output_limit: u32) !ShellResult {
+    const pwsh_argv = [_][]const u8{ "pwsh.exe", "-NoProfile", "-Command", command };
+    if (runArgv(allocator, pwsh_argv[0..], cwd, output_limit)) |result| return result else |_| {}
+    const powershell_argv = [_][]const u8{ "powershell.exe", "-NoProfile", "-Command", command };
+    if (runArgv(allocator, powershell_argv[0..], cwd, output_limit)) |result| return result else |_| {}
+    const cmd_argv = [_][]const u8{ "cmd.exe", "/C", command };
+    return runArgv(allocator, cmd_argv[0..], cwd, output_limit);
+}
+
+fn runArgv(allocator: std.mem.Allocator, argv: []const []const u8, cwd: ?[]const u8, output_limit: u32) !ShellResult {
+    const result = try std.process.Child.run(.{
+        .allocator = allocator,
+        .argv = argv,
+        .cwd = cwd,
+        .max_output_bytes = output_limit,
+    });
+    const exit_code: i32 = switch (result.term) {
+        .Exited => |code| @intCast(code),
+        .Signal => |sig| -@as(i32, @intCast(sig)),
+        .Stopped => |sig| -@as(i32, @intCast(sig)),
+        .Unknown => |code| @intCast(code),
+    };
+    return .{ .exit_code = exit_code, .stdout = result.stdout, .stderr = result.stderr };
+}
+
+fn sshSessionExecTool(request: *const ChatRequest, surface_id: []const u8, command: []const u8, timeout_ms: u32) ![]u8 {
+    const settings = currentAgentSettings();
+    if (settings.permission != .full) {
+        return deniedResult(request.allocator, command, "SSH PTY injection requires ai-agent-permission = full");
+    }
+    const snapshot = request.tool_snapshot orelse return request.allocator.dupe(u8, "No terminal snapshot host is available.");
+    const host = request.tool_host orelse return request.allocator.dupe(u8, "No terminal tool host is available.");
+    const surface = findSurface(snapshot, surface_id) orelse return request.allocator.dupe(u8, "No matching terminal surface.");
+    if (!surface.is_ssh) return request.allocator.dupe(u8, "Target surface is not an opened SSH session.");
+
+    const nonce = std.time.milliTimestamp();
+    const wrapped = try std.fmt.allocPrint(
+        request.allocator,
+        "printf '\\n__PHANTTY_AGENT_START_{d}__\\n'; {{ {s}; }} 2>&1; __phantty_agent_status=$?; printf '\\n__PHANTTY_AGENT_END_{d}__:%s\\n' \"$__phantty_agent_status\"\r",
+        .{ nonce, command, nonce },
+    );
+    defer request.allocator.free(wrapped);
+
+    if (!host.writeSurface(host.ctx, surface.ptr, wrapped)) {
+        return request.allocator.dupe(u8, "Failed to write to SSH terminal surface.");
+    }
+
+    const start_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_START_{d}__", .{nonce});
+    defer request.allocator.free(start_marker);
+    const end_marker = try std.fmt.allocPrint(request.allocator, "__PHANTTY_AGENT_END_{d}__", .{nonce});
+    defer request.allocator.free(end_marker);
+
+    const deadline = std.time.milliTimestamp() + @as(i64, @intCast(@max(timeout_ms, 1000)));
+    var last: ?[]u8 = null;
+    defer if (last) |text| request.allocator.free(text);
+
+    while (std.time.milliTimestamp() < deadline) {
+        if (last) |old| request.allocator.free(old);
+        last = host.surfaceSnapshot(host.ctx, request.allocator, surface.ptr) catch null;
+        if (last) |text| {
+            if (std.mem.indexOf(u8, text, end_marker) != null) {
+                return extractSshCommandResult(request.allocator, text, start_marker, end_marker);
+            }
+        }
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+
+    if (last) |text| {
+        return std.fmt.allocPrint(request.allocator, "Timed out waiting for SSH command sentinel.\nLatest snapshot:\n{s}", .{text});
+    }
+    return request.allocator.dupe(u8, "Timed out waiting for SSH command sentinel.");
+}
+
+fn findSurface(snapshot: ToolSnapshot, surface_id: []const u8) ?ToolSurface {
+    for (snapshot.surfaces) |surface| {
+        if (std.mem.eql(u8, surface.id, surface_id)) return surface;
+    }
+    return null;
+}
+
+fn extractSshCommandResult(allocator: std.mem.Allocator, text: []const u8, start_marker: []const u8, end_marker: []const u8) ![]u8 {
+    const start = std.mem.indexOf(u8, text, start_marker) orelse return allocator.dupe(u8, text);
+    const body_start = start + start_marker.len;
+    const end = std.mem.indexOfPos(u8, text, body_start, end_marker) orelse return allocator.dupe(u8, text[body_start..]);
+    return allocator.dupe(u8, std.mem.trim(u8, text[body_start..end], " \t\r\n"));
+}
+
+fn deniedResult(allocator: std.mem.Allocator, command: []const u8, reason: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "DENIED by operator (reason: {s})\ncommand: {s}", .{ reason, command });
+}
+
+fn truncateOwned(allocator: std.mem.Allocator, text: []u8) ![]u8 {
+    const limit = currentAgentSettings().output_limit;
+    if (text.len <= limit) return text;
+    const truncated = try std.fmt.allocPrint(allocator, "{s}\n...[truncated to {d} bytes]", .{ text[0..limit], limit });
+    allocator.free(text);
+    return truncated;
+}
+
+fn isDangerousCommand(command: []const u8) bool {
+    const needles = [_][]const u8{
+        "rm -rf",
+        "Remove-Item -Recurse -Force",
+        "format ",
+        "mkfs",
+        "shutdown",
+        "Stop-Computer",
+        "Restart-Computer",
+        "git push --force",
+        ":(){",
+        "del /s",
+    };
+    for (needles) |needle| {
+        if (std.ascii.indexOfIgnoreCase(command, needle) != null) return true;
+    }
+    return false;
 }
 
 fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
@@ -731,11 +1268,52 @@ fn parseApiResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
         if (reasoning_value == .string and reasoning_value.string.len > 0) reasoning_value.string else null
     else
         null;
+    const tool_calls = try parseToolCalls(allocator, message_value);
 
     return .{
         .content = try allocator.dupe(u8, content),
         .reasoning = if (reasoning) |r| try allocator.dupe(u8, r) else null,
+        .tool_calls = tool_calls,
     };
+}
+
+fn parseToolCalls(allocator: std.mem.Allocator, message_value: std.json.Value) !?[]ToolCall {
+    const calls_value = message_value.object.get("tool_calls") orelse return null;
+    if (calls_value != .array or calls_value.array.items.len == 0) return null;
+
+    const calls = try allocator.alloc(ToolCall, calls_value.array.items.len);
+    errdefer allocator.free(calls);
+    var written: usize = 0;
+    errdefer {
+        for (calls[0..written]) |call| call.deinit(allocator);
+    }
+
+    for (calls_value.array.items) |item| {
+        if (item != .object) continue;
+        const call_obj = item.object;
+        const id_value = call_obj.get("id") orelse continue;
+        const function_value = call_obj.get("function") orelse continue;
+        if (id_value != .string or function_value != .object) continue;
+        const name_value = function_value.object.get("name") orelse continue;
+        const args_value = function_value.object.get("arguments") orelse continue;
+        if (name_value != .string) continue;
+        const args = switch (args_value) {
+            .string => args_value.string,
+            else => "",
+        };
+        calls[written] = .{
+            .id = try allocator.dupe(u8, id_value.string),
+            .name = try allocator.dupe(u8, name_value.string),
+            .arguments = try allocator.dupe(u8, args),
+        };
+        written += 1;
+    }
+
+    if (written == 0) {
+        allocator.free(calls);
+        return null;
+    }
+    return try allocator.realloc(calls, written);
 }
 
 fn parseApiStreamResponse(allocator: std.mem.Allocator, body: []const u8) !ApiResult {
@@ -902,11 +1480,62 @@ test "ai chat request json includes deepseek thinking mode" {
         .thinking_enabled = true,
         .reasoning_effort = @constCast("high"),
         .stream = false,
+        .agent_enabled = false,
+        .tool_host = null,
+        .tool_snapshot = null,
     };
     const json = try buildRequestJson(allocator, &request);
     defer allocator.free(json);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"thinking\":{\"type\":\"enabled\"}") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"reasoning_effort\":\"high\"") != null);
+}
+
+test "ai chat agent request json includes tool schemas" {
+    const allocator = std.testing.allocator;
+    var messages = [_]RequestMessage{.{
+        .role = .user,
+        .content = @constCast("List terminals"),
+    }};
+    const request = ChatRequest{
+        .allocator = allocator,
+        .session = undefined,
+        .base_url = @constCast("https://api.deepseek.com"),
+        .api_key = @constCast("key"),
+        .model = @constCast(DEFAULT_MODEL),
+        .system_prompt = @constCast(DEFAULT_SYSTEM_PROMPT),
+        .messages = messages[0..],
+        .thinking_enabled = true,
+        .reasoning_effort = @constCast("high"),
+        .stream = false,
+        .agent_enabled = true,
+        .tool_host = null,
+        .tool_snapshot = null,
+    };
+    const json = try buildRequestJson(allocator, &request);
+    defer allocator.free(json);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"tools\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"terminal_list\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "\"ssh_session_exec\"") != null);
+}
+
+test "ai chat parses OpenAI tool calls" {
+    const allocator = std.testing.allocator;
+    const body =
+        \\{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_1","type":"function","function":{"name":"terminal_list","arguments":"{}"}}]}}]}
+    ;
+    const result = try parseApiResponse(allocator, body);
+    defer result.deinit(allocator);
+    try std.testing.expect(result.tool_calls != null);
+    try std.testing.expectEqual(@as(usize, 1), result.tool_calls.?.len);
+    try std.testing.expectEqualStrings("call_1", result.tool_calls.?[0].id);
+    try std.testing.expectEqualStrings("terminal_list", result.tool_calls.?[0].name);
+    try std.testing.expectEqualStrings("{}", result.tool_calls.?[0].arguments);
+}
+
+test "ai chat detects dangerous shell commands" {
+    try std.testing.expect(isDangerousCommand("rm -rf /tmp/demo"));
+    try std.testing.expect(isDangerousCommand("git push --force origin main"));
+    try std.testing.expect(!isDangerousCommand("Get-ComputerInfo | Select-Object OsName"));
 }
 
 test "ai chat stream response aggregates content and reasoning chunks" {

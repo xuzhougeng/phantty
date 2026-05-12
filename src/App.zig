@@ -7,6 +7,7 @@
 const std = @import("std");
 const Config = @import("config.zig");
 const AppWindow = @import("AppWindow.zig");
+const ai_chat = @import("ai_chat.zig");
 const directwrite = @import("directwrite.zig");
 const win32_backend = @import("apprt/win32.zig");
 const remote = @import("remote_client.zig");
@@ -66,6 +67,12 @@ remote_server_url: ?[]const u8,
 remote_server_fingerprint: ?[]const u8,
 remote_device_name: ?[]const u8,
 remote_client: ?*remote.Client,
+
+// AI agent config
+ai_agent_enabled: bool,
+ai_agent_permission: ai_chat.AgentPermission,
+ai_agent_command_timeout_ms: u32,
+ai_agent_output_limit: u32,
 
 // Session persistence
 restore_tabs_on_startup: bool,
@@ -154,6 +161,10 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .remote_server_fingerprint = remote_server_fingerprint,
         .remote_device_name = remote_device_name,
         .remote_client = remote_client_ptr,
+        .ai_agent_enabled = cfg.@"ai-agent-enabled",
+        .ai_agent_permission = cfg.@"ai-agent-permission",
+        .ai_agent_command_timeout_ms = cfg.@"ai-agent-command-timeout-ms",
+        .ai_agent_output_limit = cfg.@"ai-agent-output-limit",
         .restore_tabs_on_startup = cfg.@"restore-tabs-on-startup",
         .windows = .empty,
         .mutex = .{},
@@ -279,6 +290,10 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.replaceOptStr(&self.remote_server_fingerprint, cfg.@"remote-server-fingerprint");
     self.replaceOptStr(&self.remote_device_name, cfg.@"remote-device-name");
     self.replaceOptStr(&self.title, cfg.title);
+    self.ai_agent_enabled = cfg.@"ai-agent-enabled";
+    self.ai_agent_permission = cfg.@"ai-agent-permission";
+    self.ai_agent_command_timeout_ms = cfg.@"ai-agent-command-timeout-ms";
+    self.ai_agent_output_limit = cfg.@"ai-agent-output-limit";
     self.restore_tabs_on_startup = cfg.@"restore-tabs-on-startup";
 }
 

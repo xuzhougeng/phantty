@@ -331,6 +331,7 @@ pub fn spawnAiChatTab(
     thinking: []const u8,
     reasoning_effort: []const u8,
     stream_val: []const u8,
+    agent_val: []const u8,
 ) bool {
     if (g_tab_count >= MAX_TABS) return false;
 
@@ -344,6 +345,7 @@ pub fn spawnAiChatTab(
         thinking,
         reasoning_effort,
         stream_val,
+        agent_val,
     ) catch {
         std.debug.print("Failed to create AI Chat session\n", .{});
         return false;

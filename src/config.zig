@@ -17,6 +17,7 @@
 const Config = @This();
 
 const std = @import("std");
+const ai_chat = @import("ai_chat.zig");
 const directwrite = @import("directwrite.zig");
 const themes = @import("themes.zig");
 
@@ -234,6 +235,18 @@ theme: ?[]const u8 = null,
 
 /// Scrollback buffer limit in bytes.
 @"scrollback-limit": u32 = 10_000_000,
+
+/// Enable agent tools for AI Chat profiles by default.
+@"ai-agent-enabled": bool = false,
+
+/// Agent command permission mode: confirm (deny until approved UI exists) or full.
+@"ai-agent-permission": ai_chat.AgentPermission = .confirm,
+
+/// Timeout budget for agent shell/SSH commands.
+@"ai-agent-command-timeout-ms": u32 = 60_000,
+
+/// Maximum bytes returned from a single tool result.
+@"ai-agent-output-limit": u32 = 16 * 1024,
 
 /// The shell to run in the terminal. Accepted values:
 ///   - "cmd" — run Command Prompt (cmd.exe, default)
@@ -560,6 +573,30 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
     } else if (std.mem.eql(u8, key, "scrollback-limit")) {
         self.@"scrollback-limit" = std.fmt.parseInt(u32, value, 10) catch {
             log.warn("invalid scrollback-limit: {s}", .{value});
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "ai-agent-enabled")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"ai-agent-enabled" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"ai-agent-enabled" = false;
+        } else {
+            log.warn("invalid ai-agent-enabled: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "ai-agent-permission")) {
+        if (ai_chat.AgentPermission.parse(value)) |permission| {
+            self.@"ai-agent-permission" = permission;
+        } else {
+            log.warn("invalid ai-agent-permission: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "ai-agent-command-timeout-ms")) {
+        self.@"ai-agent-command-timeout-ms" = std.fmt.parseInt(u32, value, 10) catch {
+            log.warn("invalid ai-agent-command-timeout-ms: {s}", .{value});
+            return;
+        };
+    } else if (std.mem.eql(u8, key, "ai-agent-output-limit")) {
+        self.@"ai-agent-output-limit" = std.fmt.parseInt(u32, value, 10) catch {
+            log.warn("invalid ai-agent-output-limit: {s}", .{value});
             return;
         };
     } else if (std.mem.eql(u8, key, "shell")) {
@@ -921,6 +958,10 @@ pub fn printHelp() void {
         \\  --window-height <rows>       Initial height in cells (default: 0=auto, min: 4)
         \\  --window-width <cols>        Initial width in cells (default: 0=auto, min: 10)
         \\  --scrollback-limit <bytes>   Scrollback buffer size (default: 10000000)
+        \\  --ai-agent-enabled <bool>    Enable AI Chat agent tools by default
+        \\  --ai-agent-permission <mode> Agent tool permission: confirm | full
+        \\  --ai-agent-command-timeout-ms <ms> Agent command timeout budget
+        \\  --ai-agent-output-limit <bytes> Max bytes returned by each tool
         \\  --config-file <path>         Load additional config file (prefix ? for optional)
         \\  --remote-enabled <bool>      Enable opt-in remote access foundation
         \\  --remote-server-url <url>    Cloudflare relay URL
@@ -1217,6 +1258,12 @@ const default_config_template =
     \\# Scrollback buffer size in bytes (default: 10MB)
     \\# scrollback-limit = 10000000
     \\
+    \\# AI Chat agent tools (disabled by default)
+    \\# ai-agent-enabled = false
+    \\# ai-agent-permission = confirm   # confirm | full
+    \\# ai-agent-command-timeout-ms = 60000
+    \\# ai-agent-output-limit = 16384
+    \\
     \\# Debug
     \\# phantty-debug-fps = false
     \\# phantty-debug-draw-calls = false
@@ -1282,4 +1329,22 @@ test "config: restore-tabs-on-startup parses true/false" {
     // Invalid value leaves the previous state untouched (still false).
     cfg.applyKeyValue(allocator, "restore-tabs-on-startup", "maybe", ".");
     try std.testing.expectEqual(false, cfg.@"restore-tabs-on-startup");
+}
+
+test "config: ai agent options parse" {
+    const allocator = std.testing.allocator;
+    var cfg: Config = .{};
+
+    try std.testing.expectEqual(false, cfg.@"ai-agent-enabled");
+    try std.testing.expectEqual(ai_chat.AgentPermission.confirm, cfg.@"ai-agent-permission");
+
+    cfg.applyKeyValue(allocator, "ai-agent-enabled", "true", ".");
+    cfg.applyKeyValue(allocator, "ai-agent-permission", "full", ".");
+    cfg.applyKeyValue(allocator, "ai-agent-command-timeout-ms", "120000", ".");
+    cfg.applyKeyValue(allocator, "ai-agent-output-limit", "4096", ".");
+
+    try std.testing.expectEqual(true, cfg.@"ai-agent-enabled");
+    try std.testing.expectEqual(ai_chat.AgentPermission.full, cfg.@"ai-agent-permission");
+    try std.testing.expectEqual(@as(u32, 120000), cfg.@"ai-agent-command-timeout-ms");
+    try std.testing.expectEqual(@as(u32, 4096), cfg.@"ai-agent-output-limit");
 }
