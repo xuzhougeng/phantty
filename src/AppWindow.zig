@@ -16,6 +16,7 @@ const win32_backend = @import("apprt/win32.zig");
 const App = @import("App.zig");
 const Renderer = @import("renderer/Renderer.zig");
 const remote = @import("remote_client.zig");
+const memory_debug = @import("memory_debug.zig");
 pub const ai_chat = @import("ai_chat.zig");
 pub const tab = @import("appwindow/tab.zig");
 pub const font = @import("font/manager.zig");
@@ -72,6 +73,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     g_cursor_blink = app.cursor_blink;
     overlays.g_debug_fps = app.debug_fps;
     overlays.g_debug_draw_calls = app.debug_draw_calls;
+    g_debug_memory = app.debug_memory;
 
     // Split config
     overlays.g_unfocused_split_opacity = app.unfocused_split_opacity;
@@ -188,6 +190,8 @@ threadlocal var g_requested_weight: directwrite.DWRITE_FONT_WEIGHT = .NORMAL;
 threadlocal var g_shader_path: ?[]const u8 = null;
 threadlocal var g_start_maximize: bool = false;
 threadlocal var g_start_fullscreen: bool = false;
+threadlocal var g_debug_memory: bool = false;
+threadlocal var g_debug_memory_last_ms: i64 = 0;
 threadlocal var g_remote_layout_last_ms: i64 = 0;
 
 // Global theme (set at startup via config)
@@ -816,6 +820,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     g_cursor_blink = cfg.@"cursor-style-blink";
     overlays.g_debug_fps = cfg.@"phantty-debug-fps";
     overlays.g_debug_draw_calls = cfg.@"phantty-debug-draw-calls";
+    g_debug_memory = cfg.@"phantty-debug-memory";
 
     // --- Split config ---
     overlays.g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
@@ -881,6 +886,215 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     }
 
     std.debug.print("Config reloaded successfully\n", .{});
+}
+
+const MemoryDebugTotals = struct {
+    tabs: usize = 0,
+    ai_tabs: usize = 0,
+    visible_surfaces: usize = 0,
+    surfaces: usize = 0,
+    terminal_page_bytes: usize = 0,
+    terminal_page_limit_bytes: usize = 0,
+    terminal_min_page_bytes: usize = 0,
+    renderer_cpu_capacity_bytes: usize = 0,
+    kitty_pending_cpu_bytes: usize = 0,
+    kitty_texture_pixel_bytes: usize = 0,
+    fbo_pixel_bytes: usize = 0,
+};
+
+const SurfaceMemoryDebug = struct {
+    cols: usize = 0,
+    rows: usize = 0,
+    screen_count: usize = 0,
+    terminal_page_bytes: usize = 0,
+    terminal_page_limit_bytes: usize = 0,
+    terminal_min_page_bytes: usize = 0,
+    renderer_cpu_capacity_bytes: usize = 0,
+    bg_cell_count: usize = 0,
+    fg_cell_count: usize = 0,
+    color_fg_cell_count: usize = 0,
+    kitty_textures: usize = 0,
+    kitty_pending_uploads: usize = 0,
+    kitty_pending_cpu_bytes: usize = 0,
+    kitty_texture_pixel_bytes: usize = 0,
+    fbo_width: u32 = 0,
+    fbo_height: u32 = 0,
+    fbo_pixel_bytes: usize = 0,
+};
+
+fn collectSurfaceMemoryDebug(surface: *Surface) SurfaceMemoryDebug {
+    var stats: SurfaceMemoryDebug = .{};
+
+    surface.render_state.mutex.lock();
+    defer surface.render_state.mutex.unlock();
+
+    stats.cols = surface.terminal.cols;
+    stats.rows = surface.terminal.rows;
+
+    var screen_it = surface.terminal.screens.all.iterator();
+    while (screen_it.next()) |entry| {
+        const screen = entry.value.*;
+        stats.screen_count += 1;
+        stats.terminal_page_bytes += screen.pages.page_size;
+        stats.terminal_page_limit_bytes += screen.pages.explicit_max_size;
+        stats.terminal_min_page_bytes += screen.pages.min_max_size;
+    }
+
+    const rend = &surface.surface_renderer;
+    stats.renderer_cpu_capacity_bytes = rend.cpuBufferCapacityBytes();
+    stats.bg_cell_count = rend.bg_cell_count;
+    stats.fg_cell_count = rend.fg_cell_count;
+    stats.color_fg_cell_count = rend.color_fg_cell_count;
+    stats.kitty_textures = rend.kitty_textures.items.len;
+    stats.kitty_pending_uploads = rend.kitty_pending_uploads.items.len;
+    stats.kitty_pending_cpu_bytes = rend.kittyPendingCpuBytes();
+    stats.kitty_texture_pixel_bytes = rend.kittyTexturePixelBytes();
+    stats.fbo_width = rend.fbo_width;
+    stats.fbo_height = rend.fbo_height;
+    stats.fbo_pixel_bytes = rend.fboPixelBytes();
+
+    return stats;
+}
+
+fn maybePrintMemoryDebug(now: i64) void {
+    if (!g_debug_memory) return;
+    if (now - g_debug_memory_last_ms < 5000) return;
+    g_debug_memory_last_ms = now;
+
+    var totals: MemoryDebugTotals = .{};
+
+    for (0..tab.g_tab_count) |tab_index| {
+        const tab_state = tab.g_tabs[tab_index] orelse continue;
+        totals.tabs += 1;
+
+        if (tab_state.kind == .ai_chat) {
+            totals.ai_tabs += 1;
+            continue;
+        }
+
+        var it = tab_state.tree.iterator();
+        while (it.next()) |entry| {
+            const visible = tab_index == tab.g_active_tab;
+            const stats = collectSurfaceMemoryDebug(entry.surface);
+
+            totals.surfaces += 1;
+            if (visible) totals.visible_surfaces += 1;
+            totals.terminal_page_bytes += stats.terminal_page_bytes;
+            totals.terminal_page_limit_bytes += stats.terminal_page_limit_bytes;
+            totals.terminal_min_page_bytes += stats.terminal_min_page_bytes;
+            totals.renderer_cpu_capacity_bytes += stats.renderer_cpu_capacity_bytes;
+            totals.kitty_pending_cpu_bytes += stats.kitty_pending_cpu_bytes;
+            totals.kitty_texture_pixel_bytes += stats.kitty_texture_pixel_bytes;
+            totals.fbo_pixel_bytes += stats.fbo_pixel_bytes;
+
+            if (totals.surfaces <= 8) {
+                std.debug.print(
+                    "[memory] surface#{d}{s} grid={}x{} screens={} pages={d:.1}/{d:.1}MiB min={d:.1}MiB renderer_cap={d:.1}MiB cells(bg/fg/color)={}/{}/{} kitty(tex/pending)={}/{} kitty_bytes(cpu/gpu)={d:.1}/{d:.1}MiB fbo={}x{} {d:.1}MiB\n",
+                    .{
+                        totals.surfaces,
+                        if (visible) " visible" else "",
+                        stats.cols,
+                        stats.rows,
+                        stats.screen_count,
+                        memory_debug.mib(stats.terminal_page_bytes),
+                        memory_debug.mib(stats.terminal_page_limit_bytes),
+                        memory_debug.mib(stats.terminal_min_page_bytes),
+                        memory_debug.mib(stats.renderer_cpu_capacity_bytes),
+                        stats.bg_cell_count,
+                        stats.fg_cell_count,
+                        stats.color_fg_cell_count,
+                        stats.kitty_textures,
+                        stats.kitty_pending_uploads,
+                        memory_debug.mib(stats.kitty_pending_cpu_bytes),
+                        memory_debug.mib(stats.kitty_texture_pixel_bytes),
+                        stats.fbo_width,
+                        stats.fbo_height,
+                        memory_debug.mib(stats.fbo_pixel_bytes),
+                    },
+                );
+            }
+        }
+    }
+
+    const font_stats = font.memoryStats();
+    const font_cpu_bytes =
+        font_stats.atlas_cpu_bytes +
+        font_stats.color_atlas_cpu_bytes +
+        font_stats.icon_atlas_cpu_bytes +
+        font_stats.titlebar_atlas_cpu_bytes;
+    const font_gpu_bytes =
+        font_stats.atlas_gpu_bytes +
+        font_stats.color_atlas_gpu_bytes +
+        font_stats.icon_atlas_gpu_bytes +
+        font_stats.titlebar_atlas_gpu_bytes;
+    const tracked_cpu_bytes =
+        totals.terminal_page_bytes +
+        totals.renderer_cpu_capacity_bytes +
+        font_cpu_bytes +
+        totals.kitty_pending_cpu_bytes;
+
+    std.debug.print(
+        "[memory] font glyphs={} graphemes={} titlebar={} icons={} fallback_faces={} no_fallback={} hb_fallback={} atlas(text/color/icon/titlebar)={}x{}/{}x{}/{}x{}/{}x{} font_atlas(cpu/gpu)={d:.1}/{d:.1}MiB\n",
+        .{
+            font_stats.glyphs,
+            font_stats.graphemes,
+            font_stats.titlebar_glyphs,
+            font_stats.icons,
+            font_stats.fallback_faces,
+            font_stats.no_fallback_entries,
+            font_stats.hb_fallback_fonts,
+            font_stats.atlas_size,
+            font_stats.atlas_size,
+            font_stats.color_atlas_size,
+            font_stats.color_atlas_size,
+            font_stats.icon_atlas_size,
+            font_stats.icon_atlas_size,
+            font_stats.titlebar_atlas_size,
+            font_stats.titlebar_atlas_size,
+            memory_debug.mib(font_cpu_bytes),
+            memory_debug.mib(font_gpu_bytes),
+        },
+    );
+
+    if (memory_debug.queryProcess()) |process| {
+        const untracked_private = process.private_usage -| tracked_cpu_bytes;
+        std.debug.print(
+            "[memory] process private={d:.1}MiB ws={d:.1}MiB commit={d:.1}MiB peak_ws={d:.1}MiB tabs={} ai_tabs={} surfaces={} visible_surfaces={} terminal_pages={d:.1}/{d:.1}MiB min={d:.1}MiB renderer_cap={d:.1}MiB font_atlas(cpu/gpu)={d:.1}/{d:.1}MiB kitty_bytes(cpu/gpu)={d:.1}/{d:.1}MiB fbo={d:.1}MiB tracked_cpu={d:.1}MiB untracked_private~={d:.1}MiB faults={}\n",
+            .{
+                memory_debug.mib(process.private_usage),
+                memory_debug.mib(process.working_set),
+                memory_debug.mib(process.pagefile_usage),
+                memory_debug.mib(process.peak_working_set),
+                totals.tabs,
+                totals.ai_tabs,
+                totals.surfaces,
+                totals.visible_surfaces,
+                memory_debug.mib(totals.terminal_page_bytes),
+                memory_debug.mib(totals.terminal_page_limit_bytes),
+                memory_debug.mib(totals.terminal_min_page_bytes),
+                memory_debug.mib(totals.renderer_cpu_capacity_bytes),
+                memory_debug.mib(font_cpu_bytes),
+                memory_debug.mib(font_gpu_bytes),
+                memory_debug.mib(totals.kitty_pending_cpu_bytes),
+                memory_debug.mib(totals.kitty_texture_pixel_bytes),
+                memory_debug.mib(totals.fbo_pixel_bytes),
+                memory_debug.mib(tracked_cpu_bytes),
+                memory_debug.mib(untracked_private),
+                process.page_fault_count,
+            },
+        );
+    } else {
+        std.debug.print(
+            "[memory] process query failed tabs={} ai_tabs={} surfaces={} terminal_pages={d:.1}MiB renderer_cap={d:.1}MiB\n",
+            .{
+                totals.tabs,
+                totals.ai_tabs,
+                totals.surfaces,
+                memory_debug.mib(totals.terminal_page_bytes),
+                memory_debug.mib(totals.renderer_cpu_capacity_bytes),
+            },
+        );
+    }
 }
 
 fn syncRemoteLayout(allocator: std.mem.Allocator) void {
@@ -2109,6 +2323,7 @@ fn runMainLoop(self: *AppWindow) !void {
         if (config_watcher) |*w| checkConfigReload(allocator, w);
         overlays.tickSessionLauncher();
         file_explorer.tickAsync();
+        maybePrintMemoryDebug(std.time.milliTimestamp());
 
         // Process pending resize (coalesced, like Ghostty)
         // We wait for RESIZE_COALESCE_MS after last resize event before applying.

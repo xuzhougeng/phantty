@@ -279,6 +279,34 @@ pub fn deinit(self: *Renderer) void {
     self.fbo_initialized = false;
 }
 
+pub fn cpuBufferCapacityBytes(self: *const Renderer) usize {
+    _ = self;
+    return (@sizeOf(CellBg) + @sizeOf(CellFg) * 2 + @sizeOf(SnapCell)) * MAX_CELLS;
+}
+
+pub fn kittyPendingCpuBytes(self: *const Renderer) usize {
+    var total: usize = 0;
+    for (self.kitty_pending_uploads.items) |pending| {
+        total += pending.rgba.len;
+    }
+    return total;
+}
+
+pub fn kittyTexturePixelBytes(self: *const Renderer) usize {
+    var total: usize = 0;
+    for (self.kitty_textures.items) |tex| {
+        const width: usize = @intCast(tex.width);
+        const height: usize = @intCast(tex.height);
+        total += width * height * 4;
+    }
+    return total;
+}
+
+pub fn fboPixelBytes(self: *const Renderer) usize {
+    if (!self.fbo_initialized) return 0;
+    return @as(usize, self.fbo_width) * @as(usize, self.fbo_height) * 4;
+}
+
 fn deinitKittyResources(self: *Renderer) void {
     const gl = &AppWindow.gl;
     for (self.kitty_textures.items) |*tex| {

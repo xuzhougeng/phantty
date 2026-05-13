@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
     exe_mod.linkSystemLibrary("imm32", .{});
     exe_mod.linkSystemLibrary("winhttp", .{});
     exe_mod.linkSystemLibrary("ole32", .{});
+    exe_mod.linkSystemLibrary("psapi", .{});
 
     // Add FreeType dependency (shared between main and harfbuzz)
     const freetype_dep = b.lazyDependency("freetype", .{

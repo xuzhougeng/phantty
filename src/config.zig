@@ -276,6 +276,7 @@ shell: []const u8 = "cmd",
 /// Show a debug FPS overlay in the bottom-right corner.
 @"phantty-debug-fps": bool = false,
 @"phantty-debug-draw-calls": bool = false,
+@"phantty-debug-memory": bool = false,
 
 // ============================================================================
 // Split pane configuration
@@ -630,6 +631,14 @@ fn applyKeyValue(self: *Config, allocator: std.mem.Allocator, key: []const u8, v
             self.@"phantty-debug-draw-calls" = false;
         } else {
             log.warn("invalid phantty-debug-draw-calls: {s}", .{value});
+        }
+    } else if (std.mem.eql(u8, key, "phantty-debug-memory")) {
+        if (std.mem.eql(u8, value, "true")) {
+            self.@"phantty-debug-memory" = true;
+        } else if (std.mem.eql(u8, value, "false")) {
+            self.@"phantty-debug-memory" = false;
+        } else {
+            log.warn("invalid phantty-debug-memory: {s}", .{value});
         }
     } else if (std.mem.eql(u8, key, "unfocused-split-opacity")) {
         if (std.fmt.parseFloat(f32, value)) |opacity| {
@@ -988,6 +997,7 @@ pub fn printHelp() void {
         \\Debug:
         \\  --phantty-debug-fps <bool>   Show FPS overlay (default: false)
         \\  --phantty-debug-draw-calls <bool> Show draw call count overlay (default: false)
+        \\  --phantty-debug-memory <bool> Print periodic memory attribution (default: false)
         \\
         \\Commands:
         \\  --show-config-path           Print the config file path and exit
@@ -1267,6 +1277,7 @@ const default_config_template =
     \\# Debug
     \\# phantty-debug-fps = false
     \\# phantty-debug-draw-calls = false
+    \\# phantty-debug-memory = false
     \\
     \\# Load additional config files
     \\# config-file = ?optional/extra-config

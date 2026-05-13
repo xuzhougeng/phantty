@@ -50,6 +50,7 @@ title: ?[]const u8,
 // Debug flags
 debug_fps: bool,
 debug_draw_calls: bool,
+debug_memory: bool,
 
 // Split config
 unfocused_split_opacity: f32,
@@ -150,6 +151,7 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .title = title,
         .debug_fps = cfg.@"phantty-debug-fps",
         .debug_draw_calls = cfg.@"phantty-debug-draw-calls",
+        .debug_memory = cfg.@"phantty-debug-memory",
         .unfocused_split_opacity = cfg.@"unfocused-split-opacity",
         .split_divider_color = cfg.@"split-divider-color",
         .focus_follows_mouse = cfg.@"focus-follows-mouse",
@@ -279,6 +281,7 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     self.initial_rows = if (cfg.@"window-height" > 0) cfg.@"window-height" else 24;
     self.debug_fps = cfg.@"phantty-debug-fps";
     self.debug_draw_calls = cfg.@"phantty-debug-draw-calls";
+    self.debug_memory = cfg.@"phantty-debug-memory";
     self.unfocused_split_opacity = cfg.@"unfocused-split-opacity";
     self.split_divider_color = cfg.@"split-divider-color";
     self.focus_follows_mouse = cfg.@"focus-follows-mouse";

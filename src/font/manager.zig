@@ -1336,6 +1336,65 @@ pub fn preloadCharacters(face: freetype.Face) void {
     std.debug.print("Total glyphs in cache: {}\n", .{glyph_cache.count()});
 }
 
+pub const MemoryStats = struct {
+    glyphs: usize = 0,
+    graphemes: usize = 0,
+    icons: usize = 0,
+    titlebar_glyphs: usize = 0,
+    fallback_faces: usize = 0,
+    no_fallback_entries: usize = 0,
+    hb_fallback_fonts: usize = 0,
+    atlas_cpu_bytes: usize = 0,
+    atlas_gpu_bytes: usize = 0,
+    atlas_size: u32 = 0,
+    color_atlas_cpu_bytes: usize = 0,
+    color_atlas_gpu_bytes: usize = 0,
+    color_atlas_size: u32 = 0,
+    icon_atlas_cpu_bytes: usize = 0,
+    icon_atlas_gpu_bytes: usize = 0,
+    icon_atlas_size: u32 = 0,
+    titlebar_atlas_cpu_bytes: usize = 0,
+    titlebar_atlas_gpu_bytes: usize = 0,
+    titlebar_atlas_size: u32 = 0,
+};
+
+fn atlasCpuBytes(atlas: ?FontAtlas) usize {
+    return if (atlas) |a| a.data.len else 0;
+}
+
+fn atlasGpuBytes(atlas: ?FontAtlas, texture: c.GLuint) usize {
+    if (texture == 0) return 0;
+    return atlasCpuBytes(atlas);
+}
+
+fn atlasSize(atlas: ?FontAtlas) u32 {
+    return if (atlas) |a| a.size else 0;
+}
+
+pub fn memoryStats() MemoryStats {
+    return .{
+        .glyphs = glyph_cache.count(),
+        .graphemes = grapheme_cache.count(),
+        .icons = icon_cache.count(),
+        .titlebar_glyphs = g_titlebar_cache.count(),
+        .fallback_faces = g_fallback_faces.count(),
+        .no_fallback_entries = g_no_fallback.count(),
+        .hb_fallback_fonts = g_hb_fallback_fonts.count(),
+        .atlas_cpu_bytes = atlasCpuBytes(g_atlas),
+        .atlas_gpu_bytes = atlasGpuBytes(g_atlas, g_atlas_texture),
+        .atlas_size = atlasSize(g_atlas),
+        .color_atlas_cpu_bytes = atlasCpuBytes(g_color_atlas),
+        .color_atlas_gpu_bytes = atlasGpuBytes(g_color_atlas, g_color_atlas_texture),
+        .color_atlas_size = atlasSize(g_color_atlas),
+        .icon_atlas_cpu_bytes = atlasCpuBytes(g_icon_atlas),
+        .icon_atlas_gpu_bytes = atlasGpuBytes(g_icon_atlas, g_icon_atlas_texture),
+        .icon_atlas_size = atlasSize(g_icon_atlas),
+        .titlebar_atlas_cpu_bytes = atlasCpuBytes(g_titlebar_atlas),
+        .titlebar_atlas_gpu_bytes = atlasGpuBytes(g_titlebar_atlas, g_titlebar_atlas_texture),
+        .titlebar_atlas_size = atlasSize(g_titlebar_atlas),
+    };
+}
+
 /// Clear all GL textures from the glyph cache and reset it.
 pub fn clearGlyphCache(allocator: std.mem.Allocator) void {
     const gl = &AppWindow.gl;
