@@ -1612,6 +1612,13 @@ fn nextLeftClickCount(xpos: f64, ypos: f64) u8 {
     return g_left_click_count;
 }
 
+fn resetLeftClickCount() void {
+    g_left_click_count = 0;
+    g_left_click_time_ms = 0;
+    g_left_click_x = 0;
+    g_left_click_y = 0;
+}
+
 fn readViewportRowLocked(surface: *Surface, row: usize, buf: *[MAX_SELECTION_COLS]u21) []const u21 {
     const cols = @min(@as(usize, @intCast(surface.size.grid.cols)), buf.len);
     if (row >= @as(usize, @intCast(surface.size.grid.rows))) return buf[0..0];
@@ -1626,6 +1633,7 @@ fn viewportRowIsBlankLocked(surface: *Surface, row: usize, buf: *[MAX_SELECTION_
 }
 
 fn activateSelection(surface: *Surface, start_col: usize, start_row: usize, end_col: usize, end_row: usize) void {
+    surface.selection.has_anchor = true;
     surface.selection.start_col = start_col;
     surface.selection.start_row = start_row;
     surface.selection.end_col = end_col;
@@ -1636,12 +1644,41 @@ fn activateSelection(surface: *Surface, start_col: usize, start_row: usize, end_
 
 fn clearSelectionAtCell(surface: *Surface, cell_pos: CellPos) void {
     const abs_row = viewportOffsetForSurface(surface) + cell_pos.row;
+    surface.selection.has_anchor = true;
     surface.selection.start_col = cell_pos.col;
     surface.selection.start_row = abs_row;
     surface.selection.end_col = cell_pos.col;
     surface.selection.end_row = abs_row;
     surface.selection.active = false;
     markSelectionChanged();
+}
+
+fn startSelectionAtCell(surface: *Surface, cell_pos: CellPos, xpos: f64, ypos: f64) void {
+    const abs_row = viewportOffsetForSurface(surface) + cell_pos.row;
+    surface.selection.has_anchor = true;
+    surface.selection.start_col = cell_pos.col;
+    surface.selection.start_row = abs_row;
+    surface.selection.end_col = cell_pos.col;
+    surface.selection.end_row = abs_row;
+    surface.selection.active = false;
+    g_selecting = true;
+    g_click_x = xpos;
+    g_click_y = ypos;
+    markSelectionChanged();
+}
+
+fn extendSelectionAtCell(surface: *Surface, cell_pos: CellPos, xpos: f64, ypos: f64) bool {
+    if (!surface.selection.has_anchor) return false;
+    const abs_row = viewportOffsetForSurface(surface) + cell_pos.row;
+    const same_cell = surface.selection.start_col == cell_pos.col and surface.selection.start_row == abs_row;
+    surface.selection.end_col = cell_pos.col;
+    surface.selection.end_row = abs_row;
+    surface.selection.active = !same_cell;
+    g_selecting = true;
+    g_click_x = xpos;
+    g_click_y = ypos;
+    markSelectionChanged();
+    return true;
 }
 
 fn selectWordAtCell(surface: *Surface, cell_pos: CellPos) bool {
@@ -2439,19 +2476,18 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
             }
 
             clearUrlUnderline();
-            const abs_row = viewportOffsetForSurface(clicked_surface) + cell_pos.row;
-            switch (nextLeftClickCount(xpos, ypos)) {
+            const shift_range_select = ev.shift and !ev.ctrl and !ev.alt;
+            const click_count: u8 = if (shift_range_select) blk: {
+                resetLeftClickCount();
+                break :blk 1;
+            } else nextLeftClickCount(xpos, ypos);
+            switch (click_count) {
                 1 => {
-                    // Start selection on the clicked surface.
-                    clicked_surface.selection.start_col = cell_pos.col;
-                    clicked_surface.selection.start_row = abs_row;
-                    clicked_surface.selection.end_col = cell_pos.col;
-                    clicked_surface.selection.end_row = abs_row;
-                    clicked_surface.selection.active = false;
-                    g_selecting = true;
-                    g_click_x = xpos;
-                    g_click_y = ypos;
-                    markSelectionChanged();
+                    // Shift-click extends from the last click anchor, matching
+                    // document editor style range selection.
+                    if (!(shift_range_select and extendSelectionAtCell(clicked_surface, cell_pos, xpos, ypos))) {
+                        startSelectionAtCell(clicked_surface, cell_pos, xpos, ypos);
+                    }
                 },
                 2 => {
                     g_selecting = false;
@@ -2834,6 +2870,7 @@ fn handleMouseMove(ev: win32_backend.MouseMoveEvent) void {
     const selection = &surface.selection;
     const cell_pos = mouseToSurfaceCell(surface, xpos, ypos);
     const abs_row = viewportOffsetForSurface(surface) + cell_pos.row;
+    selection.has_anchor = true;
     selection.end_col = cell_pos.col;
     selection.end_row = abs_row;
 

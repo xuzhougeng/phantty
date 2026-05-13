@@ -32,10 +32,13 @@ const Surface = @This();
 /// Rows are stored as absolute scrollback positions (viewport offset + screen row)
 /// so the selection stays anchored to the text when scrolling.
 pub const Selection = struct {
+    /// A click can leave an anchor even when there is no visible selection yet.
+    has_anchor: bool = false,
     start_col: usize = 0,
     start_row: usize = 0,
     end_col: usize = 0,
     end_row: usize = 0,
+    /// Active selections are rendered and copied; anchor-only clicks are not.
     active: bool = false,
 };
 
