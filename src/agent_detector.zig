@@ -3,11 +3,13 @@ const std = @import("std");
 pub const App = enum {
     none,
     codex,
+    claude_code,
 
     pub fn label(self: App) []const u8 {
         return switch (self) {
             .none => "none",
             .codex => "codex",
+            .claude_code => "claude_code",
         };
     }
 };
@@ -141,7 +143,111 @@ fn titleHasRunningMarker(title: []const u8) bool {
         containsIgnoreCase(title, "[*]");
 }
 
+fn titleHasClaudeStatusMarker(title: []const u8) bool {
+    return containsAnyIgnoreCase(title, &.{
+        "\xe2\x9c\xbb", // U+273B
+        "\xe2\x9c\xa2", // U+2722
+        "\xe2\x9c\xbd", // U+273D
+    });
+}
+
+fn detectClaudeCode(title: []const u8, recent_output: []const u8) ?Detection {
+    const claude_seen = containsAnyIgnoreCase(title, &.{
+        "claude",
+        "claude code",
+        "claude-code",
+    }) or titleHasClaudeStatusMarker(title) or
+        containsAnyIgnoreCase(recent_output, &.{
+            "claude code",
+            "claude.ai/code/session",
+            "do you want to make this edit",
+            "do you want to make this change",
+            "do you want to run this command",
+            "yes, allow all edits during this session",
+            "yes, allow all tools during this session",
+        });
+    if (!claude_seen) return null;
+
+    const approval_idx = lastAnyIgnoreCase(recent_output, &.{
+        "do you want to make this edit",
+        "do you want to make this change",
+        "do you want to create",
+        "do you want to run this command",
+        "do you want to proceed",
+        "yes, allow all edits during this session",
+        "yes, allow all tools during this session",
+        "yes, allow all commands during this session",
+    });
+    const running_idx = lastAnyIgnoreCase(recent_output, &.{
+        "thinking",
+        "Update(",
+        "Edit(",
+        "MultiEdit(",
+        "Write(",
+        "Bash(",
+        "Read(",
+        "Grep(",
+        "Glob(",
+        "Task(",
+        "TodoWrite(",
+        "WebFetch(",
+    });
+    const halted_idx = lastAnyIgnoreCase(recent_output, &.{
+        "interrupted by user",
+        "operation cancelled",
+        "operation canceled",
+        "aborted",
+    });
+    const failure_idx = lastAnyIgnoreCase(recent_output, &.{
+        "permission denied",
+        "command failed",
+        "error:",
+        "failed",
+    });
+    const done_idx = lastAnyIgnoreCase(recent_output, &.{
+        "no changes to make",
+        "completed successfully",
+        "all set",
+    });
+
+    if (approval_idx) |idx| {
+        if (newerThan(idx, running_idx) and newerThan(idx, halted_idx) and newerThan(idx, failure_idx) and newerThan(idx, done_idx)) {
+            return .{ .app = .claude_code, .state = .waiting_approval, .confidence = 90 };
+        }
+    }
+    if (halted_idx) |idx| {
+        if (newerThan(idx, done_idx) and newerThan(idx, running_idx)) {
+            return .{ .app = .claude_code, .state = .halted, .confidence = 92 };
+        }
+    }
+    if (failure_idx) |idx| {
+        if (newerThan(idx, done_idx) and newerThan(idx, running_idx) and newerThan(idx, halted_idx)) {
+            return .{ .app = .claude_code, .state = .failed, .confidence = 76 };
+        }
+    }
+    if (done_idx) |idx| {
+        if (newerThan(idx, running_idx) and newerThan(idx, halted_idx) and newerThan(idx, failure_idx)) {
+            return .{ .app = .claude_code, .state = .done, .confidence = 76 };
+        }
+    }
+    if (titleHasAttentionMarker(title)) {
+        return .{ .app = .claude_code, .state = .needs_input, .confidence = 72 };
+    }
+    if (running_idx) |idx| {
+        if (newerThan(idx, done_idx) and newerThan(idx, halted_idx)) {
+            return .{ .app = .claude_code, .state = .running, .confidence = 82 };
+        }
+    }
+    if (titleHasRunningMarker(title) or titleHasClaudeStatusMarker(title)) {
+        return .{ .app = .claude_code, .state = .running, .confidence = 82 };
+    }
+
+    return .{ .app = .claude_code, .state = .none, .confidence = 45 };
+}
+
 pub fn detect(title: []const u8, recent_output: []const u8) Detection {
+    if (detectClaudeCode(title, recent_output)) |detection| return detection;
+
     const codex_seen = containsAnyIgnoreCase(title, &.{ "codex", "[ ! ]", "[!]", "[ * ]", "[*]" }) or
         containsAnyIgnoreCase(recent_output, &.{
             "codex",
@@ -288,6 +394,38 @@ test "agent detector prefers newer running marker after old completion" {
     ;
     const detection = detect("codex", output);
     try std.testing.expectEqual(App.codex, detection.app);
+    try std.testing.expectEqual(State.running, detection.state);
+}
+
+test "agent detector recognizes Claude Code approval prompt" {
+    const output =
+        \\Claude Code v2.1.140
+        \\Update(tools/clashmate/index.html)
+        \\Do you want to make this edit to index.html?
+        \\  1. Yes
+        \\  2. Yes, allow all edits during this session (shift+tab)
+        \\  3. No
+    ;
+    const detection = detect("Claude Code v2.1.140", output);
+    try std.testing.expectEqual(App.claude_code, detection.app);
+    try std.testing.expectEqual(State.waiting_approval, detection.state);
+    try std.testing.expectEqualStrings("ask", detection.badge());
+}
+
+test "agent detector recognizes Claude Code running title marker" {
+    const detection = detect("\xe2\x9c\xbb Hiding advanced features", "Read 5 files, listed 5 directories, ran 1 shell command");
+    try std.testing.expectEqual(App.claude_code, detection.app);
+    try std.testing.expectEqual(State.running, detection.state);
+}
+
+test "agent detector ignores stale Claude Code approval after newer tool output" {
+    const output =
+        \\Do you want to make this edit to index.html?
+        \\  1. Yes
+        \\Update(tools/clashmate/index.html)
+    ;
+    const detection = detect("Claude Code", output);
+    try std.testing.expectEqual(App.claude_code, detection.app);
     try std.testing.expectEqual(State.running, detection.state);
 }
 
