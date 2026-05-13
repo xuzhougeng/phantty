@@ -454,12 +454,10 @@ pub fn init(
         return err;
     };
 
-    // Start renderer thread (Ghostty architecture - each surface has its own render thread)
-    surface.renderer_thread.start() catch |err| {
-        std.debug.print("Failed to spawn renderer thread: {}\n", .{err});
-        // Non-fatal: rendering will fall back to main thread updates
-        _ = &err;
-    };
+    // The renderer thread is kept as a future integration point, but the actual
+    // snapshot/rebuild path still runs on the main thread today. Starting it now
+    // only adds an idle per-surface thread and stack without moving work off the
+    // main render loop.
 
     return surface;
 }

@@ -133,15 +133,15 @@ pub const CursorStyle = enum {
 surface: *Surface,
 
 /// Cell buffers for rendering
-bg_cells: [MAX_CELLS]CellBg,
-fg_cells: [MAX_CELLS]CellFg,
-color_fg_cells: [MAX_CELLS]CellFg,
+bg_cells: std.ArrayListUnmanaged(CellBg),
+fg_cells: std.ArrayListUnmanaged(CellFg),
+color_fg_cells: std.ArrayListUnmanaged(CellFg),
 bg_cell_count: usize,
 fg_cell_count: usize,
 color_fg_cell_count: usize,
 
 /// Snapshot buffer — cell data copied under terminal lock
-snap: [MAX_CELLS]SnapCell,
+snap: std.ArrayListUnmanaged(SnapCell),
 snap_rows: usize,
 snap_cols: usize,
 
@@ -216,13 +216,13 @@ kitty_placements: std.ArrayListUnmanaged(KittyPlacement),
 pub fn init(surface: *Surface) Renderer {
     return Renderer{
         .surface = surface,
-        .bg_cells = undefined,
-        .fg_cells = undefined,
-        .color_fg_cells = undefined,
+        .bg_cells = .empty,
+        .fg_cells = .empty,
+        .color_fg_cells = .empty,
         .bg_cell_count = 0,
         .fg_cell_count = 0,
         .color_fg_cell_count = 0,
-        .snap = undefined,
+        .snap = .empty,
         .snap_rows = 0,
         .snap_cols = 0,
         .cells_valid = false,
@@ -269,6 +269,10 @@ pub fn init(surface: *Surface) Renderer {
 /// Note: FBO cleanup must be done by AppWindow which has GL context.
 pub fn deinit(self: *Renderer) void {
     self.deinitKittyResources();
+    self.bg_cells.deinit(self.surface.allocator);
+    self.fg_cells.deinit(self.surface.allocator);
+    self.color_fg_cells.deinit(self.surface.allocator);
+    self.snap.deinit(self.surface.allocator);
 
     // FBO resources are cleaned up by AppWindow.cleanupRendererFBO()
     // We just reset our state
@@ -280,8 +284,32 @@ pub fn deinit(self: *Renderer) void {
 }
 
 pub fn cpuBufferCapacityBytes(self: *const Renderer) usize {
-    _ = self;
-    return (@sizeOf(CellBg) + @sizeOf(CellFg) * 2 + @sizeOf(SnapCell)) * MAX_CELLS;
+    return self.bg_cells.items.len * @sizeOf(CellBg) +
+        self.fg_cells.items.len * @sizeOf(CellFg) +
+        self.color_fg_cells.items.len * @sizeOf(CellFg) +
+        self.snap.items.len * @sizeOf(SnapCell);
+}
+
+pub fn ensureCellCapacity(self: *Renderer, requested: usize) !void {
+    const target = @min(MAX_CELLS, requested);
+    if (target <= self.bg_cells.items.len and
+        target <= self.fg_cells.items.len and
+        target <= self.color_fg_cells.items.len and
+        target <= self.snap.items.len)
+    {
+        return;
+    }
+
+    const allocator = self.surface.allocator;
+    try self.bg_cells.ensureTotalCapacity(allocator, target);
+    try self.fg_cells.ensureTotalCapacity(allocator, target);
+    try self.color_fg_cells.ensureTotalCapacity(allocator, target);
+    try self.snap.ensureTotalCapacity(allocator, target);
+
+    self.bg_cells.items.len = target;
+    self.fg_cells.items.len = target;
+    self.color_fg_cells.items.len = target;
+    self.snap.items.len = target;
 }
 
 pub fn kittyPendingCpuBytes(self: *const Renderer) usize {

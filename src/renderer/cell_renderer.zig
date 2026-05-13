@@ -246,8 +246,8 @@ pub fn rebuildCells(rend: *Renderer) void {
         var skip_next_ri = false;
         for (0..render_cols) |col_idx| {
             const snap_idx = row_base + col_idx;
-            if (snap_idx >= Renderer.MAX_CELLS) break;
-            const sc = rend.snap[snap_idx];
+            if (snap_idx >= rend.snap.items.len) break;
+            const sc = rend.snap.items[snap_idx];
 
             const is_cursor = rend.cached_cursor_in_viewport and (col_idx == rend.cached_cursor_x and row_idx == rend.cached_cursor_y);
             const is_selected = isCellSelected(rend, col_idx, row_idx);
@@ -264,20 +264,20 @@ pub fn rebuildCells(rend: *Renderer) void {
                 }
                 // Draw cell background normally (cursor shape drawn by overlay)
                 if (sc.bg) |bg| {
-                    if (rend.bg_cell_count < Renderer.MAX_CELLS) {
-                        rend.bg_cells[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
+                    if (rend.bg_cell_count < rend.bg_cells.items.len) {
+                        rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
                         rend.bg_cell_count += 1;
                     }
                 }
             } else if (is_selected) {
-                if (rend.bg_cell_count < Renderer.MAX_CELLS) {
-                    rend.bg_cells[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2] };
+                if (rend.bg_cell_count < rend.bg_cells.items.len) {
+                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = g_theme.selection_background[0], .g = g_theme.selection_background[1], .b = g_theme.selection_background[2] };
                     rend.bg_cell_count += 1;
                 }
                 fg_color = g_theme.selection_foreground orelse g_theme.foreground;
             } else if (sc.bg) |bg| {
-                if (rend.bg_cell_count < Renderer.MAX_CELLS) {
-                    rend.bg_cells[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
+                if (rend.bg_cell_count < rend.bg_cells.items.len) {
+                    rend.bg_cells.items[rend.bg_cell_count] = .{ .grid_col = col_f, .grid_row = row_f, .r = bg[0], .g = bg[1], .b = bg[2] };
                     rend.bg_cell_count += 1;
                 }
             }
@@ -310,8 +310,8 @@ pub fn rebuildCells(rend: *Renderer) void {
                     const offsets = [_]usize{ 1, 2 };
                     for (offsets) |off| {
                         const next_snap_idx = row_base + col_idx + off;
-                        if (next_snap_idx < Renderer.MAX_CELLS and col_idx + off < render_cols) {
-                            const next_sc = rend.snap[next_snap_idx];
+                        if (next_snap_idx < rend.snap.items.len and col_idx + off < render_cols) {
+                            const next_sc = rend.snap.items[next_snap_idx];
                             if (font.isRegionalIndicator(next_sc.codepoint)) {
                                 const extras = [1]u21{next_sc.codepoint};
                                 const result = font.loadGraphemeGlyph(char, &extras);
@@ -343,8 +343,8 @@ pub fn rebuildCells(rend: *Renderer) void {
                             const gx = (target_w - gw) / 2.0;
                             const gy = (font.cell_height - gh) / 2.0;
                             const uv_val = font.glyphUV(ch.region, color_atlas_size);
-                            if (rend.color_fg_cell_count < Renderer.MAX_CELLS) {
-                                rend.color_fg_cells[rend.color_fg_cell_count] = .{
+                            if (rend.color_fg_cell_count < rend.color_fg_cells.items.len) {
+                                rend.color_fg_cells.items[rend.color_fg_cell_count] = .{
                                     .grid_col = col_f,
                                     .grid_row = row_f,
                                     .glyph_x = gx,
@@ -368,8 +368,8 @@ pub fn rebuildCells(rend: *Renderer) void {
                             const gy = font.cell_baseline - @as(f32, @floatFromInt(@as(i32, @intCast(ch.size_y)) - ch.bearing_y));
                             const gw = @as(f32, @floatFromInt(ch.size_x));
                             const gh = @as(f32, @floatFromInt(ch.size_y));
-                            if (rend.fg_cell_count < Renderer.MAX_CELLS) {
-                                rend.fg_cells[rend.fg_cell_count] = .{
+                            if (rend.fg_cell_count < rend.fg_cells.items.len) {
+                                rend.fg_cells.items[rend.fg_cell_count] = .{
                                     .grid_col = col_f,
                                     .grid_row = row_f,
                                     .glyph_x = gx,
@@ -418,7 +418,7 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
 
         gl.BindVertexArray.?(gl_init.bg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.bg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), &rend.bg_cells);
+        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellBg) * rend.bg_cell_count), rend.bg_cells.items.ptr);
         gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.bg_cell_count));
         gl_init.g_draw_call_count += 1;
     }
@@ -439,7 +439,7 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
 
         gl.BindVertexArray.?(gl_init.fg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.fg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.fg_cell_count), &rend.fg_cells);
+        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.fg_cell_count), rend.fg_cells.items.ptr);
         gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.fg_cell_count));
         gl_init.g_draw_call_count += 1;
     }
@@ -462,7 +462,7 @@ pub fn drawCells(rend: *const Renderer, window_height: f32, offset_x: f32, offse
 
         gl.BindVertexArray.?(gl_init.color_fg_vao);
         gl.BindBuffer.?(c.GL_ARRAY_BUFFER, gl_init.color_fg_instance_vbo);
-        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.color_fg_cell_count), &rend.color_fg_cells);
+        gl.BufferSubData.?(c.GL_ARRAY_BUFFER, 0, @intCast(@sizeOf(Renderer.CellFg) * rend.color_fg_cell_count), rend.color_fg_cells.items.ptr);
         gl.DrawArraysInstanced.?(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(rend.color_fg_cell_count));
         gl_init.g_draw_call_count += 1;
 
@@ -593,6 +593,13 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
     const g_theme = AppWindow.g_theme;
     const screen = terminal.screens.active;
     const render_cols = terminal.cols;
+    const requested_cells = @as(usize, terminal.cols) * @as(usize, terminal.rows);
+    rend.ensureCellCapacity(requested_cells) catch {
+        rend.snap_cols = 0;
+        rend.snap_rows = 0;
+        rend.cells_valid = false;
+        return;
+    };
 
     rend.snap_cols = render_cols;
 
@@ -660,7 +667,7 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
                 bg_color = normal_fg;
             }
 
-            if (row_base + col_idx < Renderer.MAX_CELLS) {
+            if (row_base + col_idx < rend.snap.items.len) {
                 var snap: Renderer.SnapCell = .{
                     .codepoint = cell.codepoint(),
                     .fg = fg_color,
@@ -680,7 +687,7 @@ fn snapshotCells(rend: *Renderer, terminal: *ghostty_vt.Terminal) void {
                     }
                 }
 
-                rend.snap[row_base + col_idx] = snap;
+                rend.snap.items[row_base + col_idx] = snap;
             }
         }
         row_idx += 1;

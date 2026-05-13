@@ -222,9 +222,7 @@ pub fn close() void {
     g_url_bar_focused = false;
     g_url_edit_select_all = false;
     stopTunnel();
-    if (g_browser) |browser| {
-        phantty_webview2_set_visible(browser, 0);
-    }
+    destroyBrowser();
 }
 
 pub fn focus() void {
@@ -275,14 +273,18 @@ pub fn sync(parent: win32.HWND, window_width: i32, window_height: i32, titlebar_
 }
 
 pub fn deinit() void {
-    if (g_browser) |browser| {
-        phantty_webview2_destroy(browser);
-        g_browser = null;
-    }
+    destroyBrowser();
     stopTunnel();
     g_visible = false;
     g_url_bar_focused = false;
     g_url_edit_select_all = false;
+}
+
+fn destroyBrowser() void {
+    if (g_browser) |browser| {
+        phantty_webview2_destroy(browser);
+        g_browser = null;
+    }
 }
 
 fn setUrl(url: []const u8) void {
