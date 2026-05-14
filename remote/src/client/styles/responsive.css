@@ -52,7 +52,8 @@
   }
 
   .mobile-bar {
-    display: flex;
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) 16px 42px;
     align-items: center;
     gap: 10px;
     min-height: 52px;
@@ -64,13 +65,30 @@
   }
 
   .mobile-bar-title {
-    flex: 1 1 auto;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
     font-weight: 800;
     font-size: 14px;
+  }
+
+  .mobile-bar .icon-button {
+    width: 42px;
+    height: 42px;
+    min-width: 42px;
+  }
+
+  .mobile-bar .status-pip {
+    justify-self: center;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .mobile-bar {
+    grid-template-columns: 42px minmax(0, 1fr) 16px;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] #kbd-toggle {
+    display: none;
   }
 
   .terminal-toolbar {
@@ -187,32 +205,111 @@
     display: none;
   }
 
-  .console-shell[data-kbd-visible="true"] {
+  .console-shell[data-mobile-vkbd-visible="true"] {
     grid-template-rows: minmax(0, 1fr) auto;
   }
 
-  .console-shell[data-kbd-visible="true"] .vkbd {
+  .console-shell[data-mobile-vkbd-visible="true"] .vkbd {
     display: block;
     grid-row: 2;
   }
 
-  .console-shell[data-kbd-visible="true"] .panels-stage[data-mobile-mode="single"] .remote-panel {
+  .console-shell[data-mobile-vkbd-visible="true"] .panels-stage[data-mobile-mode="single"] .remote-panel {
     grid-template-rows: minmax(0, 1fr);
   }
 
-  .console-shell[data-kbd-visible="true"] .panels-stage[data-mobile-mode="single"] .panel-header {
+  .console-shell[data-mobile-vkbd-visible="true"] .panels-stage[data-mobile-mode="single"] .panel-header {
     display: none;
   }
 
-  .console-shell[data-kbd-visible="true"] .panels-stage[data-mobile-mode="single"] .terminal-mount {
+  .console-shell[data-mobile-vkbd-visible="true"] .panels-stage[data-mobile-mode="single"] .terminal-mount {
     border-radius: 10px;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .workspace {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .surface-strip,
+  .console-shell[data-mobile-surface-kind="ai_chat"] .vkbd {
+    display: none;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .terminal-panel {
+    grid-row: 2;
+    padding: 0;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage {
+    border: 0;
+    border-radius: 0;
+    background: var(--bg);
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .remote-panel {
+    padding: 0;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .remote-panel::before,
+  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .panel-header,
+  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .terminal-mount::after {
+    display: none;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .panels-stage[data-mobile-mode="single"] .terminal-mount {
+    padding: 0;
+    border-radius: 0;
+    touch-action: auto;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-remote {
+    border-radius: 0;
+    outline: 0;
+    background: var(--bg);
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-transcript {
+    gap: 14px;
+    padding: 16px max(14px, var(--safe-right)) 14px max(14px, var(--safe-left));
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-message {
+    max-width: min(88%, 680px);
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-bubble {
+    border-radius: 16px;
+    box-shadow: none;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-composer {
+    gap: 8px;
+    padding: 10px max(10px, var(--safe-right)) max(10px, var(--safe-bottom)) max(10px, var(--safe-left));
+    background: var(--surface-overlay-strong);
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-input {
+    height: 48px;
+    min-height: 48px;
+    max-height: 140px;
+    resize: none;
+    border-radius: 14px;
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    font-weight: 700;
+  }
+
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-send {
+    width: 72px;
+    height: 48px;
+    border-radius: 14px;
+    padding: 0;
   }
 }
 
 /* ─── Foldable: dual-fold horizontal crease (top/bottom) ─────── */
 
 @media (vertical-viewport-segments: 2) {
-  .console-shell[data-kbd-visible="true"] {
+  .console-shell[data-mobile-vkbd-visible="true"] {
     grid-template-columns: 1fr;
     grid-template-rows:
       env(viewport-segment-top 0 1)
@@ -240,19 +337,19 @@
 /* ─── Foldable: dual-fold vertical crease (book mode) ────────── */
 
 @media (horizontal-viewport-segments: 2) and (pointer: coarse) {
-  .console-shell[data-kbd-visible="true"] {
+  .console-shell[data-mobile-vkbd-visible="true"] {
     grid-template-columns:
       env(viewport-segment-right 0 0)
       calc(100vw - env(viewport-segment-left 1 0));
     grid-template-rows: 1fr;
   }
 
-  .console-shell[data-kbd-visible="true"] .workspace {
+  .console-shell[data-mobile-vkbd-visible="true"] .workspace {
     grid-column: 1;
     grid-row: 1;
   }
 
-  .console-shell[data-kbd-visible="true"] .vkbd {
+  .console-shell[data-mobile-vkbd-visible="true"] .vkbd {
     display: block;
     grid-column: 2;
     grid-row: 1;
@@ -264,7 +361,7 @@
     border-left: 1px solid var(--line);
   }
 
-  .console-shell[data-kbd-visible="true"] .vkbd::before {
+  .console-shell[data-mobile-vkbd-visible="true"] .vkbd::before {
     top: 50%;
     left: -1px;
     transform: translateY(-50%);
@@ -281,7 +378,7 @@
 /* ─── Foldable: tri-fold horizontal (3 vertical segments) ────── */
 
 @media (horizontal-viewport-segments: 3) and (pointer: coarse) {
-  .console-shell[data-kbd-visible="true"] {
+  .console-shell[data-mobile-vkbd-visible="true"] {
     grid-template-columns:
       env(viewport-segment-right 0 0)
       calc(env(viewport-segment-right 1 0) - env(viewport-segment-left 1 0))
@@ -290,7 +387,7 @@
   }
 
   /* Sidebar inhabits the leftmost segment as a permanent rail. */
-  .console-shell[data-kbd-visible="true"] .sidebar {
+  .console-shell[data-mobile-vkbd-visible="true"] .sidebar {
     position: relative;
     transform: none;
     grid-column: 1;
@@ -299,28 +396,28 @@
     box-shadow: none;
   }
 
-  .console-shell[data-kbd-visible="true"] .sidebar-head {
+  .console-shell[data-mobile-vkbd-visible="true"] .sidebar-head {
     display: none;
   }
 
-  .console-shell[data-kbd-visible="true"] .sidebar-backdrop {
+  .console-shell[data-mobile-vkbd-visible="true"] .sidebar-backdrop {
     display: none !important;
   }
 
-  .console-shell[data-kbd-visible="true"] .workspace {
+  .console-shell[data-mobile-vkbd-visible="true"] .workspace {
     grid-column: 2;
     grid-row: 1;
   }
 
-  .console-shell[data-kbd-visible="true"] .mobile-bar {
+  .console-shell[data-mobile-vkbd-visible="true"] .mobile-bar {
     display: none;
   }
 
-  .console-shell[data-kbd-visible="true"] .terminal-toolbar {
+  .console-shell[data-mobile-vkbd-visible="true"] .terminal-toolbar {
     display: flex;
   }
 
-  .console-shell[data-kbd-visible="true"] .vkbd {
+  .console-shell[data-mobile-vkbd-visible="true"] .vkbd {
     display: block;
     grid-column: 3;
     grid-row: 1;
@@ -330,7 +427,7 @@
     border-left: 1px solid var(--line);
   }
 
-  .console-shell[data-kbd-visible="true"] .vkbd::before {
+  .console-shell[data-mobile-vkbd-visible="true"] .vkbd::before {
     top: 50%;
     left: -1px;
     transform: translateY(-50%);
@@ -343,7 +440,7 @@
 /* ─── Foldable: tri-fold vertical (3 horizontal segments) ────── */
 
 @media (vertical-viewport-segments: 3) {
-  .console-shell[data-kbd-visible="true"] {
+  .console-shell[data-mobile-vkbd-visible="true"] {
     grid-template-columns: 1fr;
     grid-template-rows:
       env(viewport-segment-bottom 0 0)
@@ -351,12 +448,12 @@
       calc(100dvh - env(viewport-segment-top 0 2));
   }
 
-  .console-shell[data-kbd-visible="true"] .workspace {
+  .console-shell[data-mobile-vkbd-visible="true"] .workspace {
     grid-column: 1;
     grid-row: 1 / span 2;
   }
 
-  .console-shell[data-kbd-visible="true"] .vkbd {
+  .console-shell[data-mobile-vkbd-visible="true"] .vkbd {
     grid-row: 3;
   }
 }

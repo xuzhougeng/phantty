@@ -49,7 +49,7 @@ export type SurfaceView = {
   scrollbar: HTMLDivElement;
   scrollbarThumb: HTMLDivElement;
   aiContainer: HTMLDivElement | null;
-  aiTranscript: HTMLPreElement | null;
+  aiTranscript: HTMLDivElement | null;
   aiInput: HTMLTextAreaElement | null;
   aiSend: HTMLButtonElement | null;
   term: Terminal;

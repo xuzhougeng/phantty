@@ -23,6 +23,7 @@ import {
 import { applyVisualViewportSizing, isMobileRemoteShell } from "../mobile_layout";
 import { bindMobileTextInput, renderMobileTextInputMarkup } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup } from "../vkbd";
+import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
 
 let viewportRefitBound = false;
 
@@ -33,7 +34,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const initialSessionInputValue = hasSavedSessionKey ? maskSessionKey(savedSessionKey) : savedSessionKey;
 
   app.innerHTML = `
-    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}">
+    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
@@ -154,6 +155,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   bindVirtualKeyboard(() => setKbdVisible(false));
   bindMobileTextInput();
   bindThemeToggleButtons();
+  updateMobileSurfaceMode();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
@@ -217,6 +219,7 @@ export function renderRemoteWorkspace(): void {
   renderRemotePanels();
   renderSurfaceStrip();
   renderNotices();
+  updateMobileSurfaceMode();
   updateInputUi();
 }
 
@@ -263,6 +266,26 @@ export function updateInputUi(): void {
   }
 
   updateSurfaceCursors();
+}
+
+function updateMobileSurfaceMode(): void {
+  const surfaceKind = selectedMobileSurfaceKind(
+    state.layoutState,
+    state.selectedTabIndex,
+    state.selectedSurfaceId,
+  );
+  const shell = document.querySelector<HTMLElement>(".console-shell");
+  if (shell) {
+    shell.dataset.mobileSurfaceKind = surfaceKind;
+    shell.dataset.mobileVkbdVisible = String(shouldShowMobileVirtualKeyboard(surfaceKind, state.kbdVisible));
+  }
+
+  const keyboardToggle = document.querySelector<HTMLButtonElement>("#kbd-toggle");
+  if (keyboardToggle) {
+    const chatMode = surfaceKind === "ai_chat";
+    keyboardToggle.hidden = chatMode;
+    keyboardToggle.setAttribute("aria-hidden", String(chatMode));
+  }
 }
 
 function bindMobileChrome(): void {
@@ -321,5 +344,6 @@ function setKbdVisible(visible: boolean): void {
   saveKbdVisible(visible);
   const shell = document.querySelector<HTMLElement>(".console-shell");
   if (shell) shell.dataset.kbdVisible = String(visible);
+  updateMobileSurfaceMode();
   requestAnimationFrame(() => refitAllSurfaces());
 }

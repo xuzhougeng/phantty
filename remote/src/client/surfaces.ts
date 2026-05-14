@@ -19,6 +19,7 @@ import {
   type CanvasSize,
 } from "./mobile_canvas";
 import { shouldFocusTerminalElement } from "./focus_policy";
+import { parseAiChatTranscript, type AiChatMessage } from "./ai_chat_transcript";
 import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from "./mobile_layout";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
@@ -321,7 +322,7 @@ function renderAiChatPanel(view: SurfaceView, surface: LayoutSurface): void {
   const snapshot = surface.snapshot || "No messages yet.";
   if (view.snapshotText !== snapshot && view.aiTranscript) {
     view.snapshotText = snapshot;
-    view.aiTranscript.textContent = snapshot;
+    renderAiChatTranscript(view.aiTranscript, snapshot);
     requestAnimationFrame(() => {
       if (view.aiTranscript) view.aiTranscript.scrollTop = view.aiTranscript.scrollHeight;
     });
@@ -334,7 +335,7 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
   const container = document.createElement("div");
   container.className = "ai-chat-remote";
 
-  const transcript = document.createElement("pre");
+  const transcript = document.createElement("div");
   transcript.className = "ai-chat-transcript";
 
   const form = document.createElement("form");
@@ -385,6 +386,40 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
   view.aiInput = input;
   view.aiSend = send;
   return container;
+}
+
+function renderAiChatTranscript(root: HTMLDivElement, snapshot: string): void {
+  const messages = parseAiChatTranscript(snapshot);
+  root.replaceChildren();
+
+  if (messages.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "ai-chat-empty";
+    empty.textContent = "No messages yet.";
+    root.appendChild(empty);
+    return;
+  }
+
+  for (const message of messages) {
+    root.appendChild(renderAiChatMessage(message));
+  }
+}
+
+function renderAiChatMessage(message: AiChatMessage): HTMLElement {
+  const item = document.createElement("article");
+  item.className = `ai-chat-message ${message.role}`;
+
+  const label = document.createElement("div");
+  label.className = "ai-chat-message-label";
+  label.textContent = message.label;
+
+  const bubble = document.createElement("div");
+  bubble.className = "ai-chat-bubble";
+  bubble.textContent = message.content || " ";
+
+  item.appendChild(label);
+  item.appendChild(bubble);
+  return item;
 }
 
 function updateSurfaceCursor(view: SurfaceView, surfaceId: string): void {

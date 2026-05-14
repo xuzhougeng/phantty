@@ -428,18 +428,73 @@
 }
 
 .ai-chat-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   min-width: 0;
   min-height: 0;
   margin: 0;
   padding: 14px 16px;
   overflow: auto;
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  background: transparent;
+}
+
+.ai-chat-message {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: min(720px, 86%);
+}
+
+.ai-chat-message.user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.ai-chat-message.assistant,
+.ai-chat-message.tool {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+.ai-chat-message-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.ai-chat-bubble {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-overlay-strong);
+  color: var(--text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  color: var(--text);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12);
+}
+
+.ai-chat-message.user .ai-chat-bubble {
+  border-color: var(--selected-ring);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.ai-chat-message.tool .ai-chat-bubble {
   font-family: "JetBrains Mono", "Cascadia Mono", ui-monospace, monospace;
-  font-size: 13px;
-  line-height: 1.45;
-  background: transparent;
+  font-size: 12px;
+}
+
+.ai-chat-empty {
+  margin: auto;
+  color: var(--muted);
+  font-weight: 800;
 }
 
 .ai-chat-composer {
