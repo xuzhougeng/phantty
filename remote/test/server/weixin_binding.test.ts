@@ -83,6 +83,17 @@ test("WeixinBindingStore handles concurrent same-path sync buffer writes", async
   assert.match(await store.loadSyncBuf(), /^cursor-[1-4]$/);
 });
 
+test("WeixinBindingStore preserves sync buffer bytes exactly", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "phantty-weixin-"));
+  const store = new WeixinBindingStore(dir);
+  const cursor = "  \nopaque cursor\nwith trailing whitespace\t \n";
+
+  await store.saveSyncBuf(cursor);
+
+  assert.equal(await store.loadSyncBuf(), cursor);
+  assert.equal(await readFile(join(dir, "weixin", "sync_buf"), "utf8"), cursor);
+});
+
 test("WeixinBindingStore writes sensitive files with owner-only mode on POSIX", async () => {
   if (process.platform === "win32") return;
 

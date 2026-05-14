@@ -72,11 +72,11 @@ export class WeixinBindingStore {
   }
 
   async loadSyncBuf(): Promise<string> {
-    return (await readOptional(this.syncBufPath)).trim();
+    return readOptional(this.syncBufPath);
   }
 
   async saveSyncBuf(value: string): Promise<void> {
-    await writeAtomicText(this.syncBufPath, value.trim(), 0o600);
+    await writeAtomicText(this.syncBufPath, value, 0o600);
   }
 }
 
@@ -107,6 +107,11 @@ async function writeAtomicJson(path: string, value: unknown, mode: number): Prom
 async function writeAtomicText(path: string, value: string, mode: number): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tmp, value, { mode });
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, value, { mode });
+    await rename(tmp, path);
+  } catch (err) {
+    await rm(tmp, { force: true });
+    throw err;
+  }
 }
