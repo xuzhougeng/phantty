@@ -834,7 +834,7 @@ git commit -m "Add Weixin binding store"
 - Create: `remote/src/server/bridge/weixin/agent.ts`
 - Test: `remote/test/server/weixin_agent.test.ts`
 
-- [ ] **Step 1: Write failing router tests**
+- [x] **Step 1: Write failing router tests**
 
 Create `remote/test/server/weixin_agent.test.ts`:
 
@@ -906,7 +906,7 @@ test("router asks user to choose session when multiple sessions exist and no tar
 });
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [x] **Step 2: Run failing tests**
 
 Run:
 
@@ -917,7 +917,7 @@ npm run test:server
 
 Expected: FAIL because `agent.ts` does not exist.
 
-- [ ] **Step 3: Implement router**
+- [x] **Step 3: Implement router**
 
 Create `remote/src/server/bridge/weixin/agent.ts`:
 
@@ -1031,7 +1031,7 @@ function helpText(): string {
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -1043,7 +1043,7 @@ npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add remote/src/server/bridge/weixin/agent.ts remote/test/server/weixin_agent.test.ts
