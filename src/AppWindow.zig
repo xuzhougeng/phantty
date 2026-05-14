@@ -17,6 +17,7 @@ const win32_backend = @import("apprt/win32.zig");
 const App = @import("App.zig");
 const Renderer = @import("renderer/Renderer.zig");
 const remote = @import("remote_client.zig");
+const remote_snapshot = @import("remote_snapshot.zig");
 const memory_debug = @import("memory_debug.zig");
 const agent_detector = @import("agent_detector.zig");
 pub const ai_chat = @import("ai_chat.zig");
@@ -1325,71 +1326,13 @@ fn handleRemoteAiInputRequest(request: *RemoteAiInputRequest) void {
 }
 
 fn buildRemoteSurfaceSnapshot(allocator: std.mem.Allocator, surface: *Surface) ![]u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer out.deinit(allocator);
-
     surface.render_state.mutex.lock();
     defer surface.render_state.mutex.unlock();
-
-    const rows: usize = @intCast(surface.size.grid.rows);
-    const cols: usize = @intCast(surface.size.grid.cols);
-    const screen = surface.terminal.screens.active;
-
-    for (0..rows) |row| {
-        if (row > 0) try out.appendSlice(allocator, "\r\n");
-
-        var last_col: ?usize = null;
-        for (0..cols) |col| {
-            const cell_data = screen.pages.getCell(.{ .viewport = .{
-                .x = @intCast(col),
-                .y = @intCast(row),
-            } }) orelse continue;
-            const cp = cell_data.cell.codepoint();
-            if (cp != 0 and cp != ' ') last_col = col;
-        }
-
-        const end_col = last_col orelse continue;
-        for (0..end_col + 1) |col| {
-            const cell_data = screen.pages.getCell(.{ .viewport = .{
-                .x = @intCast(col),
-                .y = @intCast(row),
-            } }) orelse {
-                try out.append(allocator, ' ');
-                continue;
-            };
-
-            const wide_val: u2 = @intFromEnum(cell_data.cell.wide);
-            if (wide_val == 2 or wide_val == 3) continue;
-
-            const cp = cell_data.cell.codepoint();
-            if (cp == 0 or cp == ' ') {
-                try out.append(allocator, ' ');
-            } else {
-                var buf: [4]u8 = undefined;
-                const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch {
-                    try out.append(allocator, ' ');
-                    continue;
-                };
-                try out.appendSlice(allocator, buf[0..len]);
-
-                if (cell_data.cell.hasGrapheme()) {
-                    const page = &cell_data.node.data;
-                    if (page.lookupGrapheme(cell_data.cell)) |extra_cps| {
-                        for (extra_cps) |ecp| {
-                            const extra_len = std.unicode.utf8Encode(@intCast(ecp), &buf) catch continue;
-                            try out.appendSlice(allocator, buf[0..extra_len]);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    while (std.mem.endsWith(u8, out.items, "\r\n")) {
-        out.items.len -= 2;
-    }
-
-    return out.toOwnedSlice(allocator);
+    return remote_snapshot.allocTerminalSnapshot(
+        allocator,
+        &surface.terminal,
+        remote_snapshot.default_max_history_rows,
+    );
 }
 
 const AgentSurfaceLocation = struct {

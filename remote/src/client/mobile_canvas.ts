@@ -30,6 +30,13 @@ export type CanvasPanDragInput = {
 export type CanvasWheelInput = {
   mobile: boolean;
   useCanvasPan: boolean;
+  terminalCanScrollHistory?: boolean;
+};
+
+export type TerminalHistoryWheelInput = {
+  baseY: number;
+  viewportY: number;
+  deltaY: number;
 };
 
 export type CanvasScrollbarOptions = CanvasPanOptions & {
@@ -159,7 +166,20 @@ export function shouldStartCanvasPanDrag(input: CanvasPanDragInput): boolean {
 }
 
 export function shouldConsumeCanvasWheel(input: CanvasWheelInput): boolean {
-  return !input.mobile && input.useCanvasPan;
+  return !input.mobile && input.useCanvasPan && input.terminalCanScrollHistory !== true;
+}
+
+export function terminalCanScrollHistory(input: TerminalHistoryWheelInput): boolean {
+  const baseY = positiveInteger(input.baseY);
+  if (baseY <= 0 || input.deltaY === 0) return false;
+  const viewportY = clamp(positiveInteger(input.viewportY), 0, baseY);
+  return input.deltaY < 0 ? viewportY > 0 : viewportY < baseY;
+}
+
+export function touchHistoryScrollLines(deltaY: number, rowHeight: number): number {
+  const normalizedRowHeight = Math.max(1, Math.floor(rowHeight));
+  const lines = Math.trunc(deltaY / normalizedRowHeight);
+  return lines === 0 ? 0 : -lines;
 }
 
 export function verticalScrollbarMetrics(
@@ -230,6 +250,10 @@ export function meaningfulTerminalCanvasHeight(input: MeaningfulTerminalCanvasHe
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function positiveInteger(value: number): number {
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 function bottomPanLimit(viewport: CanvasSize, canvas: CanvasSize, options: CanvasPanOptions): number {

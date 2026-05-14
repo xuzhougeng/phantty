@@ -14,6 +14,8 @@ import {
   resizeCanvasPan,
   shouldConsumeCanvasWheel,
   shouldStartCanvasPanDrag,
+  terminalCanScrollHistory,
+  touchHistoryScrollLines,
   verticalScrollbarMetrics,
   type CanvasPoint,
   type CanvasSize,
@@ -24,6 +26,7 @@ import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from ".
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
 import { getTerminalPalette, subscribeToTheme } from "./theme";
+import { REMOTE_TERMINAL_SCROLLBACK } from "./terminal_options";
 
 const PENDING_OUTPUT_LIMIT = 128 * 1024;
 const MOBILE_CANVAS_BOTTOM_GUTTER = 12;
@@ -97,7 +100,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     disableStdin: false,
     fontFamily: '"JetBrains Mono", "Cascadia Mono", monospace',
     fontSize: 13,
-    scrollback: 0,
+    scrollback: REMOTE_TERMINAL_SCROLLBACK,
     theme: getTerminalPalette(),
   });
   term.loadAddon(fit);
@@ -511,6 +514,7 @@ function bindCanvasPan(view: SurfaceView): () => void {
   let activePointerId: number | null = null;
   let startClient: CanvasPoint = { x: 0, y: 0 };
   let startPan: CanvasPoint = { x: 0, y: 0 };
+  let lastHistoryClientY = 0;
   let dragged = false;
   let suppressClick = false;
   let suppressClickButton: number | null = null;
@@ -525,14 +529,17 @@ function bindCanvasPan(view: SurfaceView): () => void {
         button: event.button,
       })
     ) return;
+    const mobile = isMobileRemoteShell();
     updateCanvasPan(view);
     const viewport = canvasViewportSize(view);
     const canvas = canvasContentSize(view);
-    if (canvas.width <= viewport.width && canvas.height <= viewport.height) return;
+    const hasScrollableHistory = mobile && view.term.buffer.active.baseY > 0;
+    if (canvas.width <= viewport.width && canvas.height <= viewport.height && !hasScrollableHistory) return;
 
     event.preventDefault();
     activePointerId = event.pointerId;
     startClient = { x: event.clientX, y: event.clientY };
+    lastHistoryClientY = event.clientY;
     startPan = view.canvasPan;
     dragged = false;
     try {
@@ -546,9 +553,31 @@ function bindCanvasPan(view: SurfaceView): () => void {
     if (activePointerId !== event.pointerId) return;
     const delta = { x: event.clientX - startClient.x, y: event.clientY - startClient.y };
     if (!dragged && !isCanvasDrag(delta)) return;
+    if (isMobileRemoteShell() && Math.abs(delta.y) >= Math.abs(delta.x)) {
+      const historyLines = touchHistoryScrollLines(event.clientY - lastHistoryClientY, terminalRowHeight(view));
+      if (
+        historyLines !== 0 &&
+        terminalCanScrollHistory({
+          baseY: view.term.buffer.active.baseY,
+          viewportY: view.term.buffer.active.viewportY,
+          deltaY: historyLines,
+        })
+      ) {
+        dragged = true;
+        event.preventDefault();
+        view.term.scrollLines(historyLines);
+        lastHistoryClientY = event.clientY;
+        startClient = { x: event.clientX, y: event.clientY };
+        startPan = view.canvasPan;
+        return;
+      }
+    }
     dragged = true;
     event.preventDefault();
-    view.canvasPan = panCanvasBy(startPan, delta, canvasViewportSize(view), canvasContentSize(view));
+    const viewport = canvasViewportSize(view);
+    const canvas = canvasContentSize(view);
+    if (canvas.width <= viewport.width && canvas.height <= viewport.height) return;
+    view.canvasPan = panCanvasBy(startPan, delta, viewport, canvas);
     applyCanvasPan(view);
     updateCanvasScrollbar(view);
   };
@@ -557,7 +586,12 @@ function bindCanvasPan(view: SurfaceView): () => void {
     const hasRemoteGridDimensions = view.remoteCols !== null && view.remoteRows !== null;
     const mobile = isMobileRemoteShell();
     const useCanvasPan = shouldUseCanvasPan(hasRemoteGridDimensions);
-    if (!shouldConsumeCanvasWheel({ mobile, useCanvasPan })) return;
+    const canScrollHistory = terminalCanScrollHistory({
+      baseY: view.term.buffer.active.baseY,
+      viewportY: view.term.buffer.active.viewportY,
+      deltaY: event.deltaY,
+    });
+    if (!shouldConsumeCanvasWheel({ mobile, useCanvasPan, terminalCanScrollHistory: canScrollHistory })) return;
 
     updateCanvasPan(view);
     const viewport = canvasViewportSize(view);
@@ -685,6 +719,12 @@ function bindCanvasPan(view: SurfaceView): () => void {
     scrollbar.removeEventListener("pointerup", finishScrollbarPointer);
     scrollbar.removeEventListener("pointercancel", finishScrollbarPointer);
   };
+}
+
+function terminalRowHeight(view: SurfaceView): number {
+  const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
+  const height = screen?.getBoundingClientRect().height ?? 0;
+  return height > 0 && view.term.rows > 0 ? height / view.term.rows : 18;
 }
 
 function resetCanvasPan(view: SurfaceView): void {

@@ -16,6 +16,7 @@ comptime {
     _ = @import("markdown_preview.zig");
     _ = @import("preview_token.zig");
     _ = @import("remote_client.zig");
+    _ = @import("remote_snapshot.zig");
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");
     _ = @import("ssh_prompt.zig");

@@ -469,7 +469,7 @@
 
 .terminal-host .xterm-viewport {
   background-color: transparent !important;
-  overflow-y: hidden !important;
+  overflow-y: auto !important;
   scrollbar-width: none;
 }
 

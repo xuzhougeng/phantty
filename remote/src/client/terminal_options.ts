@@ -1,0 +1,1 @@
+export const REMOTE_TERMINAL_SCROLLBACK = 10_000;

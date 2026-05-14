@@ -16,6 +16,8 @@ import {
   panYFromVerticalScrollbarThumb,
   shouldConsumeCanvasWheel,
   shouldStartCanvasPanDrag,
+  terminalCanScrollHistory,
+  touchHistoryScrollLines,
   verticalScrollbarMetrics,
 } from "../../src/client/mobile_canvas";
 
@@ -166,12 +168,23 @@ test("shouldStartCanvasPanDrag uses touch primary drag on mobile and middle drag
   assert.equal(shouldStartCanvasPanDrag({ mobile: false, isPrimary: false, button: 1 }), false);
 });
 
-test("desktop remote-grid wheel events are consumed before xterm history handling", () => {
-  assert.equal(shouldConsumeCanvasWheel({ mobile: false, useCanvasPan: true }), true);
+test("desktop wheel lets xterm history scroll before canvas panning", () => {
+  assert.equal(terminalCanScrollHistory({ baseY: 20, viewportY: 20, deltaY: -120 }), true);
+  assert.equal(terminalCanScrollHistory({ baseY: 20, viewportY: 0, deltaY: -120 }), false);
+  assert.equal(terminalCanScrollHistory({ baseY: 20, viewportY: 0, deltaY: 120 }), true);
+  assert.equal(terminalCanScrollHistory({ baseY: 20, viewportY: 20, deltaY: 120 }), false);
+  assert.equal(shouldConsumeCanvasWheel({ mobile: false, useCanvasPan: true, terminalCanScrollHistory: true }), false);
+  assert.equal(shouldConsumeCanvasWheel({ mobile: false, useCanvasPan: true, terminalCanScrollHistory: false }), true);
   assert.equal(shouldConsumeCanvasWheel({ mobile: false, useCanvasPan: false }), false);
   assert.equal(shouldConsumeCanvasWheel({ mobile: true, useCanvasPan: true }), false);
   assert.equal(CANVAS_WHEEL_EVENT_OPTIONS.capture, true);
   assert.equal(CANVAS_WHEEL_EVENT_OPTIONS.passive, false);
+});
+
+test("touch drag converts vertical movement into xterm history scroll lines", () => {
+  assert.equal(touchHistoryScrollLines(36, 18), -2);
+  assert.equal(touchHistoryScrollLines(-36, 18), 2);
+  assert.equal(touchHistoryScrollLines(8, 18), 0);
 });
 
 test("verticalScrollbarMetrics hides the scrollbar when the canvas fits", () => {
