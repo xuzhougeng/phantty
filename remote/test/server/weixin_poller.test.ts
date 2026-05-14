@@ -112,7 +112,7 @@ test("WeixinPoller disables settings when the iLink session expires", async () =
   assert.equal(savedSettings?.enabled, false);
 });
 
-test("WeixinPoller saves cursor after processing and stop prevents in-flight reschedule", async () => {
+test("WeixinPoller discards updates after stop during an in-flight poll", async () => {
   const events: string[] = [];
   let releaseUpdates!: () => void;
   const scheduler = fakeScheduler();
@@ -172,7 +172,7 @@ test("WeixinPoller saves cursor after processing and stop prevents in-flight res
   releaseUpdates();
   await run;
 
-  assert.deepEqual(events, ["send:已发送给 Phantty AI Agent，等待结果中。", "send:已发送给 Phantty AI Agent，等待结果中。", "save:next-cursor"]);
+  assert.deepEqual(events, []);
   assert.equal(scheduler.scheduledCount(), 0);
 });
 

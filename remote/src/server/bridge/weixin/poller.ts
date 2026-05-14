@@ -75,6 +75,7 @@ export class WeixinPoller {
   private timer: unknown = null;
   private running = false;
   private active = false;
+  private generation = 0;
   private readonly createClient: (binding: WeixinBindingRecord) => WeixinPollerClient;
   private readonly scheduler: WeixinPollerScheduler;
 
@@ -93,18 +94,21 @@ export class WeixinPoller {
 
   start(): void {
     this.active = true;
+    this.generation += 1;
     if (this.timer) return;
     this.timer = this.scheduler.setTimeout(() => void this.tick(), 0);
   }
 
   stop(): void {
     this.active = false;
+    this.generation += 1;
     if (this.timer) this.scheduler.clearTimeout(this.timer);
     this.timer = null;
   }
 
   async runOnceForTest(): Promise<void> {
     this.active = true;
+    this.generation += 1;
     await this.tick();
   }
 
@@ -117,15 +121,20 @@ export class WeixinPoller {
   private async tick(): Promise<void> {
     if (!this.active) return;
     if (this.running) return this.schedule(1000);
+    const generation = this.generation;
     this.running = true;
     try {
       const settings = await this.store.loadSettings();
+      if (this.isStale(generation)) return;
       const binding = await this.store.loadBinding();
+      if (this.isStale(generation)) return;
       if (!settings.enabled || !binding?.token) return this.schedule(5000);
 
       const client = this.createClient(binding);
       const buf = await this.store.loadSyncBuf();
+      if (this.isStale(generation)) return;
       const updates = await client.getUpdates(buf);
+      if (this.isStale(generation)) return;
       if (updates.errcode === WEIXIN_SESSION_EXPIRED_ERRCODE) {
         await this.store.saveSettings({ ...settings, enabled: false });
         this.logger.warn("weixin session expired; bridge disabled");
@@ -153,5 +162,9 @@ export class WeixinPoller {
     } finally {
       this.running = false;
     }
+  }
+
+  private isStale(generation: number): boolean {
+    return !this.active || this.generation !== generation;
   }
 }
