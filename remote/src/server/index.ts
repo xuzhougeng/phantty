@@ -4,15 +4,9 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocketServer } from "ws";
 
-type RelayMessage = {
-  type?: string;
-  data?: string;
-  encoding?: string;
-  surfaceId?: string;
-  message?: string;
-};
+import { getSession } from "./session.js";
 
 type SessionPayload = {
   username: string;
@@ -26,7 +20,6 @@ type LoginBody = {
 
 const COOKIE_NAME = "phantty_remote";
 const SESSION_TTL_SECONDS = 24 * 60 * 60;
-const HEARTBEAT_INTERVAL_MS = 25_000;
 
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -45,161 +38,7 @@ function requireEnv(name: string): string {
   return value;
 }
 
-class RemoteSession {
-  phantty: WebSocket | null = null;
-  browsers = new Set<WebSocket>();
-  lastLayout: RelayMessage | null = null;
-
-  attachPhantty(socket: WebSocket): void {
-    try {
-      this.phantty?.close(1012, "replaced by a new Phantty connection");
-    } catch {
-      // ignore
-    }
-    this.phantty = socket;
-    trackHeartbeat(socket);
-    this.broadcast({ type: "notice", message: "Phantty connected" });
-
-    socket.on("message", (raw) => {
-      const message = safeJson(raw.toString());
-      if (!message) return;
-      if (message.type === "ping") {
-        safeSend(socket, { type: "pong" });
-        return;
-      }
-      if (message.type === "pong") return;
-      if (message.type === "output" && typeof message.data === "string") {
-        this.broadcast({ type: "output", data: message.data });
-      } else if (message.type === "output-bytes" && typeof message.data === "string") {
-        this.broadcast({
-          type: "output-bytes",
-          surfaceId: message.surfaceId,
-          encoding: message.encoding,
-          data: message.data,
-        });
-      } else if (message.type === "layout") {
-        this.lastLayout = message;
-        this.broadcast(message);
-      }
-    });
-
-    socket.on("close", () => {
-      if (this.phantty !== socket) return;
-      this.phantty = null;
-      this.broadcast({ type: "notice", message: "Phantty disconnected" });
-    });
-  }
-
-  attachBrowser(socket: WebSocket): void {
-    this.browsers.add(socket);
-    trackHeartbeat(socket);
-    safeSend(socket, { type: "notice", message: "Browser paired; input enabled" });
-    if (this.phantty) safeSend(socket, { type: "notice", message: "Phantty connected" });
-    if (this.lastLayout) safeSend(socket, this.lastLayout);
-
-    socket.on("message", (raw) => {
-      const message = safeJson(raw.toString());
-      if (!message) return;
-      if (message.type === "ping") {
-        safeSend(socket, { type: "pong" });
-        return;
-      }
-      if (message.type === "pong") return;
-      if (
-        message.type === "input-bytes" &&
-        typeof message.surfaceId === "string" &&
-        typeof message.data === "string"
-      ) {
-        if (this.phantty) {
-          safeSend(this.phantty, {
-            type: "input-bytes",
-            surfaceId: message.surfaceId,
-            encoding: message.encoding,
-            data: message.data,
-          });
-        }
-      }
-    });
-
-    socket.on("close", () => {
-      this.browsers.delete(socket);
-    });
-  }
-
-  broadcast(message: RelayMessage): void {
-    const payload = JSON.stringify(message);
-    for (const browser of this.browsers) {
-      try {
-        browser.send(payload);
-      } catch {
-        this.browsers.delete(browser);
-      }
-    }
-  }
-}
-
-const sessions = new Map<string, RemoteSession>();
-function getSession(key: string): RemoteSession {
-  let session = sessions.get(key);
-  if (!session) {
-    session = new RemoteSession();
-    sessions.set(key, session);
-  }
-  return session;
-}
-
-function safeSend(socket: WebSocket, message: unknown): void {
-  try {
-    socket.send(JSON.stringify(message));
-  } catch {
-    // ignore
-  }
-}
-
-function safeJson(data: string): RelayMessage | null {
-  try {
-    return JSON.parse(data) as RelayMessage;
-  } catch {
-    return null;
-  }
-}
-
 const wss = new WebSocketServer({ noServer: true });
-
-const heartbeatState = new WeakMap<WebSocket, { alive: boolean }>();
-
-function trackHeartbeat(socket: WebSocket): void {
-  heartbeatState.set(socket, { alive: true });
-  socket.on("pong", () => {
-    const state = heartbeatState.get(socket);
-    if (state) state.alive = true;
-  });
-  socket.on("close", () => {
-    heartbeatState.delete(socket);
-  });
-}
-
-const heartbeatTimer = setInterval(() => {
-  for (const ws of wss.clients) {
-    const state = heartbeatState.get(ws);
-    if (!state) continue;
-    if (!state.alive) {
-      try {
-        ws.terminate();
-      } catch {
-        // ignore
-      }
-      continue;
-    }
-    state.alive = false;
-    try {
-      ws.ping();
-    } catch {
-      // ignore
-    }
-  }
-}, HEARTBEAT_INTERVAL_MS);
-heartbeatTimer.unref?.();
 
 const server = createServer((req, res) => {
   void routeHttp(req, res).catch((err) => {
