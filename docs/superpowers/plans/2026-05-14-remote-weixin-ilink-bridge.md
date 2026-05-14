@@ -1824,7 +1824,7 @@ git commit -m "Add Weixin bridge settings panel"
 **Files:**
 - Modify: `remote/README.md`
 
-- [ ] **Step 1: Update Remote README**
+- [x] **Step 1: Update Remote README**
 
 Add a "Weixin iLink Bridge" section to `remote/README.md` after "Routes":
 
@@ -1853,7 +1853,7 @@ Plain Weixin text is routed to the selected Remote session's AI Chat surface.
 Direct terminal input requires `/term <command>` or `/keys <text>`.
 ```
 
-- [ ] **Step 2: Run full remote verification**
+- [x] **Step 2: Run full remote verification**
 
 Run:
 
@@ -1866,7 +1866,7 @@ npm run build:docker
 
 Expected: all commands pass.
 
-- [ ] **Step 3: Check repository status**
+- [x] **Step 3: Check repository status**
 
 Run:
 
@@ -1876,7 +1876,7 @@ git status --short
 
 Expected: only the intended `remote/` changes are shown. Existing unrelated untracked files such as `.claude/` and `remote/docs/` may still appear and must not be added.
 
-- [ ] **Step 4: Commit docs and final verification fixes**
+- [x] **Step 4: Commit docs and final verification fixes**
 
 ```bash
 git add remote/README.md

@@ -181,6 +181,29 @@ production must keep cookies marked `Secure` and front the server with HTTPS.
 - `GET /ws/browser?session=<key>` connects the browser after login.
 - `GET /ws/phantty?session=<key>` connects the shared Phantty RemoteClient.
 
+## Weixin iLink Bridge
+
+The Node.js Remote server can host a Weixin iLink Bot bridge. This is a Node
+deployment feature in v1; Cloudflare Worker deployment does not run the Weixin
+poller.
+
+Runtime state is stored under `REMOTE_DATA_DIR` (default `./data`):
+
+- `weixin/binding.json` stores the iLink bot token and bound user identifiers.
+- `weixin/settings.json` stores bridge enablement and target Remote session.
+- `weixin/sync_buf` stores the iLink update cursor.
+
+Authenticated routes:
+
+- `GET /api/weixin/settings`
+- `PUT /api/weixin/settings`
+- `POST /api/weixin/bind/start`
+- `GET /api/weixin/bind/status?qrcode=<session>`
+- `DELETE /api/weixin/bind`
+
+Plain Weixin text is routed to the selected Remote session's AI Chat surface.
+Direct terminal input requires `/term <command>` or `/keys <text>`.
+
 ## Relay Messages
 
 The Phantty client sends PTY bytes as:
