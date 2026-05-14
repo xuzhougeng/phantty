@@ -603,7 +603,7 @@ git commit -m "Add Weixin iLink client"
 - Create: `remote/src/server/bridge/weixin/binding.ts`
 - Test: `remote/test/server/weixin_binding.test.ts`
 
-- [ ] **Step 1: Write failing binding store tests**
+- [x] **Step 1: Write failing binding store tests**
 
 Create `remote/test/server/weixin_binding.test.ts`:
 
@@ -680,7 +680,7 @@ test("WeixinBindingStore unbind removes binding and sync buffer", async () => {
 });
 ```
 
-- [ ] **Step 2: Run failing tests**
+- [x] **Step 2: Run failing tests**
 
 Run:
 
@@ -691,7 +691,7 @@ npm run test:server
 
 Expected: FAIL because `binding.ts` does not exist.
 
-- [ ] **Step 3: Implement binding store**
+- [x] **Step 3: Implement binding store**
 
 Create `remote/src/server/bridge/weixin/binding.ts`:
 
@@ -807,7 +807,7 @@ async function writeAtomicText(path: string, value: string, mode: number): Promi
 }
 ```
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run:
 
@@ -819,7 +819,7 @@ npm run typecheck
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add remote/src/server/bridge/weixin/binding.ts remote/test/server/weixin_binding.test.ts
