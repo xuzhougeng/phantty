@@ -7,6 +7,7 @@
 const std = @import("std");
 const win32_backend = @import("apprt/win32.zig");
 const agent_detector = @import("agent_detector.zig");
+const agent_history = @import("agent_history.zig");
 
 pub const DEFAULT_NAME = "DeepSeek";
 pub const DEFAULT_BASE_URL = "https://api.deepseek.com";
@@ -271,8 +272,29 @@ pub const ApprovalView = struct {
     reason: []const u8,
 };
 
+/// History hooks may run on request worker threads as well as the UI thread.
+/// Consumers must treat the callback as asynchronous cross-thread delivery and
+/// take ownership of the provided self-contained snapshot event.
+pub const HistoryChangeHook = *const fn (HistoryChangeEvent) void;
+
+pub const HistoryChangeEvent = struct {
+    allocator: std.mem.Allocator,
+    record: agent_history.SessionRecord,
+
+    pub fn deinit(self: *HistoryChangeEvent) void {
+        agent_history.freeOwnedRecord(self.allocator, &self.record);
+        self.* = undefined;
+    }
+};
+
+const PendingHistoryChange = struct {
+    hook: HistoryChangeHook,
+    event: HistoryChangeEvent,
+};
+
 var g_agent_mutex: std.Thread.Mutex = .{};
 var g_agent_settings: AgentSettings = .{};
+var g_session_id_counter = std.atomic.Value(u64).init(1);
 threadlocal var g_tool_host: ?ToolHost = null;
 
 pub fn configureAgent(settings: AgentSettings) void {
@@ -303,6 +325,8 @@ pub const Session = struct {
     allocator: std.mem.Allocator,
     mutex: std.Thread.Mutex = .{},
     messages: std.ArrayListUnmanaged(Message) = .empty,
+    session_id_buf: [64]u8 = undefined,
+    session_id_len: usize = 0,
     input_buf: [INPUT_PROMPT_MAX_BYTES]u8 = undefined,
     input_len: usize = 0,
     input_cursor: usize = 0,
@@ -327,6 +351,9 @@ pub const Session = struct {
     reasoning_effort_len: usize = 0,
     stream: bool = false,
     agent_enabled: bool = false,
+    created_at_ms: i64 = 0,
+    updated_at_ms: i64 = 0,
+    history_on_change: ?HistoryChangeHook = null,
     request_inflight: bool = false,
     request_stopping: bool = false,
     request_thread: ?std.Thread = null,
@@ -349,6 +376,16 @@ pub const Session = struct {
         return self.reasoning_effort_buf[0..self.reasoning_effort_len];
     }
 
+    pub fn sessionId(self: *const Session) []const u8 {
+        return self.session_id_buf[0..self.session_id_len];
+    }
+
+    pub fn setHistoryChangeHook(self: *Session, hook: ?HistoryChangeHook) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.history_on_change = hook;
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         name: []const u8,
@@ -365,6 +402,9 @@ pub const Session = struct {
         session.* = .{
             .allocator = allocator,
         };
+        session.assignSessionId();
+        session.created_at_ms = std.time.milliTimestamp();
+        session.updated_at_ms = session.created_at_ms;
         session.copyTitle(if (name.len > 0) name else DEFAULT_NAME);
         session.copyBaseUrl(if (base_url.len > 0) base_url else DEFAULT_BASE_URL);
         session.copyModel(if (model_name.len > 0) model_name else DEFAULT_MODEL);
@@ -381,6 +421,41 @@ pub const Session = struct {
             } else |_| {}
         }
         session.setStatus("Ready");
+        return session;
+    }
+
+    pub fn initFromHistoryRecord(allocator: std.mem.Allocator, record: agent_history.SessionRecord) !*Session {
+        const session = try init(
+            allocator,
+            record.title,
+            record.base_url,
+            record.api_key,
+            record.model,
+            record.system_prompt,
+            if (record.thinking_enabled) "enabled" else "disabled",
+            record.reasoning_effort,
+            if (record.stream) "true" else "false",
+            if (record.agent_enabled) "true" else "false",
+        );
+        errdefer session.deinit();
+
+        session.mutex.lock();
+        defer session.mutex.unlock();
+        if (record.session_id.len > 0) session.copySessionId(record.session_id);
+        session.created_at_ms = record.created_at;
+        session.updated_at_ms = record.updated_at;
+        for (record.messages) |msg| {
+            try session.messages.append(allocator, .{
+                .role = switch (msg.role) {
+                    .user => .user,
+                    .assistant => .assistant,
+                    .tool => .tool,
+                },
+                .content = try allocator.dupe(u8, msg.content),
+                .reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null,
+                .usage_footer = if (msg.usage_footer) |footer| try allocator.dupe(u8, footer) else null,
+            });
+        }
         return session;
     }
 
@@ -435,9 +510,18 @@ pub const Session = struct {
     }
 
     pub fn setTitle(self: *Session, title_text: []const u8) void {
+        var history_change: ?PendingHistoryChange = null;
+        self.mutex.lock();
+        self.copyTitle(title_text);
+        history_change = self.captureHistoryChangeLocked();
+        self.mutex.unlock();
+        self.notifyHistoryChange(history_change);
+    }
+
+    pub fn toHistoryRecord(self: *Session, allocator: std.mem.Allocator) !agent_history.SessionRecord {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.copyTitle(title_text);
+        return self.toHistoryRecordLocked(allocator);
     }
 
     pub fn handleChar(self: *Session, codepoint: u21) void {
@@ -725,6 +809,7 @@ pub const Session = struct {
     }
 
     pub fn submit(self: *Session) void {
+        var history_change: ?PendingHistoryChange = null;
         self.mutex.lock();
         if (self.request_thread) |thread| {
             if (self.request_inflight) {
@@ -759,6 +844,7 @@ pub const Session = struct {
             self.mutex.unlock();
             return;
         };
+        history_change = self.captureHistoryChangeLocked();
         self.input_len = 0;
         self.input_cursor = 0;
         self.input_scroll_row = 0;
@@ -769,6 +855,7 @@ pub const Session = struct {
         const request = self.buildRequestLocked() catch {
             self.setStatusLocked("Could not prepare request");
             self.mutex.unlock();
+            self.notifyHistoryChange(history_change);
             return;
         };
 
@@ -777,6 +864,7 @@ pub const Session = struct {
         self.request_inflight = true;
         self.setStatusLocked("Thinking...");
         self.mutex.unlock();
+        self.notifyHistoryChange(history_change);
 
         const thread = std.Thread.spawn(.{}, requestThreadMain, .{request}) catch {
             request.deinit();
@@ -793,9 +881,12 @@ pub const Session = struct {
     }
 
     fn clearMessages(self: *Session) void {
+        var history_change: ?PendingHistoryChange = null;
         self.mutex.lock();
-        defer self.mutex.unlock();
-        if (self.request_inflight) return;
+        if (self.request_inflight) {
+            self.mutex.unlock();
+            return;
+        }
         for (self.messages.items) |msg| {
             self.allocator.free(msg.content);
             if (msg.reasoning) |reasoning| self.allocator.free(reasoning);
@@ -805,6 +896,9 @@ pub const Session = struct {
         self.scroll_px = 0;
         self.clearSelectionLocked();
         self.setStatusLocked("Cleared");
+        history_change = self.captureHistoryChangeLocked();
+        self.mutex.unlock();
+        self.notifyHistoryChange(history_change);
     }
 
     pub fn scrollBy(self: *Session, delta_px: f32) void {
@@ -1071,6 +1165,94 @@ pub const Session = struct {
             .started_ms = std.time.milliTimestamp(),
         };
         return req;
+    }
+
+    fn toHistoryRecordLocked(self: *Session, allocator: std.mem.Allocator) !agent_history.SessionRecord {
+        const messages = try allocator.alloc(agent_history.MessageRecord, self.messages.items.len);
+        var initialized: usize = 0;
+        errdefer {
+            while (initialized > 0) {
+                initialized -= 1;
+                agent_history.freeOwnedMessage(allocator, &messages[initialized]);
+            }
+            allocator.free(messages);
+        }
+
+        for (self.messages.items, 0..) |msg, i| {
+            messages[i] = .{
+                .role = switch (msg.role) {
+                    .user => .user,
+                    .assistant => .assistant,
+                    .tool => .tool,
+                },
+                .content = try allocator.dupe(u8, msg.content),
+                .reasoning = if (msg.reasoning) |reasoning| try allocator.dupe(u8, reasoning) else null,
+                .usage_footer = if (msg.usage_footer) |footer| try allocator.dupe(u8, footer) else null,
+            };
+            initialized += 1;
+        }
+
+        const session_id = try allocator.dupe(u8, self.sessionId());
+        errdefer allocator.free(session_id);
+        const session_title = try allocator.dupe(u8, self.title());
+        errdefer allocator.free(session_title);
+        const base_url = try allocator.dupe(u8, self.baseUrl());
+        errdefer allocator.free(base_url);
+        const api_key = try allocator.dupe(u8, self.apiKey());
+        errdefer allocator.free(api_key);
+        const model_name = try allocator.dupe(u8, self.model());
+        errdefer allocator.free(model_name);
+        const system_prompt = try allocator.dupe(u8, self.systemPrompt());
+        errdefer allocator.free(system_prompt);
+        const reasoning_effort = try allocator.dupe(u8, self.reasoningEffort());
+        errdefer allocator.free(reasoning_effort);
+
+        return .{
+            .session_id = session_id,
+            .title = session_title,
+            .base_url = base_url,
+            .api_key = api_key,
+            .model = model_name,
+            .system_prompt = system_prompt,
+            .thinking_enabled = self.thinking_enabled,
+            .reasoning_effort = reasoning_effort,
+            .stream = self.stream,
+            .agent_enabled = self.agent_enabled,
+            .created_at = self.created_at_ms,
+            .updated_at = self.updated_at_ms,
+            .messages = messages,
+        };
+    }
+
+    fn captureHistoryChangeLocked(self: *Session) ?PendingHistoryChange {
+        self.updated_at_ms = std.time.milliTimestamp();
+        const hook = self.history_on_change orelse return null;
+        const record = self.toHistoryRecordLocked(self.allocator) catch return null;
+        return .{
+            .hook = hook,
+            .event = .{
+                .allocator = self.allocator,
+                .record = record,
+            },
+        };
+    }
+
+    fn notifyHistoryChange(_: *Session, change: ?PendingHistoryChange) void {
+        if (change) |pending| pending.hook(pending.event);
+    }
+
+    fn assignSessionId(self: *Session) void {
+        const counter = g_session_id_counter.fetchAdd(1, .monotonic);
+        const text = std.fmt.bufPrint(&self.session_id_buf, "session-{d}-{d}", .{ std.time.milliTimestamp(), counter }) catch {
+            self.copySessionId("session");
+            return;
+        };
+        self.session_id_len = text.len;
+    }
+
+    fn copySessionId(self: *Session, value: []const u8) void {
+        self.session_id_len = @min(value.len, self.session_id_buf.len);
+        @memcpy(self.session_id_buf[0..self.session_id_len], value[0..self.session_id_len]);
     }
 
     fn copyTitle(self: *Session, value: []const u8) void {
@@ -1477,8 +1659,12 @@ fn appendAssistantResult(session: *Session, result: ApiResult, started_ms: i64) 
         return;
     }
 
+    var history_change: ?PendingHistoryChange = null;
     session.mutex.lock();
-    defer session.mutex.unlock();
+    defer {
+        session.mutex.unlock();
+        session.notifyHistoryChange(history_change);
+    }
     if (session.closing.load(.acquire)) return;
     if (session.stop_requested.load(.acquire)) {
         session.request_inflight = false;
@@ -1521,6 +1707,7 @@ fn appendAssistantResult(session: *Session, result: ApiResult, started_ms: i64) 
     session.collapseAutoExpandedDetailsLocked();
     session.scroll_px = 1_000_000;
     session.setCompletionStatusLocked(started_ms, result.usage);
+    history_change = session.captureHistoryChangeLocked();
 }
 
 fn appendProgressMessage(session: *Session, text: []const u8) !void {
@@ -1529,8 +1716,12 @@ fn appendProgressMessage(session: *Session, text: []const u8) !void {
     const content = try allocator.dupe(u8, text);
     errdefer allocator.free(content);
 
+    var history_change: ?PendingHistoryChange = null;
     session.mutex.lock();
-    defer session.mutex.unlock();
+    defer {
+        session.mutex.unlock();
+        session.notifyHistoryChange(history_change);
+    }
     if (sessionCancelled(session)) return error.Canceled;
     try session.messages.append(allocator, .{
         .role = .tool,
@@ -1541,14 +1732,19 @@ fn appendProgressMessage(session: *Session, text: []const u8) !void {
     });
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Running tools...");
+    history_change = session.captureHistoryChangeLocked();
 }
 
 fn beginAssistantStream(session: *Session) !usize {
     const allocator = session.allocator;
     if (sessionCancelled(session)) return error.Canceled;
 
+    var history_change: ?PendingHistoryChange = null;
     session.mutex.lock();
-    defer session.mutex.unlock();
+    defer {
+        session.mutex.unlock();
+        session.notifyHistoryChange(history_change);
+    }
     if (sessionCancelled(session)) return error.Canceled;
 
     const content = try allocator.dupe(u8, "");
@@ -1562,6 +1758,7 @@ fn beginAssistantStream(session: *Session) !usize {
     });
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Streaming...");
+    history_change = session.captureHistoryChangeLocked();
     return session.messages.items.len - 1;
 }
 
@@ -1570,8 +1767,12 @@ fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_del
     const allocator = session.allocator;
     if (sessionCancelled(session)) return;
 
+    var history_change: ?PendingHistoryChange = null;
     session.mutex.lock();
-    defer session.mutex.unlock();
+    defer {
+        session.mutex.unlock();
+        session.notifyHistoryChange(history_change);
+    }
     if (sessionCancelled(session)) return;
     if (message_idx >= session.messages.items.len) return error.StreamMessageMissing;
 
@@ -1593,6 +1794,7 @@ fn appendAssistantStreamDelta(session: *Session, message_idx: usize, content_del
     }
     session.scroll_px = 1_000_000;
     session.setStatusLocked("Streaming...");
+    history_change = session.captureHistoryChangeLocked();
 }
 
 fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64, usage: ?ApiUsage) void {
@@ -1602,8 +1804,12 @@ fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64,
         return;
     }
 
+    var history_change: ?PendingHistoryChange = null;
     session.mutex.lock();
-    defer session.mutex.unlock();
+    defer {
+        session.mutex.unlock();
+        session.notifyHistoryChange(history_change);
+    }
     if (session.closing.load(.acquire)) return;
     if (session.stop_requested.load(.acquire)) {
         session.request_inflight = false;
@@ -1622,6 +1828,7 @@ fn finishAssistantStream(session: *Session, message_idx: usize, started_ms: i64,
             if (msg.usage_footer) |old_footer| session.allocator.free(old_footer);
             msg.usage_footer = footer;
         }
+        history_change = session.captureHistoryChangeLocked();
     }
     session.request_inflight = false;
     session.collapseAutoExpandedDetailsLocked();
@@ -2960,6 +3167,154 @@ fn appendJsonString(allocator: std.mem.Allocator, out: *std.ArrayListUnmanaged(u
 
 fn isDeepSeekBaseUrl(base_url: []const u8) bool {
     return std.ascii.indexOfIgnoreCase(base_url, "deepseek.com") != null;
+}
+
+const TestHistoryHookCapture = struct {
+    event: ?HistoryChangeEvent = null,
+    calls: usize = 0,
+
+    fn deinit(self: *TestHistoryHookCapture) void {
+        if (self.event) |*event| {
+            event.deinit();
+            self.event = null;
+        }
+        self.calls = 0;
+    }
+};
+
+var g_test_history_hook_capture: ?*TestHistoryHookCapture = null;
+
+fn testHistoryHookCaptureCallback(event: HistoryChangeEvent) void {
+    var owned = event;
+    const capture = g_test_history_hook_capture orelse {
+        owned.deinit();
+        return;
+    };
+    if (capture.event) |*previous| {
+        previous.deinit();
+    }
+    capture.event = owned;
+    capture.calls += 1;
+}
+
+test "ai_chat: session serializes to history record" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "History Test",
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    session.mutex.lock();
+    try session.messages.append(allocator, .{ .role = .user, .content = try allocator.dupe(u8, "hello") });
+    session.mutex.unlock();
+
+    var record = try session.toHistoryRecord(allocator);
+    defer agent_history.freeOwnedRecord(allocator, &record);
+
+    try std.testing.expect(record.agent_enabled);
+    try std.testing.expectEqual(@as(usize, 1), record.messages.len);
+    try std.testing.expectEqualStrings("hello", record.messages[0].content);
+}
+
+test "ai_chat: session loads from history record" {
+    const allocator = std.testing.allocator;
+    var record = try agent_history.cloneRecord(allocator, .{
+        .session_id = "session-1",
+        .title = "Saved",
+        .base_url = "https://api.example.com",
+        .api_key = "secret",
+        .model = "model-a",
+        .system_prompt = "system",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .agent_enabled = true,
+        .created_at = 1,
+        .updated_at = 2,
+        .messages = &.{
+            .{ .role = .user, .content = "hello", .reasoning = null, .usage_footer = null },
+        },
+    });
+    defer agent_history.freeOwnedRecord(allocator, &record);
+
+    const session = try Session.initFromHistoryRecord(allocator, record);
+    defer session.deinit();
+
+    try std.testing.expectEqualStrings("session-1", session.sessionId());
+    try std.testing.expectEqual(@as(usize, 1), session.messages.items.len);
+}
+
+test "ai_chat: history hook receives self-owning snapshot event" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "History Hook",
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    var capture = TestHistoryHookCapture{};
+    defer capture.deinit();
+    g_test_history_hook_capture = &capture;
+    defer g_test_history_hook_capture = null;
+
+    session.setHistoryChangeHook(testHistoryHookCaptureCallback);
+    try appendProgressMessage(session, "running tool");
+
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expect(capture.event != null);
+    try std.testing.expectEqual(@as(usize, 1), capture.event.?.record.messages.len);
+    try std.testing.expectEqualStrings("running tool", capture.event.?.record.messages[0].content);
+    try std.testing.expect(capture.event.?.record.messages[0].content.ptr != session.messages.items[0].content.ptr);
+
+    capture.deinit();
+    try std.testing.expect(capture.event == null);
+}
+
+test "ai_chat: setTitle emits history hook snapshot" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Before",
+        "https://api.example.com",
+        "secret",
+        "model-a",
+        "system",
+        "enabled",
+        "high",
+        "false",
+        "true",
+    );
+    defer session.deinit();
+
+    var capture = TestHistoryHookCapture{};
+    defer capture.deinit();
+    g_test_history_hook_capture = &capture;
+    defer g_test_history_hook_capture = null;
+
+    session.setHistoryChangeHook(testHistoryHookCaptureCallback);
+    session.setTitle("After");
+
+    try std.testing.expectEqual(@as(usize, 1), capture.calls);
+    try std.testing.expect(capture.event != null);
+    try std.testing.expectEqualStrings("After", capture.event.?.record.title);
+    try std.testing.expectEqualStrings("After", session.title());
 }
 
 test "ai chat endpoint normalization" {

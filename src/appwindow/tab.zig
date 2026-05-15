@@ -12,6 +12,7 @@ const win32_backend = @import("../apprt/win32.zig");
 const remote_client = @import("../remote_client.zig");
 const session_persist = @import("../session_persist.zig");
 const ai_chat = @import("../ai_chat.zig");
+const agent_history = @import("../agent_history.zig");
 
 const CursorStyle = Config.CursorStyle;
 const Selection = Surface.Selection;
@@ -98,6 +99,7 @@ pub threadlocal var g_shell_cmd_buf: [256]u16 = undefined;
 pub threadlocal var g_shell_cmd_len: usize = 0;
 pub threadlocal var g_scrollback_limit: u32 = 10_000_000;
 pub threadlocal var g_remote_client: ?*remote_client.Client = null;
+pub threadlocal var g_ai_history_change_hook: ?ai_chat.HistoryChangeHook = null;
 
 // Forced title from config (overrides all tab titles)
 pub threadlocal var g_forced_title: ?[]const u8 = null;
@@ -161,6 +163,22 @@ pub fn activeAiChat() ?*ai_chat.Session {
     const t = g_tabs[g_active_tab] orelse return null;
     if (t.kind != .ai_chat) return null;
     return t.ai_chat_session;
+}
+
+pub fn findAiTabBySessionId(session_id: []const u8) ?usize {
+    for (0..g_tab_count) |idx| {
+        const t = g_tabs[idx] orelse continue;
+        if (t.kind != .ai_chat) continue;
+        const session = t.ai_chat_session orelse continue;
+        if (std.mem.eql(u8, session.sessionId(), session_id)) return idx;
+    }
+    return null;
+}
+
+pub fn switchToAiTabBySessionId(session_id: []const u8) bool {
+    const idx = findAiTabBySessionId(session_id) orelse return false;
+    switchTab(idx);
+    return true;
 }
 
 fn splitSpawnCommand(
@@ -352,6 +370,7 @@ pub fn spawnAiChatTab(
         std.debug.print("Failed to create AI Chat session\n", .{});
         return false;
     };
+    installAiChatHistoryHook(session);
 
     const t = allocator.create(TabState) catch {
         session.deinit();
@@ -367,6 +386,33 @@ pub fn spawnAiChatTab(
     g_tab_count += 1;
 
     std.debug.print("New AI Chat tab spawned (count={}), active: {}\n", .{ g_tab_count, g_active_tab });
+    return true;
+}
+
+pub fn spawnAiChatTabFromHistoryRecord(allocator: std.mem.Allocator, record: agent_history.SessionRecord) bool {
+    if (switchToAiTabBySessionId(record.session_id)) return true;
+    if (g_tab_count >= MAX_TABS) return false;
+
+    const session = ai_chat.Session.initFromHistoryRecord(allocator, record) catch {
+        std.debug.print("Failed to restore AI Chat session from history\n", .{});
+        return false;
+    };
+    installAiChatHistoryHook(session);
+
+    const t = allocator.create(TabState) catch {
+        session.deinit();
+        return false;
+    };
+    t.kind = .ai_chat;
+    t.tree = .empty;
+    t.focused = .root;
+    t.ai_chat_session = session;
+
+    g_tabs[g_tab_count] = t;
+    g_active_tab = g_tab_count;
+    g_tab_count += 1;
+
+    std.debug.print("Restored AI Chat tab from history (count={}), active: {}\n", .{ g_tab_count, g_active_tab });
     return true;
 }
 
@@ -415,6 +461,10 @@ pub fn switchTab(idx: usize) void {
             entry.surface.surface_renderer.cells_valid = false;
         }
     }
+}
+
+fn installAiChatHistoryHook(session: *ai_chat.Session) void {
+    session.setHistoryChangeHook(g_ai_history_change_hook);
 }
 
 // ============================================================================

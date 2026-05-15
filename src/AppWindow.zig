@@ -20,6 +20,7 @@ const remote = @import("remote_client.zig");
 const remote_snapshot = @import("remote_snapshot.zig");
 const memory_debug = @import("memory_debug.zig");
 const agent_detector = @import("agent_detector.zig");
+const agent_history = @import("agent_history.zig");
 pub const ai_chat = @import("ai_chat.zig");
 pub const tab = @import("appwindow/tab.zig");
 pub const font = @import("font/manager.zig");
@@ -43,6 +44,7 @@ pub const browser_panel = if (build_options.webview)
 else
     @import("browser_panel_stub.zig");
 pub const ai_chat_renderer = @import("renderer/ai_chat_renderer.zig");
+const log = std.log.scoped(.app_window);
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -71,6 +73,9 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
 
     // Store app pointer globally for requestNewWindow
     g_app = app;
+
+    try ensureGlobalAgentHistoryStore(allocator);
+    tab.g_ai_history_change_hook = saveAiHistoryChangeEvent;
 
     // Apply config from App to globals
     g_theme = app.theme;
@@ -152,9 +157,9 @@ pub fn deinit(self: *AppWindow) void {
     // from app.windows by the caller in App.run/windowThreadMain.)
     //
     // Errors are logged inside dumpSessionToFile and must not block shutdown.
+    var is_last_window = false;
     {
         const restore_enabled = self.app.restore_tabs_on_startup;
-        var is_last_window = false;
         {
             self.app.mutex.lock();
             defer self.app.mutex.unlock();
@@ -175,6 +180,7 @@ pub fn deinit(self: *AppWindow) void {
     }
     tab.g_tab_count = 0;
     tab.g_remote_client = null;
+    if (is_last_window) deinitGlobalAgentHistoryStore(self.allocator);
     browser_panel.deinit();
 }
 
@@ -184,6 +190,11 @@ pub fn deinit(self: *AppWindow) void {
 
 // App pointer for requestNewWindow
 pub threadlocal var g_app: ?*App = null;
+var g_agent_history_mutex: std.Thread.Mutex = .{};
+pub var g_agent_history: ?*agent_history.Store = null;
+var g_agent_history_dirty: bool = false;
+var g_agent_history_next_flush_ms: i64 = 0;
+const AGENT_HISTORY_FLUSH_DEBOUNCE_MS: i64 = 350;
 
 // Initial CWD for this window (used when spawning the first tab)
 threadlocal var g_initial_cwd_buf: [260]u16 = undefined;
@@ -360,6 +371,13 @@ fn syncActiveSurfaceCaches() void {
     cell_renderer.g_current_render_surface = activeSurface();
 }
 
+pub fn handleActiveSurfaceChangeWithinTab() void {
+    syncVisibleFileExplorerForActiveTab();
+    syncActiveSurfaceCaches();
+    g_force_rebuild = true;
+    g_cells_valid = false;
+}
+
 fn clearUiStateOnTabChange() void {
     input.g_selecting = false;
     input.g_sidebar_resize_hover = false;
@@ -377,6 +395,7 @@ fn clearUiStateOnTabChange() void {
     overlays.g_resize_overlay_visible = false;
     overlays.g_resize_overlay_opacity = 0;
     overlays.g_resize_overlay_suppress_until = std.time.milliTimestamp() + 100;
+    syncVisibleFileExplorerForActiveTab();
     syncActiveSurfaceCaches();
     requestImmediateLayoutResize();
     g_force_rebuild = true;
@@ -413,6 +432,110 @@ fn getActiveCwd(cwd_buf: *[260]u16) ?[*:0]const u16 {
         }
     }
     return null;
+}
+
+fn ensureGlobalAgentHistoryStore(allocator: std.mem.Allocator) !void {
+    g_agent_history_mutex.lock();
+    defer g_agent_history_mutex.unlock();
+
+    if (g_agent_history != null) return;
+
+    const store = try allocator.create(agent_history.Store);
+    errdefer allocator.destroy(store);
+    store.* = try agent_history.loadDefault(allocator);
+    g_agent_history = store;
+    g_agent_history_dirty = false;
+    g_agent_history_next_flush_ms = 0;
+}
+
+fn deinitGlobalAgentHistoryStore(allocator: std.mem.Allocator) void {
+    flushAgentHistoryStoreIfDirty(true);
+
+    g_agent_history_mutex.lock();
+    defer g_agent_history_mutex.unlock();
+
+    if (g_agent_history) |store| {
+        store.deinit();
+        allocator.destroy(store);
+        g_agent_history = null;
+    }
+    g_agent_history_dirty = false;
+    g_agent_history_next_flush_ms = 0;
+}
+
+fn saveAiHistoryChangeEvent(event: ai_chat.HistoryChangeEvent) void {
+    var owned_event = event;
+    defer owned_event.deinit();
+
+    g_agent_history_mutex.lock();
+    defer g_agent_history_mutex.unlock();
+
+    const store = g_agent_history orelse return;
+    store.upsertRecord(owned_event.record) catch |err| {
+        log.warn("failed to clone AI history update for session {s}: {}", .{ owned_event.record.session_id, err });
+        return;
+    };
+    if (!g_agent_history_dirty) {
+        g_agent_history_dirty = true;
+        g_agent_history_next_flush_ms = std.time.milliTimestamp() + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
+    }
+}
+
+fn flushAgentHistoryStoreIfDirty(force: bool) void {
+    const now = std.time.milliTimestamp();
+    var json: ?[]u8 = null;
+    var path: ?[]const u8 = null;
+    var snapshot_allocator: ?std.mem.Allocator = null;
+
+    g_agent_history_mutex.lock();
+    if (!g_agent_history_dirty) {
+        g_agent_history_mutex.unlock();
+        return;
+    }
+    if (!force and now < g_agent_history_next_flush_ms) {
+        g_agent_history_mutex.unlock();
+        return;
+    }
+
+    const store = g_agent_history orelse {
+        g_agent_history_mutex.unlock();
+        return;
+    };
+    snapshot_allocator = store.allocator;
+    json = store.toJsonString(store.allocator) catch |err| {
+        log.warn("failed to snapshot agent history store for flush: {}", .{err});
+        g_agent_history_next_flush_ms = now + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
+        g_agent_history_mutex.unlock();
+        return;
+    };
+    path = agent_history.defaultPath(store.allocator) catch |err| {
+        log.warn("failed to resolve agent history path for flush: {}", .{err});
+        store.allocator.free(json.?);
+        g_agent_history_next_flush_ms = now + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
+        g_agent_history_mutex.unlock();
+        return;
+    };
+    g_agent_history_dirty = false;
+    g_agent_history_next_flush_ms = 0;
+    g_agent_history_mutex.unlock();
+
+    agent_history.saveJsonToPath(path.?, json.?) catch |err| {
+        log.warn("failed to flush agent history store: {}", .{err});
+        g_agent_history_mutex.lock();
+        if (!g_agent_history_dirty) {
+            g_agent_history_dirty = true;
+            g_agent_history_next_flush_ms = std.time.milliTimestamp() + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
+        }
+        snapshot_allocator.?.free(path.?);
+        snapshot_allocator.?.free(json.?);
+        g_agent_history_mutex.unlock();
+        return;
+    };
+
+    g_agent_history_mutex.lock();
+    snapshot_allocator.?.free(path.?);
+    snapshot_allocator.?.free(json.?);
+    g_agent_history_mutex.unlock();
 }
 
 fn spawnTabWithCwd(allocator: std.mem.Allocator, cwd: ?[*:0]const u16) bool {
@@ -460,13 +583,102 @@ pub fn spawnAiChatTab(
     return true;
 }
 
+pub fn reopenAiChatTabFromHistorySessionId(session_id: []const u8) bool {
+    if (tab.switchToAiTabBySessionId(session_id)) {
+        clearUiStateOnTabChange();
+        return true;
+    }
+
+    const allocator = g_allocator orelse return false;
+    g_agent_history_mutex.lock();
+    const record = if (g_agent_history) |store|
+        store.cloneRecordBySessionId(allocator, session_id) catch null
+    else
+        null;
+    g_agent_history_mutex.unlock();
+
+    var owned_record = record orelse return false;
+    defer agent_history.freeOwnedRecord(allocator, &owned_record);
+
+    if (!tab.spawnAiChatTabFromHistoryRecord(allocator, owned_record)) return false;
+    clearUiStateOnTabChange();
+    return true;
+}
+
+pub fn syncVisibleFileExplorerForActiveTab() void {
+    if (!file_explorer.g_visible) return;
+
+    const is_ai_tab = activeAiChat() != null;
+    if (is_ai_tab) {
+        file_explorer.syncPanelForTabKind(true);
+        syncFileExplorerAgentHistoryRows();
+        return;
+    }
+
+    syncFileExplorerToActiveTerminalSurface();
+}
+
+pub fn syncFileExplorerAgentHistoryRows() void {
+    g_agent_history_mutex.lock();
+    defer g_agent_history_mutex.unlock();
+
+    if (g_agent_history) |store| {
+        file_explorer.syncAgentHistoryRows(store);
+        return;
+    }
+
+    var empty_store = agent_history.Store.init(std.heap.page_allocator);
+    defer empty_store.deinit();
+    file_explorer.syncAgentHistoryRows(&empty_store);
+}
+
+fn syncFileExplorerToActiveTerminalSurface() void {
+    const surface = activeSurface() orelse {
+        file_explorer.syncPanelForTabKind(false);
+        return;
+    };
+
+    switch (surface.launch_kind) {
+        .ssh => {
+            if (surface.ssh_connection) |conn| {
+                file_explorer.syncPanelForTerminalTarget(.{
+                    .remote = .{
+                        .conn = &conn,
+                        .cwd = surface.getCwd() orelse "",
+                    },
+                });
+                return;
+            }
+            file_explorer.syncPanelForTabKind(false);
+        },
+        .wsl => {
+            file_explorer.syncPanelForTerminalTarget(.{ .wsl = surface.getCwd() orelse "~" });
+        },
+        .windows => {
+            if (surface.getCwd()) |unix_path| {
+                var wpath: [260]u16 = undefined;
+                if (wsl_paths.unixPathToWindows(unix_path, &wpath)) |wlen| {
+                    var utf8_buf: [260]u8 = undefined;
+                    const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, wpath[0..wlen]) catch 0;
+                    if (utf8_len > 0) {
+                        file_explorer.syncPanelForTerminalTarget(.{ .local = utf8_buf[0..utf8_len] });
+                        return;
+                    }
+                }
+            }
+            if (surface.getInitialCwd()) |initial_cwd| {
+                file_explorer.syncPanelForTerminalTarget(.{ .local = initial_cwd });
+                return;
+            }
+            file_explorer.syncPanelForTabKind(false);
+        },
+    }
+}
+
 pub fn closeTab(idx: usize) void {
     const allocator = g_allocator orelse return;
     tab.closeTab(idx, allocator);
-    input.g_selecting = false;
-    syncActiveSurfaceCaches();
-    g_force_rebuild = true;
-    g_cells_valid = false;
+    clearUiStateOnTabChange();
 }
 
 pub fn closeFocusedSplitWouldCloseWindow() bool {
@@ -496,11 +708,10 @@ pub fn splitFocusedReturningSurface(direction: SplitTree.Split.Direction) ?*Surf
                 overlays.scheduleSshPasswordForSurface(surface, pw);
         }
     }
+    handleActiveSurfaceChangeWithinTab();
     {
         overlays.g_resize_active = false;
         requestImmediateLayoutResize();
-        g_force_rebuild = true;
-        g_cells_valid = false;
     }
     return surface;
 }
@@ -510,16 +721,11 @@ pub fn closeFocusedSplit() void {
     switch (tab.closeFocusedSplit(allocator)) {
         .closed_split => {
             input.g_selecting = false;
-            syncActiveSurfaceCaches();
+            handleActiveSurfaceChangeWithinTab();
             requestImmediateLayoutResize();
-            g_force_rebuild = true;
-            g_cells_valid = false;
         },
         .closed_tab => {
-            input.g_selecting = false;
-            syncActiveSurfaceCaches();
-            g_force_rebuild = true;
-            g_cells_valid = false;
+            clearUiStateOnTabChange();
         },
         .close_window => {
             split_layout.invalidateCachedRects();
@@ -533,8 +739,7 @@ pub fn closeFocusedSplit() void {
 pub fn gotoSplit(direction: SplitTree.Goto) void {
     const allocator = g_allocator orelse return;
     if (tab.gotoSplit(allocator, direction)) {
-        g_force_rebuild = true;
-        g_cells_valid = false;
+        handleActiveSurfaceChangeWithinTab();
     }
 }
 
@@ -2433,6 +2638,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.tickSessionLauncher();
         file_explorer.tickAsync();
         maybePrintMemoryDebug(std.time.milliTimestamp());
+        flushAgentHistoryStoreIfDirty(false);
 
         // Process pending resize (coalesced, like Ghostty)
         // We wait for RESIZE_COALESCE_MS after last resize event before applying.

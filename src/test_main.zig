@@ -7,6 +7,7 @@ const app_metadata = @import("app_metadata.zig");
 
 comptime {
     _ = @import("ai_chat.zig");
+    _ = @import("agent_history.zig");
     _ = @import("ai_chat_composer_layout.zig");
     _ = @import("agent_detector.zig");
     _ = @import("scp.zig");
