@@ -24,6 +24,7 @@ comptime {
     _ = @import("remote_snapshot.zig");
     _ = @import("selection_unit.zig");
     _ = @import("session_persist.zig");
+    _ = @import("skill_registry.zig");
     _ = @import("scrollbar_model.zig");
     _ = @import("ssh_prompt.zig");
     _ = @import("split_tree.zig");
