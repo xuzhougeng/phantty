@@ -445,3 +445,48 @@ test "skill_registry: invalid markdown without frontmatter fails" {
         loadSkillSnapshot(std.testing.allocator, tmp.dir, "skills", "bad"),
     );
 }
+
+const EvalCase = struct {
+    name: []const u8,
+    skill: []const u8,
+    expected_name: ?[]const u8 = null,
+    expected_source: ?[]const u8 = null,
+    expected_contains: ?[]const u8 = null,
+};
+
+test "skill_registry eval: fixture skills load expected snapshots" {
+    const allocator = std.testing.allocator;
+    const cases_bytes = try std.fs.cwd().readFileAlloc(
+        allocator,
+        "tests/eval/skill-load-cases.json",
+        64 * 1024,
+    );
+    defer allocator.free(cases_bytes);
+
+    var parsed = try std.json.parseFromSlice([]EvalCase, allocator, cases_bytes, .{
+        .ignore_unknown_fields = true,
+    });
+    defer parsed.deinit();
+
+    for (parsed.value) |case| {
+        if (case.expected_name) |expected_name| {
+            var snapshot = try loadSkillSnapshot(allocator, std.fs.cwd(), "tests/eval/skills", case.skill);
+            defer snapshot.deinit(allocator);
+
+            try std.testing.expectEqualStrings(expected_name, snapshot.name);
+            if (case.expected_source) |expected_source| {
+                try std.testing.expectEqualStrings(expected_source, snapshot.source);
+            }
+            if (case.expected_contains) |needle| {
+                try std.testing.expect(
+                    std.mem.indexOf(u8, snapshot.content, needle) != null,
+                );
+            }
+        } else {
+            try std.testing.expectError(
+                LookupError.SkillNotFound,
+                loadSkillSnapshot(allocator, std.fs.cwd(), "tests/eval/skills", case.skill),
+            );
+        }
+    }
+}

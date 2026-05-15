@@ -1,0 +1,32 @@
+[
+  {
+    "name": "loads pdf by frontmatter name",
+    "skill": "pdf",
+    "expected_name": "pdf",
+    "expected_source": "tests/eval/skills/pdf",
+    "expected_contains": "Use this skill when the user asks to inspect or summarize PDF documents.",
+    "tags": ["clear-hit", "en"]
+  },
+  {
+    "name": "loads browser by directory alias",
+    "skill": "browser",
+    "expected_name": "web",
+    "expected_source": "tests/eval/skills/browser",
+    "expected_contains": "Use browser tools only when live web interaction is required.",
+    "tags": ["alias", "browser"]
+  },
+  {
+    "name": "loads browser by stable skill name",
+    "skill": "web",
+    "expected_name": "web",
+    "expected_source": "tests/eval/skills/browser",
+    "expected_contains": "Use browser tools only when live web interaction is required.",
+    "tags": ["clear-hit", "browser"]
+  },
+  {
+    "name": "does not over-match unknown skill",
+    "skill": "spreadsheet",
+    "expected_name": null,
+    "tags": ["no-match"]
+  }
+]
