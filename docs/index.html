@@ -100,7 +100,7 @@ nothing to commit, working tree clean
           </div>
           <div class="feature">
             <h3>AI agent tabs</h3>
-            <p>Chat tabs can act as local agents: read terminal snapshots, run PowerShell, and type into opened SSH sessions with an approval card.</p>
+            <p>Chat tabs can act as local agents: read terminal snapshots, run PowerShell, and type into opened SSH sessions with an approval card. The command center now includes <code>New Agent</code> for a direct agent launch path and <code>Select Agent History</code> for reopening saved conversations without leaving the picker.</p>
           </div>
           <div class="feature">
             <h3>453 themes built-in</h3>
@@ -230,6 +230,27 @@ ai-agent-output-limit  = 16384</code></pre>
           <div><span class="label">Paste text</span><span class="keys"><kbd>Ctrl</kbd><kbd>V</kbd></span></div>
           <div><span class="label">Paste clipboard image</span><span class="keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>V</kbd></span></div>
           <div><span class="label">Open config file</span><span class="keys"><kbd>Ctrl</kbd><kbd>,</kbd></span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="agent-workflows" class="section">
+      <div class="container">
+        <h2>Agent workflows</h2>
+        <p class="section-lead">Phantty now has two fast paths for agent work: a direct command-center launch path, and a persisted history picker for getting back to old conversations.</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>New Agent from the command center</h3>
+            <p>Press <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd>, run <code>New Agent</code>, and Phantty immediately opens a new Agent tab with your default AI configuration. If no default AI profile is available yet, Phantty falls back to the AI configuration form instead of opening a broken tab.</p>
+          </div>
+          <div class="feature">
+            <h3>Select Agent History</h3>
+            <p>Run <code>Select Agent History</code> from the command center to open a command-center-native picker of saved agent sessions. It uses the same persisted history store as the sidebar, but keeps its own command-palette navigation model.</p>
+          </div>
+          <div class="feature">
+            <h3>Left sidebar history page</h3>
+            <p>On AI/Agent tabs, <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>E</kbd> switches the left panel to <code>AGENT History</code>. On terminal tabs the same shortcut still shows the file explorer, so the sidebar follows the active tab type instead of trying to mix files and conversations in one list.</p>
+          </div>
         </div>
       </div>
     </section>

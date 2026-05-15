@@ -100,7 +100,7 @@
           </div>
           <div class="feature">
             <h3>AI Agent 标签</h3>
-            <p>AI Chat 可以变成桌面 Agent：读取终端快照、运行本地 PowerShell，并在确认后向已打开的 SSH 会话输入命令。</p>
+            <p>AI Chat 可以变成桌面 Agent：读取终端快照、运行本地 PowerShell，并在确认后向已打开的 SSH 会话输入命令。现在命令面板里还提供了 <code>New Agent</code> 直开入口，以及 <code>Select Agent History</code> 用来直接恢复历史对话。</p>
           </div>
           <div class="feature">
             <h3>内置 453 款主题</h3>
@@ -230,6 +230,27 @@ ai-agent-output-limit  = 16384</code></pre>
           <div><span class="label">粘贴文本</span><span class="keys"><kbd>Ctrl</kbd><kbd>V</kbd></span></div>
           <div><span class="label">粘贴剪贴板图片</span><span class="keys"><kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>V</kbd></span></div>
           <div><span class="label">打开配置文件</span><span class="keys"><kbd>Ctrl</kbd><kbd>,</kbd></span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="agent-workflows" class="section">
+      <div class="container">
+        <h2>Agent 工作流</h2>
+        <p class="section-lead">Phantty 现在提供两条更快的 Agent 路径：一条是命令面板里的直接启动入口，另一条是可持久化恢复的历史会话选择器。</p>
+        <div class="feature-grid">
+          <div class="feature">
+            <h3>命令面板里的 New Agent</h3>
+            <p>按 <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>P</kbd>，运行 <code>New Agent</code>，Phantty 会直接用默认 AI 配置打开一个新的 Agent 标签。如果当前还没有可用的默认 AI profile，就会退回 AI 配置表单，而不是打开一个不可用的空标签。</p>
+          </div>
+          <div class="feature">
+            <h3>Select Agent History</h3>
+            <p>在命令面板中运行 <code>Select Agent History</code>，会打开一个命令面板原生的历史会话选择器。它和左侧栏共用同一份持久化历史数据，但保留各自独立的选择与导航状态。</p>
+          </div>
+          <div class="feature">
+            <h3>左侧栏里的 Agent History 页面</h3>
+            <p>在 AI/Agent 标签里按 <kbd>Ctrl</kbd><kbd>Shift</kbd><kbd>E</kbd>，左侧栏会切到 <code>AGENT History</code>。在终端标签里同一个快捷键仍然显示文件浏览器，所以侧栏会跟随当前标签类型，而不是把文件和会话历史混在同一个列表里。</p>
+          </div>
         </div>
       </div>
     </section>
