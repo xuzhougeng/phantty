@@ -362,15 +362,21 @@ test "skill_registry: snapshot is deterministic and includes hash" {
     var second_snapshot = try loadSkillSnapshot(std.testing.allocator, tmp.dir, "skills", "pdf");
     defer second_snapshot.deinit(std.testing.allocator);
 
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(skill_md);
+    var expected_hash: [16]u8 = undefined;
+    _ = std.fmt.bufPrint(&expected_hash, "{x:0>16}", .{hasher.final()}) catch unreachable;
+
     const expected_content = try std.fmt.allocPrint(
         std.testing.allocator,
         "# Skill: pdf\nsource: skills/pdf\nhash: {s}\n\n{s}",
-        .{ snapshot.hash_hex[0..], skill_md },
+        .{ expected_hash[0..], skill_md },
     );
     defer std.testing.allocator.free(expected_content);
 
     try std.testing.expectEqualStrings("pdf", snapshot.name);
     try std.testing.expectEqualStrings("skills/pdf", snapshot.source);
+    try std.testing.expectEqualSlices(u8, expected_hash[0..], snapshot.hash_hex[0..]);
     try std.testing.expectEqualStrings(expected_content, snapshot.content);
     try std.testing.expectEqualSlices(u8, snapshot.hash_hex[0..], second_snapshot.hash_hex[0..]);
     try std.testing.expectEqualStrings(snapshot.content, second_snapshot.content);
