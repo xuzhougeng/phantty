@@ -478,41 +478,8 @@ pub fn toggleSidebar() void {
 
 pub fn toggleFileExplorer() void {
     file_explorer.toggle();
-    // Set root to the active surface each time the explorer is opened.
     if (file_explorer.g_visible) {
-        if (tab.activeSurface()) |surface| {
-            if (surface.launch_kind == .ssh) {
-                // SSH session: enter remote mode
-                if (surface.ssh_connection) |conn| {
-                    const cwd = surface.getCwd() orelse "";
-                    file_explorer.enterRemoteMode(&conn, cwd);
-                }
-            } else if (surface.launch_kind == .wsl) {
-                // WSL session: keep Linux paths and list through wsl.exe.
-                const cwd = surface.getCwd() orelse "~";
-                file_explorer.enterWslMode(cwd);
-            } else {
-                var root_set = false;
-                if (surface.getCwd()) |unix_path| {
-                    var wpath: [260]u16 = undefined;
-                    if (AppWindow.wsl_paths.unixPathToWindows(unix_path, &wpath)) |wlen| {
-                        var utf8_buf: [260]u8 = undefined;
-                        const utf8_len = std.unicode.utf16LeToUtf8(&utf8_buf, wpath[0..wlen]) catch 0;
-                        if (utf8_len > 0) {
-                            file_explorer.enterLocalMode();
-                            file_explorer.setRoot(utf8_buf[0..utf8_len]);
-                            root_set = true;
-                        }
-                    }
-                }
-                if (!root_set) {
-                    if (surface.getInitialCwd()) |initial_cwd| {
-                        file_explorer.enterLocalMode();
-                        file_explorer.setRoot(initial_cwd);
-                    }
-                }
-            }
-        }
+        AppWindow.syncVisibleFileExplorerForActiveTab();
     }
     if (AppWindow.g_window) |win| {
         syncGridFromWindowSizeImmediate(win.width, win.height);
@@ -755,8 +722,7 @@ pub fn updateFocusFromMouse(mouse_x: i32, mouse_y: i32) void {
         {
             if (rect.handle != t.focused) {
                 t.focused = rect.handle;
-                AppWindow.g_force_rebuild = true;
-                AppWindow.g_cells_valid = false;
+                AppWindow.handleActiveSurfaceChangeWithinTab();
             }
             return;
         }
@@ -1413,6 +1379,10 @@ fn applyExplorerWidthFromMouse(xpos: f64) void {
 }
 
 fn handleFileExplorerKey(ev: win32_backend.KeyEvent) bool {
+    if (file_explorer.g_panel_mode == .agent_history) {
+        return handleAgentHistoryKey(ev);
+    }
+
     const VK_ESCAPE = win32_backend.VK_ESCAPE;
     const VK_RETURN = win32_backend.VK_RETURN;
     const VK_BACK = win32_backend.VK_BACK;
@@ -1513,6 +1483,28 @@ fn handleFileExplorerKey(ev: win32_backend.KeyEvent) bool {
     }
 }
 
+fn handleAgentHistoryKey(ev: win32_backend.KeyEvent) bool {
+    switch (ev.vk) {
+        win32_backend.VK_ESCAPE => {
+            file_explorer.g_focused = false;
+            return true;
+        },
+        win32_backend.VK_UP => {
+            file_explorer.moveHistorySelection(-1);
+            return true;
+        },
+        win32_backend.VK_DOWN => {
+            file_explorer.moveHistorySelection(1);
+            return true;
+        },
+        win32_backend.VK_RETURN => {
+            activateSelectedAgentHistoryRow();
+            return true;
+        },
+        else => return false,
+    }
+}
+
 fn getDownloadsFolder(buf: *[260]u8) []const u8 {
     // Use %USERPROFILE%\Downloads
     const userprofile = std.process.getEnvVarOwned(std.heap.page_allocator, "USERPROFILE") catch return "";
@@ -1560,6 +1552,11 @@ fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: b
         return;
     }
 
+    if (file_explorer.g_panel_mode == .agent_history) {
+        handleAgentHistoryPress(xpos, ypos);
+        return;
+    }
+
     // Cancel any active op on click elsewhere in the panel
     if (file_explorer.g_op_mode != .none) {
         file_explorer.cancelOp();
@@ -1593,6 +1590,37 @@ fn handleFileExplorerPress(xpos: f64, ypos: f64, ctrl: bool, shift: bool, alt: b
         }
         AppWindow.g_force_rebuild = true;
     }
+}
+
+fn handleAgentHistoryPress(xpos: f64, ypos: f64) void {
+    const panel_x: f64 = @floatCast(titlebar.sidebarWidth());
+    const panel_right = panel_x + @as(f64, @floatCast(file_explorer.width()));
+    if (xpos < panel_x or xpos >= panel_right) return;
+
+    const titlebar_h = titlebarHeight();
+    const header_h: f64 = @floatCast(file_explorer.headerHeight());
+    const list_top = titlebar_h + header_h;
+    if (ypos < list_top) return;
+
+    const row_h: f64 = @floatCast(file_explorer.rowHeight());
+    const scroll: f64 = @floatCast(file_explorer.g_history_scroll_offset);
+    const row_idx: usize = @intFromFloat((ypos - list_top + scroll) / row_h);
+    if (row_idx >= file_explorer.g_history_row_count) return;
+
+    const click_count = nextLeftClickCount(xpos, ypos);
+    file_explorer.g_history_selected = row_idx;
+    if (click_count == 2) {
+        activateSelectedAgentHistoryRow();
+        return;
+    }
+    AppWindow.g_force_rebuild = true;
+}
+
+fn activateSelectedAgentHistoryRow() void {
+    const session_id = file_explorer.selectedHistorySessionId() orelse return;
+    file_explorer.g_focused = false;
+    if (!AppWindow.reopenAiChatTabFromHistorySessionId(session_id)) return;
+    file_explorer.g_focused = false;
 }
 
 fn hitTestConfigButton(xpos: f64, ypos: f64) bool {
@@ -2586,6 +2614,7 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
 
             // Focus the clicked split if different from current focus
             if (AppWindow.activeTab()) |tb| {
+                const previous_focus = tb.focused;
                 for (0..split_layout.g_split_rect_count) |i| {
                     const rect = split_layout.g_split_rects[i];
                     if (!split_layout.cachedRectIsLive(rect)) continue;
@@ -2593,6 +2622,9 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                         tb.focused = rect.handle;
                         break;
                     }
+                }
+                if (tb.focused != previous_focus) {
+                    AppWindow.handleActiveSurfaceChangeWithinTab();
                 }
             }
 

@@ -24,9 +24,23 @@ fn blend(a: [3]f32, b: [3]f32, t: f32) [3]f32 {
     };
 }
 
+const Palette = struct {
+    bg: [3]f32,
+    fg: [3]f32,
+    border_color: [3]f32,
+    header_text: [3]f32,
+    text_normal: [3]f32,
+    text_dir: [3]f32,
+    text_muted: [3]f32,
+    hover_bg: [3]f32,
+    selected_bg: [3]f32,
+    accent: [3]f32,
+};
+
 pub fn render(window_width: f32, window_height: f32, titlebar_h: f32) void {
     if (!file_explorer.g_visible) return;
     file_explorer.syncLayoutMetrics(font.g_titlebar_cell_height);
+    file_explorer.syncViewportMetrics(window_height, titlebar_h);
     const header_h = file_explorer.headerHeight();
     const row_h = file_explorer.rowHeight();
     const explorer_w = file_explorer.width();
@@ -44,9 +58,22 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32) void {
     const header_text = blend(bg, fg, 0.84);
     const text_normal = blend(bg, fg, 0.88);
     const text_dir = AppWindow.g_theme.foreground;
+    const text_muted = blend(bg, fg, 0.60);
     const hover_bg = blend(bg, fg, 0.09);
     const selected_bg = blend(bg, AppWindow.g_theme.cursor_color, 0.16);
     const accent = AppWindow.g_theme.cursor_color;
+    const palette: Palette = .{
+        .bg = bg,
+        .fg = fg,
+        .border_color = border_color,
+        .header_text = header_text,
+        .text_normal = text_normal,
+        .text_dir = text_dir,
+        .text_muted = text_muted,
+        .hover_bg = hover_bg,
+        .selected_bg = selected_bg,
+        .accent = accent,
+    };
 
     const side_h = window_height - titlebar_h;
     if (side_h <= 0) return;
@@ -69,6 +96,31 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32) void {
     };
     const edge_color = if (resize_hovered) blend(bg, accent, 0.38) else border_color;
     gl_init.renderQuad(panel_right - 1, 0, if (resize_hovered) 2 else 1, side_h, edge_color);
+
+    switch (file_explorer.g_panel_mode) {
+        .files => renderFiles(window_height, titlebar_h, header_h, row_h, panel_x, explorer_w, palette),
+        .agent_history => renderAgentHistory(window_height, titlebar_h, header_h, row_h, panel_x, explorer_w, palette),
+    }
+}
+
+fn renderFiles(
+    window_height: f32,
+    titlebar_h: f32,
+    header_h: f32,
+    row_h: f32,
+    panel_x: f32,
+    explorer_w: f32,
+    palette: Palette,
+) void {
+    const bg = palette.bg;
+    const fg = palette.fg;
+    const border_color = palette.border_color;
+    const header_text = palette.header_text;
+    const text_normal = palette.text_normal;
+    const text_dir = palette.text_dir;
+    const hover_bg = palette.hover_bg;
+    const selected_bg = palette.selected_bg;
+    const accent = palette.accent;
 
     // Header with mode indicator
     const header_y = window_height - titlebar_h - header_h;
@@ -223,6 +275,86 @@ pub fn render(window_width: f32, window_height: f32, titlebar_h: f32) void {
             file_explorer.g_transfer_status = .idle;
         }
     }
+}
+
+fn renderAgentHistory(
+    window_height: f32,
+    titlebar_h: f32,
+    header_h: f32,
+    row_h: f32,
+    panel_x: f32,
+    explorer_w: f32,
+    palette: Palette,
+) void {
+    const header_y = window_height - titlebar_h - header_h;
+    const header_text_y = header_y + (header_h - font.g_titlebar_cell_height) / 2;
+    const agent_end = titlebar.renderTextLimited("AGENT", panel_x + 12, header_text_y, palette.accent, explorer_w - 24);
+    _ = titlebar.renderTextLimited(" History", agent_end, header_text_y, palette.header_text, explorer_w - (agent_end - panel_x) - 12);
+    gl_init.renderQuad(panel_x, header_y, explorer_w, 1, palette.border_color);
+
+    const list_top_px = titlebar_h + header_h;
+    const visible_height = window_height - list_top_px;
+    const scroll = file_explorer.g_history_scroll_offset;
+    const two_line = row_h >= font.g_titlebar_cell_height * 2 + 6;
+
+    var row_buf: [32]u8 = undefined;
+    var i: usize = 0;
+    while (i < file_explorer.g_history_row_count) : (i += 1) {
+        const row_y_from_top = @as(f32, @floatFromInt(i)) * row_h - scroll;
+        if (row_y_from_top + row_h < 0) continue;
+        if (row_y_from_top >= visible_height) break;
+
+        const row_top_px = list_top_px + row_y_from_top;
+        const row_y = window_height - row_top_px - row_h;
+        const row = &file_explorer.g_history_rows[i];
+
+        const row_hovered = blk: {
+            const win = AppWindow.g_window orelse break :blk false;
+            if (win.mouse_x < 0 or win.mouse_y < 0) break :blk false;
+            const mx: f32 = @floatFromInt(win.mouse_x);
+            const my: f32 = @floatFromInt(win.mouse_y);
+            break :blk mx >= panel_x and mx < panel_x + explorer_w and my >= row_top_px and my < row_top_px + row_h;
+        };
+
+        const is_selected = if (file_explorer.g_history_selected) |selected| selected == i else false;
+        if (is_selected) {
+            gl_init.renderQuad(panel_x, row_y, explorer_w, row_h, palette.selected_bg);
+        } else if (row_hovered) {
+            gl_init.renderQuad(panel_x, row_y, explorer_w, row_h, palette.hover_bg);
+        }
+
+        const title = historyRowTitle(i, row);
+        const text_x = panel_x + 12;
+        if (two_line) {
+            const vertical_padding = @max(2.0, @floor((row_h - (font.g_titlebar_cell_height * 2 + 2)) / 2));
+            const secondary_y = row_y + vertical_padding;
+            const primary_y = secondary_y + font.g_titlebar_cell_height + 2;
+            _ = titlebar.renderTextLimited(title, text_x, primary_y, palette.text_normal, explorer_w - 24);
+            _ = titlebar.renderTextLimited(historyRowSubtitle(row, &row_buf), text_x, secondary_y, palette.text_muted, explorer_w - 24);
+        } else {
+            const text_y = row_y + (row_h - font.g_titlebar_cell_height) / 2;
+            _ = titlebar.renderTextLimited(title, text_x, text_y, palette.text_normal, explorer_w - 24);
+        }
+    }
+}
+
+fn historyRowTitle(idx: usize, row: *const file_explorer.HistoryRow) []const u8 {
+    if (row.title_len > 0) return row.title_buf[0..row.title_len];
+    return file_explorer.historySessionIdAt(idx) orelse "Untitled chat";
+}
+
+fn historyRowSubtitle(row: *const file_explorer.HistoryRow, buf: *[32]u8) []const u8 {
+    if (row.model_len > 0) return row.model_buf[0..row.model_len];
+    return formatRelativeTimestamp(row.updated_at, buf);
+}
+
+fn formatRelativeTimestamp(updated_at: i64, buf: *[32]u8) []const u8 {
+    const delta_ms = @max(@as(i64, 0), std.time.milliTimestamp() - updated_at);
+    const delta_s = @divTrunc(delta_ms, 1000);
+    if (delta_s < 60) return "just now";
+    if (delta_s < 3600) return std.fmt.bufPrint(buf, "{d}m ago", .{@divTrunc(delta_s, 60)}) catch "recent";
+    if (delta_s < 86400) return std.fmt.bufPrint(buf, "{d}h ago", .{@divTrunc(delta_s, 3600)}) catch "recent";
+    return std.fmt.bufPrint(buf, "{d}d ago", .{@divTrunc(delta_s, 86400)}) catch "recent";
 }
 
 fn renderInputField(x: f32, y: f32, max_w: f32, text_color: [3]f32, cursor_color: [3]f32) void {

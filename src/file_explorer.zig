@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Surface = @import("Surface.zig");
+const agent_history = @import("agent_history.zig");
 const scp = @import("scp.zig");
 const file_backend = @import("file_backend.zig");
 
@@ -18,13 +19,33 @@ pub const ROW_HEIGHT: f32 = 24;
 pub const HEADER_HEIGHT: f32 = 36;
 pub const INDENT_WIDTH: f32 = 16;
 pub const MAX_ENTRIES: usize = 2048;
+pub const MAX_HISTORY_ROWS: usize = 256;
 
 pub const Mode = enum { local, wsl, remote };
+pub const PanelMode = enum { files, agent_history };
+
+pub const HistoryRow = struct {
+    title_buf: [128]u8 = undefined,
+    title_len: u8 = 0,
+    model_buf: [64]u8 = undefined,
+    model_len: u8 = 0,
+    updated_at: i64 = 0,
+};
+
+pub const TerminalPanelTarget = union(enum) {
+    remote: struct {
+        conn: *const Surface.SshConnection,
+        cwd: []const u8,
+    },
+    wsl: []const u8,
+    local: []const u8,
+};
 
 pub threadlocal var g_visible: bool = false;
 pub threadlocal var g_width: f32 = DEFAULT_WIDTH;
 pub threadlocal var g_focused: bool = false;
 pub threadlocal var g_mode: Mode = .local;
+pub threadlocal var g_panel_mode: PanelMode = .files;
 pub threadlocal var g_row_height: f32 = ROW_HEIGHT;
 pub threadlocal var g_header_height: f32 = HEADER_HEIGHT;
 
@@ -45,9 +66,16 @@ pub const TransferStatus = enum { idle, in_progress, success, failed };
 
 // Scroll state
 pub threadlocal var g_scroll_offset: f32 = 0;
+pub threadlocal var g_history_scroll_offset: f32 = 0;
+pub threadlocal var g_visible_height: f32 = 400;
+pub threadlocal var g_history_visible_height: f32 = 400;
 
 // Selection state (index into flattened visible entries)
 pub threadlocal var g_selected: ?usize = null;
+pub threadlocal var g_history_rows: [MAX_HISTORY_ROWS]HistoryRow = undefined;
+pub threadlocal var g_history_session_ids: [MAX_HISTORY_ROWS]?[]u8 = [_]?[]u8{null} ** MAX_HISTORY_ROWS;
+pub threadlocal var g_history_row_count: usize = 0;
+pub threadlocal var g_history_selected: ?usize = null;
 
 // Root directory (UTF-8 path)
 pub threadlocal var g_root_path: [260]u8 = undefined;
@@ -111,6 +139,14 @@ pub fn syncLayoutMetrics(text_height: f32) void {
     g_header_height = @max(HEADER_HEIGHT, @round(text_height + 16));
 }
 
+pub fn syncViewportMetrics(window_height: f32, titlebar_h: f32) void {
+    const visible_height = @max(0, window_height - titlebar_h - headerHeight());
+    g_visible_height = visible_height;
+    g_history_visible_height = visible_height;
+    clampFileScroll();
+    clampHistoryScroll();
+}
+
 pub fn rowHeight() f32 {
     return g_row_height;
 }
@@ -136,6 +172,234 @@ pub fn setWidth(w: f32, window_width: f32) bool {
 
 pub fn toggle() void {
     g_visible = !g_visible;
+}
+
+pub fn setPanelMode(mode: PanelMode) void {
+    if (mode == .agent_history) clearFileOpState();
+    if (g_panel_mode == mode) {
+        switch (mode) {
+            .files => clampFileScroll(),
+            .agent_history => {
+                clampHistorySelection();
+                clampHistoryScroll();
+            },
+        }
+        return;
+    }
+    g_panel_mode = mode;
+    switch (mode) {
+        .files => clampFileScroll(),
+        .agent_history => {
+            clampHistorySelection();
+            clampHistoryScroll();
+        },
+    }
+}
+
+pub fn syncPanelForTabKind(is_ai_tab: bool) void {
+    g_focused = false;
+    setPanelMode(if (is_ai_tab) .agent_history else .files);
+}
+
+pub fn syncPanelForTerminalTarget(target: TerminalPanelTarget) void {
+    if (terminalTargetMatchesCurrentState(target)) return;
+
+    applyTerminalTargetState(target);
+    switch (target) {
+        .remote => rescanRemote(),
+        .wsl, .local => {
+            if (g_root_path_len > 0) rescan();
+        },
+    }
+}
+
+pub fn syncAgentHistoryRows(store: *const agent_history.Store) void {
+    const allocator = std.heap.page_allocator;
+    const selected_session_id_copy = if (g_history_selected) |selected|
+        if (historySessionIdAt(selected)) |session_id|
+            allocator.dupe(u8, session_id) catch null
+        else
+            null
+    else
+        null;
+    defer if (selected_session_id_copy) |session_id| allocator.free(session_id);
+
+    const rows = store.buildRows(allocator) catch {
+        clearHistoryRows();
+        g_history_selected = null;
+        g_history_scroll_offset = 0;
+        return;
+    };
+    defer agent_history.freeRows(allocator, rows);
+
+    clearHistoryRows();
+    var filled: usize = 0;
+    for (rows[0..@min(rows.len, g_history_rows.len)], 0..) |row, idx| {
+        const owned_session_id = allocator.dupe(u8, row.session_id) catch break;
+        g_history_session_ids[idx] = owned_session_id;
+        copyHistoryText(&g_history_rows[idx].title_buf, &g_history_rows[idx].title_len, row.title);
+        copyHistoryText(&g_history_rows[idx].model_buf, &g_history_rows[idx].model_len, row.model);
+        g_history_rows[idx].updated_at = row.updated_at;
+        filled += 1;
+    }
+    g_history_row_count = filled;
+
+    if (selected_session_id_copy != null) {
+        g_history_selected = null;
+        for (0..g_history_row_count) |idx| {
+            if (std.mem.eql(u8, historySessionIdAt(idx).?, selected_session_id_copy.?)) {
+                g_history_selected = idx;
+                break;
+            }
+        }
+    }
+
+    clampHistorySelection();
+    if (g_panel_mode == .agent_history) clampHistoryScroll();
+}
+
+pub fn moveHistorySelection(delta: i32) void {
+    if (g_history_row_count == 0) {
+        g_history_selected = null;
+        return;
+    }
+
+    if (g_history_selected) |selected| {
+        const next = @as(i32, @intCast(selected)) + delta;
+        g_history_selected = @intCast(@max(0, @min(@as(i32, @intCast(g_history_row_count - 1)), next)));
+    } else {
+        g_history_selected = 0;
+    }
+    ensureHistorySelectedVisible();
+}
+
+pub fn historySessionIdAt(idx: usize) ?[]const u8 {
+    if (idx >= g_history_row_count) return null;
+    return g_history_session_ids[idx];
+}
+
+pub fn selectedHistorySessionId() ?[]const u8 {
+    const selected = g_history_selected orelse return null;
+    return historySessionIdAt(selected);
+}
+
+fn clampHistorySelection() void {
+    if (g_history_row_count == 0) {
+        g_history_selected = null;
+        return;
+    }
+
+    if (g_history_selected) |selected| {
+        if (selected >= g_history_row_count) {
+            g_history_selected = g_history_row_count - 1;
+        }
+    }
+}
+
+fn copyHistoryText(buf: anytype, len_out: *u8, value: []const u8) void {
+    var len: usize = 0;
+    while (len < value.len and len < buf.len) {
+        const seq_len = std.unicode.utf8ByteSequenceLength(value[len]) catch break;
+        if (len + seq_len > value.len or len + seq_len > buf.len) break;
+        @memcpy(buf[len .. len + seq_len], value[len .. len + seq_len]);
+        len += seq_len;
+    }
+    len_out.* = @intCast(len);
+}
+
+fn ensureHistorySelectedVisible() void {
+    const selected = g_history_selected orelse return;
+    const row_h = rowHeight();
+    const selected_top = @as(f32, @floatFromInt(selected)) * row_h;
+    if (selected_top < g_history_scroll_offset) {
+        g_history_scroll_offset = selected_top;
+    } else if (selected_top + row_h > g_history_scroll_offset + g_history_visible_height) {
+        g_history_scroll_offset = selected_top + row_h - g_history_visible_height;
+    }
+    clampHistoryScroll();
+}
+
+fn clampHistoryScroll() void {
+    g_history_scroll_offset = @max(0, @min(maxHistoryScroll(), g_history_scroll_offset));
+}
+
+fn maxHistoryScroll() f32 {
+    const total_h = @as(f32, @floatFromInt(g_history_row_count)) * rowHeight();
+    return @max(0, total_h - g_history_visible_height);
+}
+
+fn clearHistoryRows() void {
+    for (&g_history_session_ids) |*session_id| {
+        if (session_id.*) |owned| std.heap.page_allocator.free(owned);
+        session_id.* = null;
+    }
+    g_history_row_count = 0;
+}
+
+fn clearFileOpState() void {
+    g_op_mode = .none;
+    g_input_len = 0;
+}
+
+fn terminalTargetMatchesCurrentState(target: TerminalPanelTarget) bool {
+    if (g_panel_mode != .files) return false;
+
+    const current_root = g_root_path[0..g_root_path_len];
+    return switch (target) {
+        .remote => |remote| g_mode == .remote and
+            g_has_ssh_conn and
+            sshConnectionsEqual(&g_ssh_conn, remote.conn) and
+            std.mem.eql(u8, current_root, remote.cwd),
+        .wsl => |cwd| g_mode == .wsl and
+            !g_has_ssh_conn and
+            std.mem.eql(u8, current_root, if (cwd.len > 0) cwd else "~"),
+        .local => |path| g_mode == .local and
+            !g_has_ssh_conn and
+            std.mem.eql(u8, current_root, path),
+    };
+}
+
+fn sshConnectionsEqual(a: *const Surface.SshConnection, b: *const Surface.SshConnection) bool {
+    return std.mem.eql(u8, a.user(), b.user()) and
+        std.mem.eql(u8, a.host(), b.host()) and
+        std.mem.eql(u8, a.port(), b.port()) and
+        std.mem.eql(u8, a.password(), b.password()) and
+        a.password_auth == b.password_auth and
+        a.legacy_algorithms == b.legacy_algorithms;
+}
+
+fn applyTerminalTargetState(target: TerminalPanelTarget) void {
+    syncPanelForTabKind(false);
+    g_async_context_id +%= 1;
+    g_pending_async_list = null;
+    g_loading = false;
+    g_entry_count = 0;
+    g_selected = null;
+
+    switch (target) {
+        .remote => |remote| {
+            g_mode = .remote;
+            g_ssh_conn = remote.conn.*;
+            g_has_ssh_conn = true;
+            copyRootPathOnly(remote.cwd);
+        },
+        .wsl => |cwd| {
+            g_mode = .wsl;
+            g_has_ssh_conn = false;
+            copyRootPathOnly(if (cwd.len > 0) cwd else "~");
+        },
+        .local => |path| {
+            g_mode = .local;
+            g_has_ssh_conn = false;
+            copyRootPathOnly(path);
+        },
+    }
+}
+
+fn copyRootPathOnly(path: []const u8) void {
+    const len = @min(path.len, g_root_path.len);
+    @memcpy(g_root_path[0..len], path[0..len]);
+    g_root_path_len = len;
 }
 
 /// Enter remote mode with the given SSH connection.
@@ -565,6 +829,7 @@ pub fn deinit() void {
     }
     g_pending_async_list = null;
     g_loading = false;
+    clearHistoryRows();
 }
 
 fn setLoading(msg: []const u8) void {
@@ -614,13 +879,25 @@ fn collapse(idx: usize) void {
 }
 
 pub fn scrollBy(delta: f32) void {
-    const max_scroll = maxScroll();
-    g_scroll_offset = @max(0, @min(max_scroll, g_scroll_offset + delta));
+    switch (g_panel_mode) {
+        .files => {
+            const max_scroll = maxScroll();
+            g_scroll_offset = @max(0, @min(max_scroll, g_scroll_offset + delta));
+        },
+        .agent_history => {
+            const max_scroll = maxHistoryScroll();
+            g_history_scroll_offset = @max(0, @min(max_scroll, g_history_scroll_offset + delta));
+        },
+    }
 }
 
 fn maxScroll() f32 {
     const total_h = @as(f32, @floatFromInt(g_entry_count)) * rowHeight();
-    return @max(0, total_h - 400);
+    return @max(0, total_h - g_visible_height);
+}
+
+fn clampFileScroll() void {
+    g_scroll_offset = @max(0, @min(maxScroll(), g_scroll_offset));
 }
 
 // ============================================================================
@@ -813,9 +1090,10 @@ fn ensureSelectedVisible() void {
     const sel_top = @as(f32, @floatFromInt(sel)) * row_h;
     if (sel_top < g_scroll_offset) {
         g_scroll_offset = sel_top;
-    } else if (sel_top + row_h > g_scroll_offset + 400) {
-        g_scroll_offset = sel_top + row_h - 400;
+    } else if (sel_top + row_h > g_scroll_offset + g_visible_height) {
+        g_scroll_offset = sel_top + row_h - g_visible_height;
     }
+    clampFileScroll();
 }
 
 // ============================================================================
@@ -925,4 +1203,282 @@ test "Mode enum values" {
     // Default state
     g_mode = .local;
     try std.testing.expect(!g_has_ssh_conn);
+}
+
+test "file_explorer: agent history mode selection clamps to row count" {
+    g_panel_mode = .agent_history;
+    g_history_row_count = 2;
+    g_history_selected = 10;
+    clampHistorySelection();
+    try std.testing.expectEqual(@as(?usize, 1), g_history_selected);
+}
+
+test "file_explorer: history selection visibility uses history viewport height" {
+    g_panel_mode = .agent_history;
+    g_row_height = 20;
+    g_history_visible_height = 60;
+    g_history_row_count = 10;
+    g_history_scroll_offset = 0;
+    g_history_selected = 4;
+    ensureHistorySelectedVisible();
+    try std.testing.expectEqual(@as(f32, 40), g_history_scroll_offset);
+}
+
+test "file_explorer: moveHistorySelection walks selected row" {
+    g_panel_mode = .agent_history;
+    g_row_height = 20;
+    g_history_visible_height = 200;
+    g_history_row_count = 3;
+    g_history_selected = 0;
+    g_history_scroll_offset = 0;
+
+    moveHistorySelection(1);
+    try std.testing.expectEqual(@as(?usize, 1), g_history_selected);
+
+    moveHistorySelection(10);
+    try std.testing.expectEqual(@as(?usize, 2), g_history_selected);
+}
+
+test "file_explorer: history scroll does not mutate file scroll" {
+    g_panel_mode = .files;
+    g_row_height = 20;
+    g_visible_height = 100;
+    g_entry_count = 10;
+    g_scroll_offset = 30;
+    scrollBy(10);
+    try std.testing.expectEqual(@as(f32, 40), g_scroll_offset);
+
+    g_panel_mode = .agent_history;
+    g_history_visible_height = 60;
+    g_history_row_count = 10;
+    g_history_scroll_offset = 5;
+    scrollBy(10);
+
+    try std.testing.expectEqual(@as(f32, 40), g_scroll_offset);
+    try std.testing.expectEqual(@as(f32, 15), g_history_scroll_offset);
+}
+
+test "file_explorer: switching to agent history clears file op state" {
+    g_panel_mode = .files;
+    g_op_mode = .rename;
+    g_input_len = 3;
+    g_scroll_offset = 77;
+    g_history_scroll_offset = 12;
+
+    setPanelMode(.agent_history);
+
+    try std.testing.expectEqual(PanelMode.agent_history, g_panel_mode);
+    try std.testing.expectEqual(OpMode.none, g_op_mode);
+    try std.testing.expectEqual(@as(u8, 0), g_input_len);
+    try std.testing.expectEqual(@as(f32, 77), g_scroll_offset);
+    try std.testing.expectEqual(@as(f32, 12), g_history_scroll_offset);
+}
+
+test "file_explorer: syncPanelForTabKind resets focus and mode" {
+    g_focused = true;
+    g_panel_mode = .files;
+
+    syncPanelForTabKind(true);
+    try std.testing.expectEqual(false, g_focused);
+    try std.testing.expectEqual(PanelMode.agent_history, g_panel_mode);
+
+    g_focused = true;
+    syncPanelForTabKind(false);
+    try std.testing.expectEqual(false, g_focused);
+    try std.testing.expectEqual(PanelMode.files, g_panel_mode);
+}
+
+test "file_explorer: applyTerminalTargetState updates terminal backend and root" {
+    const conn: Surface.SshConnection = .{
+        .user_len = 4,
+        .host_len = 4,
+        .port_len = 2,
+        .password_len = 2,
+        .password_auth = true,
+        .legacy_algorithms = false,
+    };
+    const saved_focused = g_focused;
+    const saved_panel_mode = g_panel_mode;
+    const saved_mode = g_mode;
+    const saved_has_ssh_conn = g_has_ssh_conn;
+    const saved_root_len = g_root_path_len;
+    const saved_async_context = g_async_context_id;
+    defer {
+        g_focused = saved_focused;
+        g_panel_mode = saved_panel_mode;
+        g_mode = saved_mode;
+        g_has_ssh_conn = saved_has_ssh_conn;
+        g_root_path_len = saved_root_len;
+        g_async_context_id = saved_async_context;
+    }
+
+    g_focused = true;
+    applyTerminalTargetState(.{ .wsl = "/home/test" });
+    try std.testing.expectEqual(false, g_focused);
+    try std.testing.expectEqual(PanelMode.files, g_panel_mode);
+    try std.testing.expectEqual(Mode.wsl, g_mode);
+    try std.testing.expectEqualStrings("/home/test", g_root_path[0..g_root_path_len]);
+
+    g_focused = true;
+    applyTerminalTargetState(.{ .local = "C:\\Users\\tester" });
+    try std.testing.expectEqual(false, g_focused);
+    try std.testing.expectEqual(Mode.local, g_mode);
+    try std.testing.expect(!g_has_ssh_conn);
+    try std.testing.expectEqualStrings("C:\\Users\\tester", g_root_path[0..g_root_path_len]);
+
+    g_focused = true;
+    applyTerminalTargetState(.{ .remote = .{ .conn = &conn, .cwd = "/var/tmp" } });
+    try std.testing.expectEqual(false, g_focused);
+    try std.testing.expectEqual(Mode.remote, g_mode);
+    try std.testing.expect(g_has_ssh_conn);
+    try std.testing.expectEqualStrings("/var/tmp", g_root_path[0..g_root_path_len]);
+}
+
+test "file_explorer: unchanged terminal target preserves file state" {
+    const saved_panel_mode = g_panel_mode;
+    const saved_mode = g_mode;
+    const saved_has_ssh_conn = g_has_ssh_conn;
+    const saved_root_len = g_root_path_len;
+    const saved_entry_count = g_entry_count;
+    const saved_selected = g_selected;
+    const saved_scroll_offset = g_scroll_offset;
+    const saved_focused = g_focused;
+    const saved_async_context = g_async_context_id;
+    defer {
+        g_panel_mode = saved_panel_mode;
+        g_mode = saved_mode;
+        g_has_ssh_conn = saved_has_ssh_conn;
+        g_root_path_len = saved_root_len;
+        g_entry_count = saved_entry_count;
+        g_selected = saved_selected;
+        g_scroll_offset = saved_scroll_offset;
+        g_focused = saved_focused;
+        g_async_context_id = saved_async_context;
+    }
+
+    g_panel_mode = .files;
+    g_mode = .local;
+    g_has_ssh_conn = false;
+    copyRootPathOnly("");
+    g_entry_count = 7;
+    g_selected = 3;
+    g_scroll_offset = 42;
+    g_focused = true;
+    g_async_context_id = 99;
+
+    syncPanelForTerminalTarget(.{ .local = "" });
+
+    try std.testing.expectEqual(@as(usize, 7), g_entry_count);
+    try std.testing.expectEqual(@as(?usize, 3), g_selected);
+    try std.testing.expectEqual(@as(f32, 42), g_scroll_offset);
+    try std.testing.expectEqual(true, g_focused);
+    try std.testing.expectEqual(@as(u64, 99), g_async_context_id);
+}
+
+test "file_explorer: terminal target equality checks ssh identity and cwd" {
+    const conn_a: Surface.SshConnection = .{
+        .user_buf = [_]u8{ 'r', 'o', 'o', 't' } ++ [_]u8{0} ** 124,
+        .user_len = 4,
+        .host_buf = [_]u8{ 'h', 'o', 's', 't' } ++ [_]u8{0} ** 124,
+        .host_len = 4,
+        .port_buf = [_]u8{ '2', '2' } ++ [_]u8{0} ** 14,
+        .port_len = 2,
+        .password_buf = [_]u8{ 'p', 'w' } ++ [_]u8{0} ** 126,
+        .password_len = 2,
+        .password_auth = true,
+        .legacy_algorithms = false,
+    };
+    const conn_b: Surface.SshConnection = .{
+        .user_buf = [_]u8{ 'r', 'o', 'o', 't' } ++ [_]u8{0} ** 124,
+        .user_len = 4,
+        .host_buf = [_]u8{ 'h', 'o', 's', 't' } ++ [_]u8{0} ** 124,
+        .host_len = 4,
+        .port_buf = [_]u8{ '2', '2' } ++ [_]u8{0} ** 14,
+        .port_len = 2,
+        .password_buf = [_]u8{ 'p', 'x' } ++ [_]u8{0} ** 126,
+        .password_len = 2,
+        .password_auth = true,
+        .legacy_algorithms = false,
+    };
+    const saved_panel_mode = g_panel_mode;
+    const saved_mode = g_mode;
+    const saved_has_ssh_conn = g_has_ssh_conn;
+    const saved_ssh_conn = g_ssh_conn;
+    const saved_root_len = g_root_path_len;
+    defer {
+        g_panel_mode = saved_panel_mode;
+        g_mode = saved_mode;
+        g_has_ssh_conn = saved_has_ssh_conn;
+        g_ssh_conn = saved_ssh_conn;
+        g_root_path_len = saved_root_len;
+    }
+
+    g_panel_mode = .files;
+    g_mode = .remote;
+    g_has_ssh_conn = true;
+    g_ssh_conn = conn_a;
+    copyRootPathOnly("/tmp");
+
+    try std.testing.expect(terminalTargetMatchesCurrentState(.{ .remote = .{ .conn = &conn_a, .cwd = "/tmp" } }));
+    try std.testing.expect(!terminalTargetMatchesCurrentState(.{ .remote = .{ .conn = &conn_a, .cwd = "/var/tmp" } }));
+    try std.testing.expect(!terminalTargetMatchesCurrentState(.{ .remote = .{ .conn = &conn_b, .cwd = "/tmp" } }));
+}
+
+test "file_explorer: history session ids preserve full utf8 ids" {
+    const allocator = std.testing.allocator;
+    var store = agent_history.Store.init(allocator);
+    defer store.deinit();
+
+    const long_session_id =
+        "会話-会話-会話-会話-会話-会話-会話-会話-会話-会話-会話-会話-会話-会話-会話";
+    try store.upsertRecord(.{
+        .session_id = long_session_id,
+        .title = "Saved chat",
+        .base_url = "https://api.example.com",
+        .api_key = "secret",
+        .model = "gpt-test",
+        .system_prompt = "system",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .agent_enabled = true,
+        .created_at = 1,
+        .updated_at = 2,
+        .messages = &.{},
+    });
+
+    syncAgentHistoryRows(&store);
+
+    try std.testing.expectEqual(@as(usize, 1), g_history_row_count);
+    try std.testing.expectEqualStrings(long_session_id, historySessionIdAt(0).?);
+}
+
+test "file_explorer: history row text keeps valid utf8 when truncated" {
+    const allocator = std.testing.allocator;
+    var store = agent_history.Store.init(allocator);
+    defer store.deinit();
+
+    const long_title = "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界";
+    const long_model = "模模模模模模模模模模模模模模模模模模模模模模";
+    try store.upsertRecord(.{
+        .session_id = "session-1",
+        .title = long_title,
+        .base_url = "https://api.example.com",
+        .api_key = "secret",
+        .model = long_model,
+        .system_prompt = "system",
+        .thinking_enabled = true,
+        .reasoning_effort = "high",
+        .stream = false,
+        .agent_enabled = true,
+        .created_at = 1,
+        .updated_at = 2,
+        .messages = &.{},
+    });
+
+    syncAgentHistoryRows(&store);
+
+    try std.testing.expectEqual(@as(usize, 1), g_history_row_count);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(g_history_rows[0].title_buf[0..g_history_rows[0].title_len]));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(g_history_rows[0].model_buf[0..g_history_rows[0].model_len]));
 }
