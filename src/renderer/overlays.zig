@@ -19,6 +19,8 @@ const win32_backend = @import("../apprt/win32.zig");
 const ssh_prompt = @import("../ssh_prompt.zig");
 const app_metadata = @import("../app_metadata.zig");
 const scrollbar_model = @import("../scrollbar_model.zig");
+const command_center_state = @import("../command_center_state.zig");
+const agent_history = @import("../agent_history.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -194,69 +196,29 @@ const THEME_OVERRIDE_KEYS = [_][]const u8{
     "palette",
 };
 
-const CommandAction = enum {
-    new_tab,
-    split_right,
-    split_down,
-    split_left,
-    split_up,
-    focus_previous,
-    focus_next,
-    equalize_splits,
-    close_split_or_tab,
-    toggle_sidebar,
-    toggle_file_explorer,
-    toggle_browser_panel,
-    show_shortcuts,
-    open_config,
-    font_size_decrease,
-    font_size_increase,
-    toggle_maximize,
-    copy_remote_key,
-    show_version,
-};
-
-const CommandEntry = struct {
-    title: []const u8,
-    detail: []const u8,
-    shortcut: []const u8,
-    action: CommandAction,
-};
-
-const COMMAND_ENTRIES = [_]CommandEntry{
-    .{ .title = "New Session", .detail = "Choose PowerShell, SSH, WSL, or AI Agent", .shortcut = "Ctrl+Shift+T", .action = .new_tab },
-    .{ .title = "Split Right", .detail = "Create a panel to the right", .shortcut = "Ctrl+Shift+O", .action = .split_right },
-    .{ .title = "Split Down", .detail = "Create a panel below", .shortcut = "", .action = .split_down },
-    .{ .title = "Split Left", .detail = "Create a panel to the left", .shortcut = "", .action = .split_left },
-    .{ .title = "Split Up", .detail = "Create a panel above", .shortcut = "", .action = .split_up },
-    .{ .title = "Previous Panel", .detail = "Move focus to the previous panel", .shortcut = "Ctrl+Shift+[", .action = .focus_previous },
-    .{ .title = "Next Panel", .detail = "Move focus to the next panel", .shortcut = "Ctrl+Shift+]", .action = .focus_next },
-    .{ .title = "Equalize Panels", .detail = "Reset split sizes in the current tab", .shortcut = "Ctrl+Shift+Z", .action = .equalize_splits },
-    .{ .title = "Close Panel / Tab", .detail = "Close focused panel or tab; press again for the last panel", .shortcut = "Ctrl+Shift+W", .action = .close_split_or_tab },
-    .{ .title = "Toggle Sidebar", .detail = "Show or hide the tab sidebar", .shortcut = "Ctrl+Shift+B", .action = .toggle_sidebar },
-    .{ .title = "Toggle File Explorer", .detail = "Show or hide the left-side file explorer", .shortcut = "Ctrl+Shift+E", .action = .toggle_file_explorer },
-    .{ .title = "Toggle Browser", .detail = "Show WebView2 browser for local or SSH URLs", .shortcut = "", .action = .toggle_browser_panel },
-    .{ .title = "Keyboard Shortcuts", .detail = "Show the shortcut reference overlay", .shortcut = "Ctrl+Shift+P", .action = .show_shortcuts },
-    .{ .title = "Open Config", .detail = "Open the Phantty config file", .shortcut = "Ctrl+,", .action = .open_config },
-    .{ .title = "Decrease Font Size", .detail = "Make terminal text smaller", .shortcut = "Ctrl+-", .action = .font_size_decrease },
-    .{ .title = "Increase Font Size", .detail = "Make terminal text larger", .shortcut = "Ctrl++", .action = .font_size_increase },
-    .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Alt+Enter", .action = .toggle_maximize },
-    .{ .title = "Copy Remote Key", .detail = "Copy the active Phantty remote session key", .shortcut = "click Remote key", .action = .copy_remote_key },
-    .{ .title = "Version", .detail = "Show Phantty version", .shortcut = app_metadata.version, .action = .show_version },
-};
+const CommandAction = command_center_state.CommandAction;
+const CommandEntry = command_center_state.CommandEntry;
+const COMMAND_ENTRIES = command_center_state.command_entries;
 
 const PaletteItem = union(enum) {
     command: usize,
     theme: usize,
 };
 
+const CommandPaletteMode = command_center_state.CommandPaletteMode;
+
 threadlocal var g_palette_scratch: [COMMAND_PALETTE_MAX_VISIBLE_ROWS]PaletteItem = undefined;
 threadlocal var g_palette_scratch_len: usize = 0;
+threadlocal var g_command_palette_history_rows: []agent_history.Row = &.{};
+threadlocal var g_command_palette_history_rows_owned: bool = false;
+threadlocal var g_command_palette_history_revision: u64 = 0;
 
 pub threadlocal var g_command_palette_visible: bool = false;
 threadlocal var g_command_palette_selected: usize = 0;
 threadlocal var g_command_palette_filter: [COMMAND_PALETTE_FILTER_MAX]u8 = undefined;
 threadlocal var g_command_palette_filter_len: usize = 0;
+threadlocal var g_command_palette_mode: CommandPaletteMode = .commands;
+threadlocal var g_command_palette_history_selected: usize = 0;
 
 const CommandPaletteLayout = struct {
     box_x: f32,
@@ -275,17 +237,30 @@ pub fn commandPaletteVisible() bool {
     return g_command_palette_visible;
 }
 
+fn commandPaletteIsHistoryMode() bool {
+    return commandCenterStateSnapshot().commandPaletteIsHistoryMode();
+}
+
+fn commandPaletteSetMode(mode: CommandPaletteMode) void {
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteSetMode(mode);
+    commandCenterStateCommit(state);
+}
+
+fn commandPaletteOpenWithMode(mode: CommandPaletteMode) void {
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteOpenWithMode(mode);
+    commandCenterStateCommit(state);
+}
+
 pub fn commandPaletteOpen() void {
-    g_command_palette_visible = true;
-    g_command_palette_selected = 0;
-    g_command_palette_filter_len = 0;
-    g_startup_shortcuts_visible = false;
+    commandPaletteOpenWithMode(.commands);
 }
 
 pub fn commandPaletteClose() void {
-    g_command_palette_visible = false;
-    g_command_palette_filter_len = 0;
-    g_command_palette_selected = 0;
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteClose();
+    commandCenterStateCommit(state);
 }
 
 pub fn commandPaletteToggle() void {
@@ -297,6 +272,7 @@ pub fn commandPaletteToggle() void {
 }
 
 pub fn commandPaletteMove(delta: i32) void {
+    if (commandPaletteIsHistoryMode()) return;
     const count = commandPaletteVisibleCount();
     if (count == 0) {
         g_command_palette_selected = 0;
@@ -311,18 +287,39 @@ pub fn commandPaletteMove(delta: i32) void {
     g_command_palette_selected = @intCast(next);
 }
 
+pub fn commandPaletteAgentHistoryVisible() bool {
+    return commandPaletteIsHistoryMode();
+}
+
+pub fn commandPaletteMoveAgentHistory(delta: i32) void {
+    commandPaletteSyncAgentHistoryRows();
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteMoveAgentHistory(delta, g_command_palette_history_rows.len);
+    commandCenterStateCommit(state);
+}
+
+pub fn commandPaletteLeaveAgentHistory() void {
+    if (!commandPaletteIsHistoryMode()) return;
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteLeaveAgentHistory();
+    commandCenterStateCommit(state);
+}
+
 pub fn commandPaletteBackspace() void {
+    if (commandPaletteIsHistoryMode()) return;
     if (g_command_palette_filter_len == 0) return;
     g_command_palette_filter_len -= 1;
     commandPaletteClampSelection();
 }
 
 pub fn commandPaletteClearFilter() void {
+    if (commandPaletteIsHistoryMode()) return;
     g_command_palette_filter_len = 0;
     commandPaletteClampSelection();
 }
 
 pub fn commandPaletteInsertChar(codepoint: u21) void {
+    if (commandPaletteIsHistoryMode()) return;
     if (codepoint < 0x20 or codepoint == 0x7f) return;
     if (g_command_palette_filter_len >= g_command_palette_filter.len) return;
 
@@ -334,6 +331,10 @@ pub fn commandPaletteInsertChar(codepoint: u21) void {
 }
 
 pub fn commandPaletteExecuteSelected() void {
+    if (commandPaletteIsHistoryMode()) {
+        _ = commandPaletteActivateSelectedAgentHistory();
+        return;
+    }
     rebuildPaletteScratch();
     if (g_palette_scratch_len == 0) return;
     if (g_command_palette_selected >= g_palette_scratch_len) return;
@@ -343,6 +344,13 @@ pub fn commandPaletteExecuteSelected() void {
 }
 
 pub fn commandPaletteExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) bool {
+    if (commandPaletteIsHistoryMode()) {
+        commandPaletteSyncAgentHistoryRows();
+        const row_idx = commandPaletteHistoryHitTestIndex(xpos, ypos, window_width, window_height, top_offset) orelse
+            return commandPaletteContainsPoint(xpos, ypos, window_width, window_height, top_offset);
+        _ = commandPaletteActivateAgentHistoryRow(row_idx);
+        return true;
+    }
     const item = commandPaletteHitTest(xpos, ypos, window_width, window_height, top_offset) orelse return false;
     commandPaletteClose();
     executePaletteItem(item);
@@ -397,6 +405,8 @@ pub fn windowCloseConfirmExecuteAt(xpos: f64, ypos: f64, window_width: f32, wind
 fn executeCommand(action: CommandAction) void {
     switch (action) {
         .new_tab => sessionLauncherOpen(),
+        .new_agent => sessionLauncherOpenAgentDefault(),
+        .select_agent_history => commandPaletteOpenAgentHistory(),
         .split_right => AppWindow.splitFocused(.right),
         .split_down => AppWindow.splitFocused(.down),
         .split_left => AppWindow.splitFocused(.left),
@@ -418,6 +428,13 @@ fn executeCommand(action: CommandAction) void {
         },
         .show_version => showVersionToast(),
     }
+}
+
+fn commandPaletteOpenAgentHistory() void {
+    var state = commandCenterStateSnapshot();
+    state.commandPaletteOpenAgentHistory();
+    commandCenterStateCommit(state);
+    commandPaletteRefreshAgentHistoryRows();
 }
 
 fn commandPaletteFilter() []const u8 {
@@ -462,6 +479,10 @@ fn commandEntrySecondaryMatches(entry: CommandEntry, filter: []const u8) bool {
 }
 
 fn rebuildPaletteScratch() void {
+    if (commandPaletteIsHistoryMode()) {
+        g_palette_scratch_len = 0;
+        return;
+    }
     const filter = commandPaletteFilter();
     g_palette_scratch_len = 0;
 
@@ -503,6 +524,42 @@ fn executePaletteItem(item: PaletteItem) void {
     }
 }
 
+fn commandPaletteClearAgentHistoryRows() void {
+    if (!g_command_palette_history_rows_owned) {
+        g_command_palette_history_rows = &.{};
+        g_command_palette_history_revision = 0;
+        return;
+    }
+    const allocator = AppWindow.g_allocator orelse {
+        g_command_palette_history_rows = &.{};
+        g_command_palette_history_rows_owned = false;
+        g_command_palette_history_revision = 0;
+        return;
+    };
+    agent_history.freeRows(allocator, g_command_palette_history_rows);
+    g_command_palette_history_rows = &.{};
+    g_command_palette_history_rows_owned = false;
+    g_command_palette_history_revision = 0;
+}
+
+fn commandPaletteRefreshAgentHistoryRows() void {
+    commandPaletteClearAgentHistoryRows();
+    const allocator = AppWindow.g_allocator orelse return;
+    const snapshot = AppWindow.snapshotAgentHistoryRowsForCommandPalette(allocator) catch return;
+    g_command_palette_history_rows = snapshot.rows;
+    g_command_palette_history_rows_owned = true;
+    g_command_palette_history_revision = snapshot.revision;
+}
+
+fn commandPaletteSyncAgentHistoryRows() void {
+    const state = commandCenterStateSnapshot();
+    if (!state.commandPaletteShouldRefreshAgentHistory(
+        g_command_palette_history_revision,
+        AppWindow.agentHistoryRevision(),
+    )) return;
+    commandPaletteRefreshAgentHistoryRows();
+}
+
 fn applyEmbeddedThemeFromPalette(theme_index: usize) void {
     const allocator = AppWindow.g_allocator orelse return;
     if (theme_index >= themes_embed.entries.len) return;
@@ -514,6 +571,11 @@ fn applyEmbeddedThemeFromPalette(theme_index: usize) void {
 fn commandPaletteVisibleCount() usize {
     rebuildPaletteScratch();
     return g_palette_scratch_len;
+}
+
+fn commandPaletteResultCount() usize {
+    if (commandPaletteIsHistoryMode()) return g_command_palette_history_rows.len;
+    return commandPaletteVisibleCount();
 }
 
 fn commandPaletteClampSelection() void {
@@ -558,15 +620,19 @@ fn commandPaletteRowCapacity(content_height: f32, base_h: f32, row_h: f32) usize
 }
 
 fn commandPaletteFirstVisibleIndex(rendered_rows: usize) usize {
-    if (rendered_rows == 0 or g_palette_scratch_len <= rendered_rows) return 0;
-    const selected = @min(g_command_palette_selected, g_palette_scratch_len - 1);
+    const count = commandPaletteResultCount();
+    if (rendered_rows == 0 or count <= rendered_rows) return 0;
+    const selected = if (commandPaletteIsHistoryMode())
+        @min(g_command_palette_history_selected, count - 1)
+    else
+        @min(g_command_palette_selected, count - 1);
     if (selected < rendered_rows) return 0;
-    return @min(selected - rendered_rows + 1, g_palette_scratch_len - rendered_rows);
+    return @min(selected - rendered_rows + 1, count - rendered_rows);
 }
 
 fn commandPaletteLayout(window_width: f32, window_height: f32, top_offset: f32) CommandPaletteLayout {
     const content_height = @max(1, window_height - top_offset);
-    const visible_count = commandPaletteVisibleCount();
+    const visible_count = commandPaletteResultCount();
 
     const box_w = @round(@min(@max(520, window_width - 64), 760));
     const row_h = overlayRowHeight(38);
@@ -611,6 +677,75 @@ fn commandPaletteHitTest(xpos: f64, ypos: f64, window_width: f32, window_height:
     const item_idx = commandPaletteFirstVisibleIndex(layout.rendered_rows) + row;
     if (item_idx >= g_palette_scratch_len) return null;
     return g_palette_scratch[item_idx];
+}
+
+fn commandPaletteHistoryHitTestIndex(xpos: f64, ypos: f64, window_width: f32, window_height: f32, top_offset: f32) ?usize {
+    const layout = commandPaletteLayout(window_width, window_height, top_offset);
+    const x: f32 = @floatCast(xpos);
+    const y: f32 = @floatCast(ypos);
+    if (x < layout.box_x or x > layout.box_x + layout.box_w) return null;
+    if (y < layout.row_top_px) return null;
+
+    const row_f = (y - layout.row_top_px) / layout.row_h;
+    if (row_f < 0) return null;
+    const row: usize = @intFromFloat(@floor(row_f));
+    if (row >= layout.rendered_rows) return null;
+
+    const item_idx = commandPaletteFirstVisibleIndex(layout.rendered_rows) + row;
+    if (item_idx >= g_command_palette_history_rows.len) return null;
+    return item_idx;
+}
+
+fn commandPaletteActivateSelectedAgentHistory() bool {
+    if (!commandPaletteIsHistoryMode()) return false;
+    commandPaletteSyncAgentHistoryRows();
+    const state = commandCenterStateSnapshot();
+    const row_idx = state.commandPaletteActivateSelected(g_command_palette_history_rows.len) orelse return false;
+    return commandPaletteActivateAgentHistoryIndex(row_idx);
+}
+
+fn commandPaletteActivateAgentHistoryRow(row_idx: usize) bool {
+    if (!commandPaletteIsHistoryMode()) return false;
+    commandPaletteSyncAgentHistoryRows();
+    var state = commandCenterStateSnapshot();
+    _ = state.commandPaletteActivateHistoryRow(row_idx, g_command_palette_history_rows.len) orelse return false;
+    commandCenterStateCommit(state);
+    return commandPaletteActivateAgentHistoryIndex(row_idx);
+}
+
+fn commandPaletteActivateAgentHistoryIndex(row_idx: usize) bool {
+    if (!commandPaletteIsHistoryMode()) return false;
+    if (row_idx >= g_command_palette_history_rows.len) return false;
+    if (AppWindow.reopenAiChatTabFromHistorySessionId(g_command_palette_history_rows[row_idx].session_id)) {
+        commandPaletteClose();
+        return true;
+    }
+
+    const allocator = AppWindow.g_allocator orelse return false;
+    const session_id = allocator.dupe(u8, g_command_palette_history_rows[row_idx].session_id) catch return false;
+    defer allocator.free(session_id);
+
+    commandPaletteRefreshAgentHistoryRows();
+
+    var state = commandCenterStateSnapshot();
+    const refreshed_idx = findAgentHistoryRowBySessionId(session_id) orelse {
+        state.commandPaletteClampAgentHistorySelection(g_command_palette_history_rows.len);
+        commandCenterStateCommit(state);
+        return false;
+    };
+    _ = state.commandPaletteActivateHistoryRow(refreshed_idx, g_command_palette_history_rows.len) orelse return false;
+    commandCenterStateCommit(state);
+
+    if (!AppWindow.reopenAiChatTabFromHistorySessionId(g_command_palette_history_rows[refreshed_idx].session_id)) return false;
+    commandPaletteClose();
+    return true;
+}
+
+fn findAgentHistoryRowBySessionId(session_id: []const u8) ?usize {
+    for (g_command_palette_history_rows, 0..) |row, idx| {
+        if (std.mem.eql(u8, row.session_id, session_id)) return idx;
+    }
+    return null;
 }
 
 fn windowCloseConfirmLayout(window_width: f32, window_height: f32) WindowCloseConfirmLayout {
@@ -759,6 +894,7 @@ pub fn renderBrowserUrlBar(window_width: f32, window_height: f32, top_offset: f3
 /// Render the command center overlay.
 pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f32) void {
     if (!g_command_palette_visible) return;
+    commandPaletteSyncAgentHistoryRows();
 
     const gl = &AppWindow.gl;
     const layout = commandPaletteLayout(window_width, window_height, top_offset);
@@ -789,8 +925,9 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
 
     const pad_x: f32 = 24;
     const title_y = textYFromTop(window_height, layout.box_top_px + 16);
-    renderTitlebarText("Command Center", layout.box_x + pad_x, title_y, title_color);
-    renderTitlebarText("Esc closes", layout.box_x + layout.box_w - pad_x - measureTitlebarText("Esc closes"), title_y, muted);
+    renderTitlebarText(if (commandPaletteIsHistoryMode()) "Agent History" else "Command Center", layout.box_x + pad_x, title_y, title_color);
+    const esc_hint = if (commandPaletteIsHistoryMode()) "Esc returns" else "Esc closes";
+    renderTitlebarText(esc_hint, layout.box_x + layout.box_w - pad_x - measureTitlebarText(esc_hint), title_y, muted);
 
     const filter_x = @round(layout.box_x + pad_x);
     const filter_box_y = @round(window_height - (layout.box_top_px + layout.header_h + layout.filter_h));
@@ -799,64 +936,109 @@ pub fn renderCommandPalette(window_width: f32, window_height: f32, top_offset: f
     renderRoundedQuadAlpha(filter_x, filter_box_y, filter_w, layout.filter_h, 5, field_color, 0.92);
 
     const filter_text_y = rowTextY(filter_box_y, layout.filter_h);
-    const filter = commandPaletteFilter();
-    if (filter.len > 0) {
-        renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
+    if (commandPaletteIsHistoryMode()) {
+        const history_hint = if (g_command_palette_history_rows.len == 0)
+            "No saved agent sessions yet"
+        else
+            "Recent agent sessions";
+        renderTitlebarTextLimited(history_hint, filter_x + 12, filter_text_y, dim, filter_w - 24);
     } else {
-        renderTitlebarTextLimited("Filter commands or themes", filter_x + 12, filter_text_y, dim, filter_w - 24);
+        const filter = commandPaletteFilter();
+        if (filter.len > 0) {
+            renderTitlebarTextLimited(filter, filter_x + 12, filter_text_y, fg, filter_w - 24);
+        } else {
+            renderTitlebarTextLimited("Filter commands or themes", filter_x + 12, filter_text_y, dim, filter_w - 24);
+        }
     }
 
-    rebuildPaletteScratch();
-    if (g_palette_scratch_len == 0) {
-        const empty_text = "No matching commands or themes";
-        const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
-        renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
-    } else {
-        const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
-        var display_row: usize = 0;
-        while (display_row < layout.rendered_rows) : (display_row += 1) {
-            const item_idx = first_row + display_row;
-            if (item_idx >= g_palette_scratch_len) break;
-            const item = g_palette_scratch[item_idx];
-            const selected = item_idx == g_command_palette_selected;
+    if (commandPaletteIsHistoryMode()) {
+        if (g_command_palette_history_rows.len == 0) {
+            const empty_text = "No saved agent sessions";
+            const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
+            renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
+        } else {
+            const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
+            var display_row: usize = 0;
+            while (display_row < layout.rendered_rows) : (display_row += 1) {
+                const item_idx = first_row + display_row;
+                if (item_idx >= g_command_palette_history_rows.len) break;
+                const row = g_command_palette_history_rows[item_idx];
+                const selected = item_idx == g_command_palette_history_selected;
 
-            const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
-            const row_y = @round(window_height - row_top - layout.row_h);
-            if (selected) {
-                renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
-                renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
+                const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
+                const row_y = @round(window_height - row_top - layout.row_h);
+                if (selected) {
+                    renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
+                    renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
+                }
+
+                const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
+                const meta_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
+                const text_y = rowTextY(row_y, layout.row_h);
+                const title_x = @round(layout.box_x + pad_x + 2);
+                const meta_right = layout.box_x + layout.box_w - pad_x;
+                if (row.model.len > 0) {
+                    const meta_w = measureTitlebarText(row.model);
+                    renderTitlebarText(row.model, meta_right - meta_w, text_y, meta_color);
+                    renderTitlebarTextLimited(row.title, title_x, text_y, row_title_color, (meta_right - meta_w) - title_x - 18);
+                } else {
+                    renderTitlebarTextLimited(row.title, title_x, text_y, row_title_color, meta_right - title_x);
+                }
             }
+        }
+    } else {
+        rebuildPaletteScratch();
+        if (g_palette_scratch_len == 0) {
+            const empty_text = "No matching commands or themes";
+            const empty_y = @round(window_height - layout.row_top_px - layout.row_h + (layout.row_h - overlayTextHeight()) / 2);
+            renderTitlebarText(empty_text, layout.box_x + (layout.box_w - measureTitlebarText(empty_text)) / 2, empty_y, muted);
+        } else {
+            const first_row = commandPaletteFirstVisibleIndex(layout.rendered_rows);
+            var display_row: usize = 0;
+            while (display_row < layout.rendered_rows) : (display_row += 1) {
+                const item_idx = first_row + display_row;
+                if (item_idx >= g_palette_scratch_len) break;
+                const item = g_palette_scratch[item_idx];
+                const selected = item_idx == g_command_palette_selected;
 
-            const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
-            const shortcut_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
+                const row_top = @round(layout.row_top_px + @as(f32, @floatFromInt(display_row)) * layout.row_h);
+                const row_y = @round(window_height - row_top - layout.row_h);
+                if (selected) {
+                    renderRoundedQuadAlpha(layout.box_x + 12, row_y + 4, layout.box_w - 24, layout.row_h - 8, 5, selected_border, 0.38);
+                    renderRoundedQuadAlpha(layout.box_x + 13, row_y + 5, layout.box_w - 26, layout.row_h - 10, 4, selected_bg, 0.78);
+                }
 
-            const text_y = rowTextY(row_y, layout.row_h);
-            const title_x = @round(layout.box_x + pad_x + 2);
+                const row_title_color = if (selected) fg else mixColor(bg, fg, 0.86);
+                const shortcut_color = if (selected) mixColor(fg, accent, 0.08) else mixColor(bg, fg, 0.54);
 
-            switch (item) {
-                .command => |cmd_idx| {
-                    const entry = COMMAND_ENTRIES[cmd_idx];
-                    var shortcut_left = layout.box_x + layout.box_w - pad_x;
-                    if (entry.shortcut.len > 0) {
-                        const shortcut_w = measureTitlebarText(entry.shortcut);
-                        shortcut_left = @round(layout.box_x + layout.box_w - pad_x - shortcut_w);
-                        renderTitlebarText(entry.shortcut, shortcut_left, text_y, shortcut_color);
-                    }
-                    renderTitlebarTextLimited(entry.title, title_x, text_y, row_title_color, shortcut_left - title_x - 18);
-                },
-                .theme => |ti| {
-                    const name = themes_embed.entries[ti].name;
-                    const suffix = "  theme";
-                    const suffix_w = measureTitlebarText(suffix);
-                    const shortcut_right = layout.box_x + layout.box_w - pad_x;
-                    renderTitlebarText(suffix, shortcut_right - suffix_w, text_y, shortcut_color);
-                    renderTitlebarTextLimited(name, title_x, text_y, row_title_color, (shortcut_right - suffix_w) - title_x - 18);
-                },
+                const text_y = rowTextY(row_y, layout.row_h);
+                const title_x = @round(layout.box_x + pad_x + 2);
+
+                switch (item) {
+                    .command => |cmd_idx| {
+                        const entry = COMMAND_ENTRIES[cmd_idx];
+                        var shortcut_left = layout.box_x + layout.box_w - pad_x;
+                        if (entry.shortcut.len > 0) {
+                            const shortcut_w = measureTitlebarText(entry.shortcut);
+                            shortcut_left = @round(layout.box_x + layout.box_w - pad_x - shortcut_w);
+                            renderTitlebarText(entry.shortcut, shortcut_left, text_y, shortcut_color);
+                        }
+                        renderTitlebarTextLimited(entry.title, title_x, text_y, row_title_color, shortcut_left - title_x - 18);
+                    },
+                    .theme => |ti| {
+                        const name = themes_embed.entries[ti].name;
+                        const suffix = "  theme";
+                        const suffix_w = measureTitlebarText(suffix);
+                        const shortcut_right = layout.box_x + layout.box_w - pad_x;
+                        renderTitlebarText(suffix, shortcut_right - suffix_w, text_y, shortcut_color);
+                        renderTitlebarTextLimited(name, title_x, text_y, row_title_color, (shortcut_right - suffix_w) - title_x - 18);
+                    },
+                }
             }
         }
     }
 
-    const footer = "Up/Down + Enter applies";
+    const footer = if (commandPaletteIsHistoryMode()) "Up/Down selects, Enter reopens, Esc returns" else "Up/Down + Enter applies";
     renderTitlebarTextLimited(footer, layout.box_x + pad_x, rowTextY(box_y, layout.footer_h), muted, layout.box_w - pad_x * 2);
 }
 
@@ -873,6 +1055,7 @@ const AI_FIELD_MAX = 512;
 const AI_PROFILE_MAX = 16;
 const AI_PROFILE_NONE = std.math.maxInt(usize);
 const SESSION_LAUNCHER_ROW_COUNT = 4;
+const SESSION_LAUNCHER_ROW_AI_AGENT = command_center_state.SESSION_LAUNCHER_ROW_AI_AGENT;
 
 const SshField = enum(usize) {
     name = 0,
@@ -931,6 +1114,8 @@ const AiFormMode = enum {
     settings,
 };
 
+const SessionLauncherAiIntent = command_center_state.SessionLauncherAiIntent;
+
 const SshProfile = struct {
     fields: [SSH_FIELD_COUNT][SSH_FIELD_MAX]u8 = undefined,
     lens: [SSH_FIELD_COUNT]usize = .{0} ** SSH_FIELD_COUNT,
@@ -981,6 +1166,7 @@ threadlocal var g_ai_list_selected: usize = 0;
 threadlocal var g_ai_list_mode: AiListMode = .manage;
 threadlocal var g_ai_edit_index: usize = AI_PROFILE_NONE;
 threadlocal var g_ai_form_mode: AiFormMode = .session_setup;
+threadlocal var g_session_launcher_ai_intent: SessionLauncherAiIntent = .default;
 threadlocal var g_pending_ssh_password: [SSH_FIELD_MAX + 1]u8 = undefined;
 threadlocal var g_pending_ssh_password_len: usize = 0;
 threadlocal var g_pending_ssh_password_due_ms: i64 = 0;
@@ -992,29 +1178,73 @@ const SSH_PASSWORD_PROMPT_TIMEOUT_MS: i64 = 60_000;
 const SSH_PROMPT_SCAN_MAX_COLS: usize = 4096;
 
 pub fn sessionLauncherVisible() bool {
-    return g_session_launcher_visible or g_ssh_list_visible or g_ssh_form_visible or g_ai_list_visible or g_ai_form_visible;
+    return commandCenterStateSnapshot().sessionLauncherVisible();
+}
+
+fn commandCenterStateSnapshot() command_center_state.State {
+    return .{
+        .command_palette_visible = g_command_palette_visible,
+        .command_palette_selected = g_command_palette_selected,
+        .command_palette_filter_len = g_command_palette_filter_len,
+        .command_palette_mode = g_command_palette_mode,
+        .command_palette_history_selected = g_command_palette_history_selected,
+        .startup_shortcuts_visible = g_startup_shortcuts_visible,
+        .session_launcher_visible = g_session_launcher_visible,
+        .session_launcher_selected = g_session_launcher_selected,
+        .session_launcher_ai_intent = g_session_launcher_ai_intent,
+        .ssh_list_visible = g_ssh_list_visible,
+        .ssh_form_visible = g_ssh_form_visible,
+        .ai_list_visible = g_ai_list_visible,
+        .ai_form_visible = g_ai_form_visible,
+        .settings_visible = g_settings_visible,
+    };
+}
+
+fn commandCenterStateCommit(state: command_center_state.State) void {
+    const previous = commandCenterStateSnapshot();
+    if (command_center_state.historyRowsNeedCleanup(previous, state)) {
+        commandPaletteClearAgentHistoryRows();
+    }
+    commandCenterStateApply(state);
+}
+
+fn commandCenterStateApply(state: command_center_state.State) void {
+    g_command_palette_visible = state.command_palette_visible;
+    g_command_palette_selected = state.command_palette_selected;
+    g_command_palette_filter_len = state.command_palette_filter_len;
+    g_command_palette_mode = state.command_palette_mode;
+    g_command_palette_history_selected = state.command_palette_history_selected;
+    g_startup_shortcuts_visible = state.startup_shortcuts_visible;
+    g_session_launcher_visible = state.session_launcher_visible;
+    g_session_launcher_selected = state.session_launcher_selected;
+    g_session_launcher_ai_intent = state.session_launcher_ai_intent;
+    g_ssh_list_visible = state.ssh_list_visible;
+    g_ssh_form_visible = state.ssh_form_visible;
+    g_ai_list_visible = state.ai_list_visible;
+    g_ai_form_visible = state.ai_form_visible;
+    g_settings_visible = state.settings_visible;
 }
 
 pub fn sessionLauncherOpen() void {
-    g_session_launcher_visible = true;
-    g_session_launcher_selected = 0;
-    g_ssh_list_visible = false;
-    g_ssh_form_visible = false;
-    g_ai_list_visible = false;
-    g_ai_form_visible = false;
+    var state = commandCenterStateSnapshot();
+    state.sessionLauncherOpen();
+    commandCenterStateCommit(state);
     g_ssh_list_mode = .manage;
     g_ai_list_mode = .manage;
-    g_command_palette_visible = false;
-    g_settings_visible = false;
-    g_startup_shortcuts_visible = false;
+}
+
+pub fn sessionLauncherOpenAgentDefault() void {
+    var state = commandCenterStateSnapshot();
+    state.sessionLauncherOpenAgentDefault();
+    commandCenterStateCommit(state);
+    g_ssh_list_mode = .manage;
+    g_ai_list_mode = .manage;
 }
 
 pub fn sessionLauncherClose() void {
-    g_session_launcher_visible = false;
-    g_ssh_list_visible = false;
-    g_ssh_form_visible = false;
-    g_ai_list_visible = false;
-    g_ai_form_visible = false;
+    var state = commandCenterStateSnapshot();
+    state.sessionLauncherClose();
+    commandCenterStateCommit(state);
     g_ssh_list_mode = .manage;
     g_ai_list_mode = .manage;
     g_ai_form_mode = .session_setup;
@@ -1129,7 +1359,7 @@ pub fn sessionLauncherExecuteAt(xpos: f64, ypos: f64, window_width: f32, window_
         .powershell => openPowerShellSession(),
         .ssh => openSshList(),
         .wsl => openWslSession(),
-        .ai_chat => openDefaultAiSession(),
+        .ai_chat => openDefaultAiSessionForIntent(),
         .connect_selected => runSshListRow(g_ssh_list_selected),
         .new_ssh => openSshFormNew(),
         .edit_selected => openSshEditPicker(),
@@ -1162,7 +1392,7 @@ fn runSessionLauncherRow(row: usize) void {
         0 => openPowerShellSession(),
         1 => openSshList(),
         2 => openWslSession(),
-        3 => openDefaultAiSession(),
+        SESSION_LAUNCHER_ROW_AI_AGENT => openDefaultAiSessionForIntent(),
         else => {},
     }
 }
@@ -1571,6 +1801,15 @@ fn openDefaultAiSession() void {
     connectAiProfile(0);
 }
 
+fn openDefaultAiSessionForIntent() void {
+    loadAiProfiles();
+    switch (command_center_state.resolveDefaultAiLaunch(g_session_launcher_ai_intent, g_ai_profile_count != 0)) {
+        .open_form => openAiFormNewWithMode(.session_setup),
+        .connect_default_profile => connectAiProfile(0),
+        .connect_default_profile_as_agent => connectAiProfileWithAgentOverride(0, "true"),
+    }
+}
+
 fn openAiSettings() void {
     loadAiProfiles();
     if (g_ai_profile_count == 0) {
@@ -1845,6 +2084,10 @@ fn saveAiFormProfile() ?usize {
 }
 
 fn connectAiProfile(idx: usize) void {
+    connectAiProfileWithAgentOverride(idx, null);
+}
+
+fn connectAiProfileWithAgentOverride(idx: usize, agent_override: ?[]const u8) void {
     if (idx >= g_ai_profile_count) return;
     const profile = &g_ai_profiles[idx];
     const name = aiProfileField(profile, .name);
@@ -1855,7 +2098,7 @@ fn connectAiProfile(idx: usize) void {
     const thinking = aiProfileField(profile, .thinking);
     const reasoning_effort = aiProfileField(profile, .reasoning_effort);
     const stream_val = aiProfileField(profile, .stream);
-    const agent_val = aiProfileField(profile, .agent);
+    const agent_val = agent_override orelse aiProfileField(profile, .agent);
     if (base_url.len == 0 or model.len == 0) return;
     if (!isHttpUrlish(base_url)) return;
 
@@ -2178,7 +2421,7 @@ fn sessionDesiredBoxWidth() f32 {
     desired = @max(desired, sessionTwoColumnWidth("PowerShell", "new terminal"));
     desired = @max(desired, sessionTwoColumnWidth("SSH", "connect server"));
     desired = @max(desired, sessionTwoColumnWidth("WSL", "wsl.exe ~"));
-    desired = @max(desired, sessionTwoColumnWidth("AI Agent", defaultAiModeLabel()));
+    desired = @max(desired, sessionTwoColumnWidth("AI Agent", sessionLauncherAiModeLabel()));
     return desired;
 }
 
@@ -2366,6 +2609,13 @@ fn defaultAiModeLabel() []const u8 {
     return aiModeText(AppWindow.ai_chat.DEFAULT_AGENT);
 }
 
+fn sessionLauncherAiModeLabel() []const u8 {
+    return switch (g_session_launcher_ai_intent) {
+        .default => defaultAiModeLabel(),
+        .agent => "Agent",
+    };
+}
+
 pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: f32) void {
     if (!sessionLauncherVisible()) return;
 
@@ -2443,7 +2693,7 @@ pub fn renderSessionLauncher(window_width: f32, window_height: f32, top_offset: 
         renderSessionRow(layout, window_height, 0, "PowerShell", "new terminal", g_session_launcher_selected == 0);
         renderSessionRow(layout, window_height, 1, "SSH", "connect server", g_session_launcher_selected == 1);
         renderSessionRow(layout, window_height, 2, "WSL", "wsl.exe ~", g_session_launcher_selected == 2);
-        renderSessionRow(layout, window_height, 3, "AI Agent", defaultAiModeLabel(), g_session_launcher_selected == 3);
+        renderSessionRow(layout, window_height, 3, "AI Agent", sessionLauncherAiModeLabel(), g_session_launcher_selected == 3);
         return;
     }
 
@@ -2535,17 +2785,12 @@ pub fn settingsPageVisible() bool {
 }
 
 pub fn settingsPageOpen() void {
-    g_settings_visible = true;
+    var state = commandCenterStateSnapshot();
+    state.settingsPageOpen();
+    commandCenterStateCommit(state);
     g_settings_focus = SETTINGS_THEME_ROW;
-    g_session_launcher_visible = false;
-    g_ssh_list_visible = false;
-    g_ssh_form_visible = false;
-    g_ai_list_visible = false;
-    g_ai_form_visible = false;
     g_ai_list_mode = .manage;
     g_ai_form_mode = .session_setup;
-    g_command_palette_visible = false;
-    g_startup_shortcuts_visible = false;
     g_settings_cfg_dirty = true;
 }
 

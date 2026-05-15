@@ -13,6 +13,7 @@ comptime {
     _ = @import("scp.zig");
     _ = if (build_options.webview) @import("browser_panel.zig") else @import("browser_panel_stub.zig");
     _ = @import("browser_url.zig");
+    _ = @import("command_center_state.zig");
     _ = @import("config.zig");
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");

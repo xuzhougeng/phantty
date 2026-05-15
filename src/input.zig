@@ -887,14 +887,24 @@ fn handleKey(ev: win32_backend.KeyEvent) void {
         return;
     }
     if (overlays.commandPaletteVisible()) {
-        switch (ev.vk) {
-            win32_backend.VK_ESCAPE => overlays.commandPaletteClose(),
-            win32_backend.VK_UP => overlays.commandPaletteMove(-1),
-            win32_backend.VK_DOWN => overlays.commandPaletteMove(1),
-            win32_backend.VK_RETURN => overlays.commandPaletteExecuteSelected(),
-            win32_backend.VK_BACK => overlays.commandPaletteBackspace(),
-            win32_backend.VK_DELETE => overlays.commandPaletteClearFilter(),
-            else => {},
+        if (overlays.commandPaletteAgentHistoryVisible()) {
+            switch (ev.vk) {
+                win32_backend.VK_ESCAPE => overlays.commandPaletteLeaveAgentHistory(),
+                win32_backend.VK_UP => overlays.commandPaletteMoveAgentHistory(-1),
+                win32_backend.VK_DOWN => overlays.commandPaletteMoveAgentHistory(1),
+                win32_backend.VK_RETURN => overlays.commandPaletteExecuteSelected(),
+                else => {},
+            }
+        } else {
+            switch (ev.vk) {
+                win32_backend.VK_ESCAPE => overlays.commandPaletteClose(),
+                win32_backend.VK_UP => overlays.commandPaletteMove(-1),
+                win32_backend.VK_DOWN => overlays.commandPaletteMove(1),
+                win32_backend.VK_RETURN => overlays.commandPaletteExecuteSelected(),
+                win32_backend.VK_BACK => overlays.commandPaletteBackspace(),
+                win32_backend.VK_DELETE => overlays.commandPaletteClearFilter(),
+                else => {},
+            }
         }
         return;
     }

@@ -194,6 +194,7 @@ var g_agent_history_mutex: std.Thread.Mutex = .{};
 pub var g_agent_history: ?*agent_history.Store = null;
 var g_agent_history_dirty: bool = false;
 var g_agent_history_next_flush_ms: i64 = 0;
+var g_agent_history_revision: u64 = 0;
 const AGENT_HISTORY_FLUSH_DEBOUNCE_MS: i64 = 350;
 
 // Initial CWD for this window (used when spawning the first tab)
@@ -446,6 +447,7 @@ fn ensureGlobalAgentHistoryStore(allocator: std.mem.Allocator) !void {
     g_agent_history = store;
     g_agent_history_dirty = false;
     g_agent_history_next_flush_ms = 0;
+    g_agent_history_revision = 0;
 }
 
 fn deinitGlobalAgentHistoryStore(allocator: std.mem.Allocator) void {
@@ -461,6 +463,7 @@ fn deinitGlobalAgentHistoryStore(allocator: std.mem.Allocator) void {
     }
     g_agent_history_dirty = false;
     g_agent_history_next_flush_ms = 0;
+    g_agent_history_revision = 0;
 }
 
 fn saveAiHistoryChangeEvent(event: ai_chat.HistoryChangeEvent) void {
@@ -479,6 +482,7 @@ fn saveAiHistoryChangeEvent(event: ai_chat.HistoryChangeEvent) void {
         g_agent_history_dirty = true;
         g_agent_history_next_flush_ms = std.time.milliTimestamp() + AGENT_HISTORY_FLUSH_DEBOUNCE_MS;
     }
+    g_agent_history_revision +%= 1;
 }
 
 fn flushAgentHistoryStoreIfDirty(force: bool) void {
@@ -603,6 +607,34 @@ pub fn reopenAiChatTabFromHistorySessionId(session_id: []const u8) bool {
     if (!tab.spawnAiChatTabFromHistoryRecord(allocator, owned_record)) return false;
     clearUiStateOnTabChange();
     return true;
+}
+
+pub const AgentHistoryRowsSnapshot = struct {
+    rows: []agent_history.Row,
+    revision: u64,
+};
+
+pub fn snapshotAgentHistoryRowsForCommandPalette(allocator: std.mem.Allocator) !AgentHistoryRowsSnapshot {
+    g_agent_history_mutex.lock();
+    defer g_agent_history_mutex.unlock();
+
+    if (g_agent_history) |store| {
+        return .{
+            .rows = try store.buildRows(allocator),
+            .revision = g_agent_history_revision,
+        };
+    }
+
+    return .{
+        .rows = try allocator.alloc(agent_history.Row, 0),
+        .revision = g_agent_history_revision,
+    };
+}
+
+pub fn agentHistoryRevision() u64 {
+    g_agent_history_mutex.lock();
+    defer g_agent_history_mutex.unlock();
+    return g_agent_history_revision;
 }
 
 pub fn syncVisibleFileExplorerForActiveTab() void {
