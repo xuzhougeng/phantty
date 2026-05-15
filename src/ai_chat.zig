@@ -1175,22 +1175,43 @@ pub const Session = struct {
             tool_snapshot = host.collectSnapshot(host.ctx, self.allocator) catch null;
         }
 
+        const base_url = try self.allocator.dupe(u8, self.baseUrl());
+        var base_url_owned = true;
+        errdefer if (base_url_owned) self.allocator.free(base_url);
+        const api_key = try self.allocator.dupe(u8, self.apiKey());
+        var api_key_owned = true;
+        errdefer if (api_key_owned) self.allocator.free(api_key);
+        const model_name = try self.allocator.dupe(u8, self.model());
+        var model_owned = true;
+        errdefer if (model_owned) self.allocator.free(model_name);
+        const system_prompt = try self.allocator.dupe(u8, self.systemPrompt());
+        var system_prompt_owned = true;
+        errdefer if (system_prompt_owned) self.allocator.free(system_prompt);
+        const reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort());
+        var reasoning_effort_owned = true;
+        errdefer if (reasoning_effort_owned) self.allocator.free(reasoning_effort);
+
         req.* = .{
             .allocator = self.allocator,
             .session = self,
-            .base_url = try self.allocator.dupe(u8, self.baseUrl()),
-            .api_key = try self.allocator.dupe(u8, self.apiKey()),
-            .model = try self.allocator.dupe(u8, self.model()),
-            .system_prompt = try self.allocator.dupe(u8, self.systemPrompt()),
+            .base_url = base_url,
+            .api_key = api_key,
+            .model = model_name,
+            .system_prompt = system_prompt,
             .messages = messages,
             .thinking_enabled = self.thinking_enabled,
-            .reasoning_effort = try self.allocator.dupe(u8, self.reasoningEffort()),
+            .reasoning_effort = reasoning_effort,
             .stream = self.stream and !agent_enabled,
             .agent_enabled = agent_enabled,
             .tool_host = tool_host,
             .tool_snapshot = tool_snapshot,
             .started_ms = std.time.milliTimestamp(),
         };
+        base_url_owned = false;
+        api_key_owned = false;
+        model_owned = false;
+        system_prompt_owned = false;
+        reasoning_effort_owned = false;
         return req;
     }
 
@@ -3669,6 +3690,38 @@ test "ai chat request skips replayable tool messages missing identity" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "# Skill without metadata") == null);
     try std.testing.expect(std.mem.indexOf(u8, json, "\"role\":\"tool\"") == null);
+}
+
+test "ai chat request setup cleans scalar fields on allocation failure" {
+    const allocator = std.testing.allocator;
+
+    var saw_oom = false;
+    var fail_index: usize = 0;
+    while (fail_index < 32) : (fail_index += 1) {
+        var failing_allocator = std.testing.FailingAllocator.init(allocator, .{
+            .fail_index = fail_index,
+        });
+
+        var session = Session{ .allocator = failing_allocator.allocator() };
+        session.assignSessionId();
+        session.copyTitle("Test");
+        session.copyBaseUrl(DEFAULT_BASE_URL);
+        session.copyApiKey("test-key");
+        session.copyModel(DEFAULT_MODEL);
+        session.copySystemPrompt(DEFAULT_SYSTEM_PROMPT);
+        session.copyReasoningEffort(DEFAULT_REASONING_EFFORT);
+
+        const result = session.buildRequestLocked();
+        if (result) |request| {
+            request.deinit();
+            if (!failing_allocator.has_induced_failure) break;
+        } else |err| switch (err) {
+            error.OutOfMemory => saw_oom = true,
+            else => return err,
+        }
+    }
+
+    try std.testing.expect(saw_oom);
 }
 
 test "ai chat request json replays assistant reasoning content" {
