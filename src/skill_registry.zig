@@ -185,7 +185,7 @@ fn collectSkillDirNames(
     defer skills_dir.close();
 
     var names: std.ArrayListUnmanaged([]u8) = .empty;
-    errdefer freeStringList(allocator, names.items);
+    errdefer deinitStringArrayList(allocator, &names);
 
     var it = skills_dir.iterate();
     while (try it.next()) |entry| {
@@ -202,6 +202,11 @@ fn collectSkillDirNames(
 fn freeStringList(allocator: std.mem.Allocator, list: [][]u8) void {
     for (list) |item| allocator.free(item);
     allocator.free(list);
+}
+
+fn deinitStringArrayList(allocator: std.mem.Allocator, list: *std.ArrayListUnmanaged([]u8)) void {
+    for (list.items) |item| allocator.free(item);
+    list.deinit(allocator);
 }
 
 fn openSkillsDir(root_dir: std.fs.Dir, skills_rel: []const u8) !std.fs.Dir {
