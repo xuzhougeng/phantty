@@ -31,12 +31,14 @@ const DETAIL_PAD_X: f32 = 14;
 const DETAIL_PAD_Y: f32 = 10;
 const DETAIL_ARROW_W: f32 = 12;
 const DETAIL_RULE_W: f32 = 3;
+const TOOL_GROUP_ITEM_GAP: f32 = 8;
 const TABLE_MAX_COLS: usize = 8;
 const TABLE_CELL_PAD_X: f32 = 10;
 const TABLE_MIN_COL_W: f32 = 56;
 
 pub const HitTarget = union(enum) {
     copy_message: usize,
+    toggle_tool_group: usize,
     toggle_tool: usize,
     toggle_reasoning: usize,
 };
@@ -135,12 +137,23 @@ pub fn render(
     const viewport_bottom_top_px = window_height - transcript_bottom;
 
     var content_h: f32 = 0;
-    for (session.messages.items) |msg| {
+    var measure_index: usize = 0;
+    while (measure_index < session.messages.items.len) {
+        const msg = session.messages.items[measure_index];
+        if (isToolGroupStart(session.messages.items, measure_index)) {
+            const group_end = toolGroupEnd(session.messages.items, measure_index);
+            content_h += toolGroupBlockHeight(session.messages.items, measure_index, group_end, content_w);
+            content_h += BUBBLE_GAP;
+            measure_index = group_end;
+            continue;
+        }
+
         content_h += messageBlockHeight(msg, content_w);
         if (msg.reasoning) |reasoning| {
             if (reasoning.len > 0) content_h += reasoningCardHeight(msg, content_w);
         }
         content_h += BUBBLE_GAP;
+        measure_index += 1;
     }
     const max_scroll = @max(0.0, content_h - transcript_h);
     session.scroll_px = @min(session.scroll_px, max_scroll);
@@ -158,7 +171,20 @@ pub fn render(
     const transcript_selected = session.transcript_select_all;
     var cursor_top = transcript_top + gravity_offset - session.scroll_px;
 
-    for (session.messages.items, 0..) |msg, message_index| {
+    var message_index: usize = 0;
+    while (message_index < session.messages.items.len) {
+        const msg = session.messages.items[message_index];
+        if (isToolGroupStart(session.messages.items, message_index)) {
+            const group_end = toolGroupEnd(session.messages.items, message_index);
+            const group_h = toolGroupBlockHeight(session.messages.items, message_index, group_end, content_w);
+            if (sectionVisible(cursor_top, group_h, transcript_top, viewport_bottom_top_px)) {
+                renderToolGroup(session.messages.items, message_index, group_end, content_x, cursor_top, content_w, group_h, window_height, transcript_selected);
+            }
+            cursor_top += group_h + BUBBLE_GAP;
+            message_index = group_end;
+            continue;
+        }
+
         const block_h = messageBlockHeight(msg, content_w);
         if (msg.role == .tool) {
             if (sectionVisible(cursor_top, block_h, transcript_top, viewport_bottom_top_px)) {
@@ -179,8 +205,8 @@ pub fn render(
             }
         }
 
-        _ = message_index;
         cursor_top += BUBBLE_GAP;
+        message_index += 1;
     }
 
     gl.Disable.?(c.GL_SCISSOR_TEST);
@@ -217,12 +243,23 @@ pub fn interactionHitTest(
     const content_x = x + LINE_PAD_X;
 
     var content_h: f32 = 0;
-    for (session.messages.items) |msg| {
+    var measure_index: usize = 0;
+    while (measure_index < session.messages.items.len) {
+        const msg = session.messages.items[measure_index];
+        if (isToolGroupStart(session.messages.items, measure_index)) {
+            const group_end = toolGroupEnd(session.messages.items, measure_index);
+            content_h += toolGroupBlockHeight(session.messages.items, measure_index, group_end, content_w);
+            content_h += BUBBLE_GAP;
+            measure_index = group_end;
+            continue;
+        }
+
         content_h += messageBlockHeight(msg, content_w);
         if (msg.reasoning) |reasoning| {
             if (reasoning.len > 0) content_h += reasoningCardHeight(msg, content_w);
         }
         content_h += BUBBLE_GAP;
+        measure_index += 1;
     }
 
     const scroll_px = @min(session.scroll_px, @max(0.0, content_h - transcript_h));
@@ -231,7 +268,36 @@ pub fn interactionHitTest(
     const py: f32 = @floatCast(ypos);
     var cursor_top = transcript_top + gravity_offset - scroll_px;
 
-    for (session.messages.items, 0..) |msg, message_index| {
+    var message_index: usize = 0;
+    while (message_index < session.messages.items.len) {
+        const msg = session.messages.items[message_index];
+        if (isToolGroupStart(session.messages.items, message_index)) {
+            const group_end = toolGroupEnd(session.messages.items, message_index);
+            const group_h = toolGroupBlockHeight(session.messages.items, message_index, group_end, content_w);
+            if (sectionVisible(cursor_top, group_h, transcript_top, viewport_bottom_top_px)) {
+                const header_rect = detailHeaderRect(content_x, cursor_top, content_w);
+                if (pointInRect(px, py, header_rect)) return .{ .toggle_tool_group = message_index };
+
+                if (!msg.tool_group_collapsed) {
+                    var child_top = cursor_top + detailHeaderHeight() + TOOL_GROUP_ITEM_GAP;
+                    var child_index = message_index;
+                    while (child_index < group_end) : (child_index += 1) {
+                        const child_h = toolCardHeight(session.messages.items[child_index], content_w);
+                        if (sectionVisible(child_top, child_h, transcript_top, viewport_bottom_top_px)) {
+                            const copy_rect = detailCopyButtonRect(content_x, child_top, content_w);
+                            if (pointInRect(px, py, copy_rect)) return .{ .copy_message = child_index };
+                            const child_header_rect = detailHeaderRect(content_x, child_top, content_w);
+                            if (pointInRect(px, py, child_header_rect)) return .{ .toggle_tool = child_index };
+                        }
+                        child_top += child_h + TOOL_GROUP_ITEM_GAP;
+                    }
+                }
+            }
+            cursor_top += group_h + BUBBLE_GAP;
+            message_index = group_end;
+            continue;
+        }
+
         const block_h = messageBlockHeight(msg, content_w);
         if (msg.role == .tool) {
             if (sectionVisible(cursor_top, block_h, transcript_top, viewport_bottom_top_px)) {
@@ -257,6 +323,7 @@ pub fn interactionHitTest(
             }
         }
         cursor_top += BUBBLE_GAP;
+        message_index += 1;
     }
 
     return null;
@@ -333,6 +400,29 @@ fn reasoningCardHeight(msg: ai_chat.Message, max_w: f32) f32 {
     else
         plainContentHeight(reasoning, @max(1.0, max_w - DETAIL_PAD_X * 2), reasoningLineHeight()) + DETAIL_PAD_Y * 2;
     return detailHeaderHeight() + body_h;
+}
+
+fn isToolGroupStart(messages: []const ai_chat.Message, index: usize) bool {
+    if (index >= messages.len) return false;
+    return messages[index].role == .tool and messages[index].tool_grouped;
+}
+
+fn toolGroupEnd(messages: []const ai_chat.Message, start: usize) usize {
+    var end = start;
+    while (end < messages.len and messages[end].role == .tool) : (end += 1) {}
+    return end;
+}
+
+fn toolGroupBlockHeight(messages: []const ai_chat.Message, start: usize, end: usize, max_w: f32) f32 {
+    if (start >= end) return 0;
+    var h = detailHeaderHeight();
+    if (messages[start].tool_group_collapsed) return h;
+
+    var i = start;
+    while (i < end) : (i += 1) {
+        h += TOOL_GROUP_ITEM_GAP + toolCardHeight(messages[i], max_w);
+    }
+    return h;
 }
 
 fn plainContentHeight(text: []const u8, max_w: f32, line_h: f32) f32 {
@@ -413,6 +503,78 @@ fn renderMessageBubble(
         _ = renderMarkdownContent(text, body_x, body_top, body_w, window_height, window_height, palette);
     } else {
         _ = renderWrappedText(text, body_x, body_top, body_w, lineHeight(), fg, window_height, window_height);
+    }
+}
+
+fn renderToolGroup(
+    messages: []const ai_chat.Message,
+    start: usize,
+    end: usize,
+    x: f32,
+    top_px: f32,
+    w: f32,
+    h: f32,
+    window_height: f32,
+    selected: bool,
+) void {
+    if (start >= end) return;
+    const collapsed = messages[start].tool_group_collapsed;
+    renderToolGroupHeader(messages[start..end], collapsed, x, top_px, w, h, window_height, selected);
+    if (collapsed) return;
+
+    var child_top = top_px + detailHeaderHeight() + TOOL_GROUP_ITEM_GAP;
+    var i = start;
+    while (i < end) : (i += 1) {
+        const child_h = toolCardHeight(messages[i], w);
+        renderToolCard(messages[i], x, child_top, w, child_h, window_height, selected);
+        child_top += child_h + TOOL_GROUP_ITEM_GAP;
+    }
+}
+
+fn renderToolGroupHeader(
+    messages: []const ai_chat.Message,
+    collapsed: bool,
+    x: f32,
+    top_px: f32,
+    w: f32,
+    h: f32,
+    window_height: f32,
+    selected: bool,
+) void {
+    const bg = AppWindow.g_theme.background;
+    const fg = AppWindow.g_theme.foreground;
+    const accent = AppWindow.g_theme.cursor_color;
+    const header_h = detailHeaderHeight();
+    const y = window_height - top_px - h;
+    const header_y = y + h - header_h;
+    const card_bg = if (selected) mixColor(bg, accent, 0.20) else mixColor(bg, fg, 0.045);
+    const header_bg = if (selected) mixColor(bg, accent, 0.27) else mixColor(bg, fg, 0.085);
+
+    gl_init.renderQuadAlpha(x, y, w, h, card_bg, 0.92);
+    gl_init.renderQuadAlpha(x, header_y, w, header_h, header_bg, 0.98);
+    gl_init.renderQuadAlpha(x, y, DETAIL_RULE_W, h, accent, if (selected) 0.78 else 0.50);
+    gl_init.renderQuadAlpha(x, y + h - 1, w, 1, mixColor(bg, fg, 0.20), 0.62);
+
+    const arrow_x = x + DETAIL_PAD_X;
+    const text_y = header_y + @round((header_h - font.g_titlebar_cell_height) / 2);
+    _ = titlebar.renderTextLimited(if (collapsed) ">" else "v", arrow_x, text_y, mixColor(fg, accent, 0.16), DETAIL_ARROW_W);
+
+    var text_x = arrow_x + DETAIL_ARROW_W + 6;
+    const title_end = titlebar.renderTextLimited("Tool calls", text_x, text_y, mixColor(fg, accent, 0.18), w * 0.26);
+    text_x = title_end + 10;
+
+    var count_buf: [32]u8 = undefined;
+    const item_word = if (messages.len == 1) "item" else "items";
+    const count_text = std.fmt.bufPrint(&count_buf, "{} {s}", .{ messages.len, item_word }) catch "items";
+    const count_end = titlebar.renderTextLimited(count_text, text_x, text_y, mixColor(fg, accent, 0.32), w * 0.18);
+    text_x = count_end + 10;
+
+    if (collapsed and messages.len > 0 and text_x + 12 < x + w - DETAIL_PAD_X) {
+        const meta = toolSectionMeta(messages[0].content);
+        const preview = if (meta.name.len > 0) meta.name else meta.preview;
+        if (preview.len > 0) {
+            _ = titlebar.renderTextLimited(preview, text_x, text_y, mixColor(bg, fg, 0.58), @max(24.0, x + w - DETAIL_PAD_X - text_x));
+        }
     }
 }
 

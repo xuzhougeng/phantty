@@ -80,6 +80,7 @@ pub fn init(allocator: std.mem.Allocator, app: *App) !AppWindow {
     overlays.g_debug_fps = app.debug_fps;
     overlays.g_debug_draw_calls = app.debug_draw_calls;
     g_debug_memory = app.debug_memory;
+    g_native_scrollbar = app.native_scrollbar;
 
     // Split config
     overlays.g_unfocused_split_opacity = app.unfocused_split_opacity;
@@ -198,6 +199,7 @@ threadlocal var g_start_maximize: bool = false;
 threadlocal var g_start_fullscreen: bool = false;
 threadlocal var g_debug_memory: bool = false;
 threadlocal var g_debug_memory_last_ms: i64 = 0;
+pub threadlocal var g_native_scrollbar: bool = false;
 threadlocal var g_remote_layout_last_ms: i64 = 0;
 threadlocal var g_remote_ai_sinks: [tab.MAX_TABS]RemoteAiInputSink = undefined;
 
@@ -340,6 +342,48 @@ fn syncWindowTitlebarHeight(win: *win32_backend.Window) f32 {
     const next: i32 = @intFromFloat(titlebar.titlebarHeight());
     win.titlebar_height = next;
     return @floatFromInt(next);
+}
+
+fn syncNativeScrollbarForFrame(
+    win: *win32_backend.Window,
+    active_tab: *TabState,
+    split_count: usize,
+    content_x: i32,
+    content_y: i32,
+    content_w: i32,
+    content_h: i32,
+) bool {
+    if (!g_native_scrollbar or active_tab.kind != .terminal or split_count != 1) {
+        win.hideNativeScrollbar();
+        return false;
+    }
+
+    const surface = activeSurface() orelse {
+        win.hideNativeScrollbar();
+        return false;
+    };
+
+    const sb = input.scrollbarForSurface(surface);
+    if (sb.total <= sb.len) {
+        win.hideNativeScrollbar();
+        return false;
+    }
+
+    const bar_w = @min(win.nativeScrollbarWidth(), @max(0, content_w));
+    if (bar_w <= 0 or content_h <= 0) {
+        win.hideNativeScrollbar();
+        return false;
+    }
+
+    return win.syncNativeScrollbar(
+        content_x + content_w - bar_w,
+        content_y,
+        bar_w,
+        content_h,
+        sb.total,
+        sb.len,
+        sb.offset,
+    );
 }
 
 pub fn activeSelection() *Selection {
@@ -693,6 +737,10 @@ fn onWin32Resize(width: i32, height: i32) void {
         const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(width)) - left_panels_w - right_panels_w - render_padding * 2);
         const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(height)) - (render_padding + tb) - render_padding);
         const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
+        const native_scrollbar_visible = if (g_window) |w|
+            syncNativeScrollbarForFrame(w, active_tab, split_count, content_x, content_y, content_w, content_h)
+        else
+            false;
         if (g_allocator) |alloc| syncRemoteLayout(alloc);
 
         if (split_count <= 1) {
@@ -722,7 +770,7 @@ fn onWin32Resize(width: i32, height: i32) void {
                 markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
                 file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                 cell_renderer.drawCells(rend, @floatFromInt(fb_height), left_panels_w + @as(f32, @floatFromInt(pad.left)), pad_top);
-                overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
+                if (!native_scrollbar_visible) overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
                 overlays.renderResizeOverlayWithOffset(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
             }
         } else {
@@ -839,6 +887,7 @@ fn applyReloadedConfig(allocator: std.mem.Allocator, cfg: *const Config) void {
     overlays.g_debug_fps = cfg.@"phantty-debug-fps";
     overlays.g_debug_draw_calls = cfg.@"phantty-debug-draw-calls";
     g_debug_memory = cfg.@"phantty-debug-memory";
+    g_native_scrollbar = cfg.@"native-scrollbar";
 
     // --- Split config ---
     overlays.g_unfocused_split_opacity = cfg.@"unfocused-split-opacity";
@@ -2500,6 +2549,7 @@ fn runMainLoop(self: *AppWindow) !void {
             const content_w: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_width)) - left_panels_w - right_panels_w - padding * 2);
             const content_h: i32 = @intFromFloat(@as(f32, @floatFromInt(fb_height)) - top_padding - padding);
             const split_count = computeSplitLayout(active_tab, content_x, content_y, content_w, content_h, font.cell_width, font.cell_height);
+            const native_scrollbar_visible = syncNativeScrollbarForFrame(win, active_tab, split_count, content_x, content_y, content_w, content_h);
             syncRemoteLayout(allocator);
             syncImeCaretPosition(win, split_count);
 
@@ -2551,7 +2601,7 @@ fn runMainLoop(self: *AppWindow) !void {
                     markdown_preview_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset, 0);
                     file_explorer_renderer.render(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
                     cell_renderer.drawCells(rend, @floatFromInt(fb_height), left_panels_w + @as(f32, @floatFromInt(pad.left)), pad_top);
-                    overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
+                    if (!native_scrollbar_visible) overlays.renderScrollbar(@floatFromInt(fb_width), @floatFromInt(fb_height), pad_top);
 
                     // Render resize overlay centered in content area (offset for titlebar)
                     overlays.renderResizeOverlayWithOffset(@floatFromInt(fb_width), @floatFromInt(fb_height), titlebar_offset);
@@ -2625,6 +2675,7 @@ fn runMainLoop(self: *AppWindow) !void {
                 }
             }
         } else if (!post_process.g_post_enabled) {
+            win.hideNativeScrollbar();
             gl.Viewport.?(0, 0, fb_width, fb_height);
             gl_init.setProjection(@floatFromInt(fb_width), @floatFromInt(fb_height));
             clearWithBackground(fb_width, fb_height);

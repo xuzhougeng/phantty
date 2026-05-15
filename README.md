@@ -31,6 +31,10 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 > [!NOTE]
 > Phantty is **Windows-only**. On macOS and Linux, use [Ghostty](https://ghostty.org/) instead.
 
+## TODO
+
+- **Native Windows UI components** — test a Win32 native scrollbar for terminal surfaces first via `native-scrollbar = true`. If the native scrollbar integrates cleanly with scrollback, split layouts, DPI scaling, dark mode, and input focus, continue evaluating other native Windows components to reduce custom-drawn UI where platform controls behave better.
+
 ## Building
 
 ```powershell

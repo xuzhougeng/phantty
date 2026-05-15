@@ -136,6 +136,16 @@ pub const NCCALCSIZE_PARAMS = extern struct {
     lppos: *WINDOWPOS,
 };
 
+pub const SCROLLINFO = extern struct {
+    cbSize: UINT = @sizeOf(SCROLLINFO),
+    fMask: UINT = 0,
+    nMin: INT = 0,
+    nMax: INT = 0,
+    nPage: UINT = 0,
+    nPos: INT = 0,
+    nTrackPos: INT = 0,
+};
+
 pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRESULT;
 
 // ============================================================================
@@ -144,7 +154,9 @@ pub const WNDPROC = *const fn (HWND, UINT, WPARAM, LPARAM) callconv(.winapi) LRE
 
 // Window styles
 pub const WS_OVERLAPPEDWINDOW: DWORD = 0x00CF0000;
+pub const WS_CHILD: DWORD = 0x40000000;
 pub const WS_VISIBLE: DWORD = 0x10000000;
+pub const WS_CLIPCHILDREN: DWORD = 0x02000000;
 
 // Extended window styles
 pub const WS_EX_APPWINDOW: DWORD = 0x00040000;
@@ -158,6 +170,7 @@ pub const CS_DBLCLKS: UINT = 0x0008;
 // ShowWindow commands
 pub const SW_MINIMIZE: INT = 6;
 pub const SW_SHOW: INT = 5;
+pub const SW_HIDE: INT = 0;
 pub const SW_RESTORE: INT = 9;
 pub const SW_MAXIMIZE: INT = 3;
 
@@ -199,6 +212,7 @@ pub const WM_NCMBUTTONUP: UINT = 0x00A9;
 pub const WM_RBUTTONDOWN: UINT = 0x0204;
 pub const WM_RBUTTONUP: UINT = 0x0205;
 pub const WM_MOUSEWHEEL: UINT = 0x020A;
+pub const WM_VSCROLL: UINT = 0x0115;
 pub const WM_SETFOCUS: UINT = 0x0007;
 pub const WM_KILLFOCUS: UINT = 0x0008;
 pub const WM_DPICHANGED: UINT = 0x02E0;
@@ -305,6 +319,24 @@ pub const VK_F11: WPARAM = 0x7A;
 // GetKeyState
 pub const KEY_PRESSED: i16 = @bitCast(@as(u16, 0x8000));
 
+// Native scrollbar control
+pub const SBS_VERT: DWORD = 0x0001;
+pub const SB_CTL: INT = 2;
+pub const SB_LINEUP: UINT = 0;
+pub const SB_LINEDOWN: UINT = 1;
+pub const SB_PAGEUP: UINT = 2;
+pub const SB_PAGEDOWN: UINT = 3;
+pub const SB_THUMBPOSITION: UINT = 4;
+pub const SB_THUMBTRACK: UINT = 5;
+pub const SB_TOP: UINT = 6;
+pub const SB_BOTTOM: UINT = 7;
+pub const SB_ENDSCROLL: UINT = 8;
+const SIF_RANGE: UINT = 0x0001;
+const SIF_PAGE: UINT = 0x0002;
+const SIF_POS: UINT = 0x0004;
+const SIF_TRACKPOS: UINT = 0x0010;
+const SIF_ALL: UINT = SIF_RANGE | SIF_PAGE | SIF_POS | SIF_TRACKPOS;
+
 // ============================================================================
 // Win32 API imports
 // ============================================================================
@@ -357,6 +389,9 @@ extern "user32" fn SetWindowTextW(hWnd: HWND, lpString: [*:0]const WCHAR) callco
 extern "user32" fn LoadCursorW(hInstance: ?HINSTANCE, lpCursorName: usize) callconv(.winapi) ?HCURSOR;
 pub extern "user32" fn GetWindowRect(hWnd: HWND, lpRect: *RECT) callconv(.winapi) BOOL;
 pub extern "user32" fn SetWindowPos(hWnd: HWND, hWndInsertAfter: ?HWND, X: INT, Y: INT, cx: INT, cy: INT, uFlags: UINT) callconv(.winapi) BOOL;
+extern "user32" fn SetFocus(hWnd: HWND) callconv(.winapi) ?HWND;
+extern "user32" fn SetScrollInfo(hWnd: HWND, nBar: INT, lpsi: *const SCROLLINFO, redraw: BOOL) callconv(.winapi) INT;
+extern "user32" fn GetScrollInfo(hWnd: HWND, nBar: INT, lpsi: *SCROLLINFO) callconv(.winapi) BOOL;
 extern "user32" fn SetCapture(hWnd: HWND) callconv(.winapi) ?HWND;
 extern "user32" fn ReleaseCapture() callconv(.winapi) BOOL;
 extern "user32" fn MessageBeep(uType: UINT) callconv(.winapi) BOOL;
@@ -654,6 +689,7 @@ extern "kernel32" fn GetProcAddress(hModule: HINSTANCE, lpProcName: [*:0]const u
 
 // System metrics
 pub extern "user32" fn GetSystemMetrics(nIndex: INT) callconv(.winapi) INT;
+pub const SM_CXVSCROLL: INT = 2;
 pub const SM_CXSIZEFRAME: INT = 32;
 pub const SM_CYSIZEFRAME: INT = 33;
 pub const SM_CXPADDEDBORDER: INT = 92;
@@ -747,6 +783,12 @@ pub const MouseWheelEvent = struct {
     alt: bool = false,
 };
 
+/// Native scrollbar notifications from a child Win32 SCROLLBAR control.
+pub const NativeScrollbarEvent = struct {
+    code: UINT,
+    pos: i32 = 0,
+};
+
 // Fixed-size ring buffers for events (avoids allocation in WndProc)
 fn RingBuffer(comptime T: type, comptime N: usize) type {
     return struct {
@@ -834,7 +876,12 @@ pub const Window = struct {
     mouse_button_events: RingBuffer(MouseButtonEvent, 32) = .{},
     mouse_move_events: RingBuffer(MouseMoveEvent, 64) = .{},
     mouse_wheel_events: RingBuffer(MouseWheelEvent, 16) = .{},
+    native_scrollbar_events: RingBuffer(NativeScrollbarEvent, 16) = .{},
     size_changed: bool = false, // set by WM_SIZE, cleared after processing
+
+    /// Optional child Win32 scrollbar used for the native scrollbar experiment.
+    native_scrollbar_hwnd: ?HWND = null,
+    native_scrollbar_visible: bool = false,
 
     /// Optional callback invoked from WM_SIZE so the application can
     /// do a GL clear+swap during the Win32 modal resize loop. Without
@@ -864,6 +911,7 @@ pub const Window = struct {
         self.mouse_button_events.clear();
         self.mouse_move_events.clear();
         self.mouse_wheel_events.clear();
+        self.native_scrollbar_events.clear();
         self.hovered_button = .none;
         self.pressed_button = .none;
         self.mouse_x = -1;
@@ -991,7 +1039,7 @@ pub const Window = struct {
             WS_EX_APPWINDOW,
             real_class,
             title,
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
             if (x) |xv| xv else CW_USEDEFAULT,
             if (y) |yv| yv else CW_USEDEFAULT,
             physical_width,
@@ -1145,6 +1193,10 @@ pub const Window = struct {
     }
 
     pub fn deinit(self: *Window) void {
+        if (self.native_scrollbar_hwnd) |scrollbar_hwnd| {
+            _ = DestroyWindow(scrollbar_hwnd);
+            self.native_scrollbar_hwnd = null;
+        }
         _ = wglMakeCurrent(self.hdc, null);
         _ = wglDeleteContext(self.hglrc);
         _ = DestroyWindow(self.hwnd);
@@ -1162,6 +1214,88 @@ pub const Window = struct {
             .width = rect.right - rect.left,
             .height = rect.bottom - rect.top,
         };
+    }
+
+    pub fn nativeScrollbarWidth(_: *const Window) i32 {
+        return @max(12, GetSystemMetrics(SM_CXVSCROLL));
+    }
+
+    pub fn hideNativeScrollbar(self: *Window) void {
+        if (self.native_scrollbar_hwnd) |scrollbar_hwnd| {
+            _ = ShowWindow(scrollbar_hwnd, SW_HIDE);
+        }
+        self.native_scrollbar_visible = false;
+    }
+
+    pub fn syncNativeScrollbar(
+        self: *Window,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        total: usize,
+        len: usize,
+        offset: usize,
+    ) bool {
+        if (width <= 0 or height <= 0 or total <= len) {
+            self.hideNativeScrollbar();
+            return false;
+        }
+
+        const scrollbar_hwnd = self.ensureNativeScrollbar() orelse return false;
+
+        _ = SetWindowPos(
+            scrollbar_hwnd,
+            null,
+            x,
+            y,
+            width,
+            height,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+
+        const max_int_usize: usize = @intCast(std.math.maxInt(INT));
+        const total_i = @min(total, max_int_usize);
+        const len_i = @min(len, total_i);
+        const max_offset = if (total_i > len_i) total_i - len_i else 0;
+        const offset_i = @min(offset, max_offset);
+
+        var info = SCROLLINFO{
+            .fMask = SIF_ALL,
+            .nMin = 0,
+            .nMax = @intCast(total_i - 1),
+            .nPage = @intCast(@max(@as(usize, 1), len_i)),
+            .nPos = @intCast(offset_i),
+        };
+        _ = SetScrollInfo(scrollbar_hwnd, SB_CTL, &info, 1);
+
+        if (!self.native_scrollbar_visible) {
+            _ = ShowWindow(scrollbar_hwnd, SW_SHOW);
+            self.native_scrollbar_visible = true;
+        }
+        return true;
+    }
+
+    fn ensureNativeScrollbar(self: *Window) ?HWND {
+        if (self.native_scrollbar_hwnd) |scrollbar_hwnd| return scrollbar_hwnd;
+
+        const scrollbar_hwnd = CreateWindowExW(
+            0,
+            std.unicode.utf8ToUtf16LeStringLiteral("SCROLLBAR"),
+            std.unicode.utf8ToUtf16LeStringLiteral(""),
+            WS_CHILD | SBS_VERT,
+            0,
+            0,
+            1,
+            1,
+            self.hwnd,
+            null,
+            GetModuleHandleW(null),
+            null,
+        ) orelse return null;
+
+        self.native_scrollbar_hwnd = scrollbar_hwnd;
+        return scrollbar_hwnd;
     }
 
     /// Process all pending window messages. Returns false if WM_QUIT received.
@@ -1299,6 +1433,21 @@ fn pushMouseButtonEvent(w: *Window, button: MouseButton, action: MouseButtonActi
         .shift = mods.shift,
         .alt = mods.alt,
     });
+}
+
+fn hwndFromLParam(lParam: LPARAM) ?HWND {
+    if (lParam == 0) return null;
+    return @ptrFromInt(@as(usize, @bitCast(lParam)));
+}
+
+fn nativeScrollbarPosition(w: *Window, code: UINT) i32 {
+    const scrollbar_hwnd = w.native_scrollbar_hwnd orelse return 0;
+    var info = SCROLLINFO{ .fMask = SIF_TRACKPOS | SIF_POS };
+    if (GetScrollInfo(scrollbar_hwnd, SB_CTL, &info) == 0) return 0;
+    return switch (code) {
+        SB_THUMBTRACK, SB_THUMBPOSITION => info.nTrackPos,
+        else => info.nPos,
+    };
 }
 
 fn filteredImeSetContextLParam(lParam: LPARAM) LPARAM {
@@ -1559,6 +1708,22 @@ fn wndProc(hwnd: HWND, msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.wina
         WM_DROPFILES => {
             handleDropFiles(wParam, w);
             return 0;
+        },
+        WM_VSCROLL => {
+            if (w.native_scrollbar_hwnd) |scrollbar_hwnd| {
+                if (hwndFromLParam(lParam)) |event_hwnd| {
+                    if (event_hwnd == scrollbar_hwnd) {
+                        const code: UINT = @intCast(wParam & 0xFFFF);
+                        w.native_scrollbar_events.push(.{
+                            .code = code,
+                            .pos = nativeScrollbarPosition(w, code),
+                        });
+                        _ = SetFocus(w.hwnd);
+                        return 0;
+                    }
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         },
 
         // WM_NCCALCSIZE is handled before the switch (to work during CreateWindowExW)

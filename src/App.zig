@@ -28,6 +28,7 @@ shell_cmd_len: usize,
 
 // Config values (read-only after init)
 scrollback_limit: u32,
+native_scrollbar: bool,
 font_family: []const u8,
 font_family_cjk: ?[]const u8,
 font_family_fallback: ?[]const u8,
@@ -138,6 +139,7 @@ pub fn init(allocator: std.mem.Allocator, cfg: Config) !App {
         .shell_cmd_buf = undefined,
         .shell_cmd_len = 0,
         .scrollback_limit = cfg.@"scrollback-limit",
+        .native_scrollbar = cfg.@"native-scrollbar",
         .font_family = font_family,
         .font_family_cjk = font_family_cjk,
         .font_family_fallback = font_family_fallback,
@@ -274,6 +276,7 @@ pub fn updateConfig(self: *App, cfg: *const Config) void {
     defer self.mutex.unlock();
 
     self.scrollback_limit = cfg.@"scrollback-limit";
+    self.native_scrollbar = cfg.@"native-scrollbar";
     self.replaceStr(&self.font_family, cfg.@"font-family");
     self.replaceOptStr(&self.font_family_cjk, cfg.@"font-family-cjk");
     self.replaceOptStr(&self.font_family_fallback, cfg.@"font-family-fallback");

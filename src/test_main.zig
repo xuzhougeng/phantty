@@ -16,6 +16,7 @@ comptime {
     _ = @import("file_explorer.zig");
     _ = @import("input_shortcuts.zig");
     _ = @import("markdown_preview.zig");
+    _ = @import("native_scrollbar.zig");
     _ = @import("preview_token.zig");
     _ = @import("remote_client.zig");
     _ = @import("remote_snapshot.zig");

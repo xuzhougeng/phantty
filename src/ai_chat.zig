@@ -49,6 +49,8 @@ pub const Message = struct {
     reasoning: ?[]u8 = null,
     content_collapsed: bool = false,
     content_auto_expand: bool = false,
+    tool_grouped: bool = false,
+    tool_group_collapsed: bool = false,
     reasoning_collapsed: bool = true,
     reasoning_auto_expand: bool = false,
 };
@@ -604,6 +606,15 @@ pub const Session = struct {
         msg.content_auto_expand = false;
     }
 
+    pub fn toggleToolGroupCollapsed(self: *Session, message_index: usize) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (message_index >= self.messages.items.len) return;
+        var msg = &self.messages.items[message_index];
+        if (msg.role != .tool or !msg.tool_grouped) return;
+        msg.tool_group_collapsed = !msg.tool_group_collapsed;
+    }
+
     pub fn toggleReasoningCollapsed(self: *Session, message_index: usize) void {
         self.mutex.lock();
         defer self.mutex.unlock();
@@ -783,15 +794,45 @@ pub const Session = struct {
     }
 
     fn collapseAutoExpandedDetailsLocked(self: *Session) void {
-        for (self.messages.items) |*msg| {
-            if (msg.role == .tool and msg.content_auto_expand) {
-                msg.content_collapsed = true;
-                msg.content_auto_expand = false;
+        var i: usize = 0;
+        while (i < self.messages.items.len) {
+            if (self.messages.items[i].role != .tool) {
+                var msg = &self.messages.items[i];
+                if (msg.reasoning_auto_expand) {
+                    msg.reasoning_collapsed = true;
+                    msg.reasoning_auto_expand = false;
+                }
+                i += 1;
+                continue;
             }
-            if (msg.reasoning_auto_expand) {
-                msg.reasoning_collapsed = true;
-                msg.reasoning_auto_expand = false;
+
+            const group_start = i;
+            var group_end = i;
+            var has_auto_tool = false;
+            while (group_end < self.messages.items.len and self.messages.items[group_end].role == .tool) : (group_end += 1) {
+                var msg = &self.messages.items[group_end];
+                if (msg.content_auto_expand) {
+                    msg.content_collapsed = true;
+                    msg.content_auto_expand = false;
+                    has_auto_tool = true;
+                }
+                if (msg.reasoning_auto_expand) {
+                    msg.reasoning_collapsed = true;
+                    msg.reasoning_auto_expand = false;
+                }
             }
+
+            if (has_auto_tool) {
+                var j = group_start;
+                while (j < group_end) : (j += 1) {
+                    self.messages.items[j].tool_grouped = false;
+                    self.messages.items[j].tool_group_collapsed = false;
+                }
+                self.messages.items[group_start].tool_grouped = true;
+                self.messages.items[group_start].tool_group_collapsed = true;
+            }
+
+            i = group_end;
         }
     }
 
@@ -2939,4 +2980,51 @@ test "ai chat collapse helper only closes auto-expanded details" {
     try std.testing.expect(session.messages.items[1].reasoning_collapsed);
     try std.testing.expect(!session.messages.items[1].reasoning_auto_expand);
     try std.testing.expect(!session.messages.items[2].content_collapsed);
+}
+
+test "ai chat collapse helper creates a collapsed tool group" {
+    const allocator = std.testing.allocator;
+    var session = Session{ .allocator = allocator };
+    defer {
+        for (session.messages.items) |msg| {
+            allocator.free(msg.content);
+            if (msg.reasoning) |reasoning| allocator.free(reasoning);
+        }
+        session.messages.deinit(allocator);
+    }
+
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "running terminal_list {}"),
+        .content_collapsed = false,
+        .content_auto_expand = true,
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = try allocator.dupe(u8, "running terminal_snapshot {\"surface_id\":\"1\"}"),
+        .content_collapsed = false,
+        .content_auto_expand = true,
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "done"),
+    });
+
+    session.mutex.lock();
+    session.collapseAutoExpandedDetailsLocked();
+    session.mutex.unlock();
+
+    try std.testing.expect(session.messages.items[0].tool_grouped);
+    try std.testing.expect(session.messages.items[0].tool_group_collapsed);
+    try std.testing.expect(session.messages.items[0].content_collapsed);
+    try std.testing.expect(!session.messages.items[0].content_auto_expand);
+    try std.testing.expect(!session.messages.items[1].tool_grouped);
+    try std.testing.expect(!session.messages.items[1].tool_group_collapsed);
+    try std.testing.expect(session.messages.items[1].content_collapsed);
+    try std.testing.expect(!session.messages.items[1].content_auto_expand);
+
+    session.toggleToolGroupCollapsed(0);
+    try std.testing.expect(!session.messages.items[0].tool_group_collapsed);
+    session.toggleToolGroupCollapsed(1);
+    try std.testing.expect(!session.messages.items[0].tool_group_collapsed);
 }

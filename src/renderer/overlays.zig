@@ -3027,11 +3027,11 @@ pub fn renderScrollbarForSurface(surface: *Surface, view_width: f32, view_height
     const fg = AppWindow.g_theme.foreground;
 
     const track_color = mixColor(bg, fg, 0.18);
-    const track_alpha = fade * 0.20;
+    const track_alpha = scrollbar_model.trackAlpha(fade);
     gl_init.renderQuadAlpha(bar_x, geo.track_y, bar_w, geo.track_h, track_color, track_alpha);
 
     const thumb_color = mixColor(bg, fg, 0.46);
-    const thumb_alpha = fade * 0.62;
+    const thumb_alpha = scrollbar_model.thumbAlpha(fade);
     gl_init.renderQuadAlpha(bar_x, geo.thumb_y, bar_w, geo.thumb_h, thumb_color, thumb_alpha);
 }
 

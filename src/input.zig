@@ -16,6 +16,7 @@ const file_explorer = AppWindow.file_explorer;
 const file_backend = @import("file_backend.zig");
 const markdown_preview = @import("markdown_preview.zig");
 const markdown_preview_panel = AppWindow.markdown_preview_panel;
+const native_scrollbar = @import("native_scrollbar.zig");
 const preview_token = @import("preview_token.zig");
 const browser_panel = AppWindow.browser_panel;
 const scp = @import("scp.zig");
@@ -717,6 +718,7 @@ pub fn processEvents(win: *win32_backend.Window) void {
     processMouseButtonEvents(win);
     processMouseMoveEvents(win);
     processMouseWheelEvents(win);
+    processNativeScrollbarEvents(win);
     processSizeChange(win);
 }
 
@@ -763,6 +765,12 @@ fn processMouseMoveEvents(win: *win32_backend.Window) void {
 fn processMouseWheelEvents(win: *win32_backend.Window) void {
     while (win.mouse_wheel_events.pop()) |ev| {
         handleMouseWheel(ev);
+    }
+}
+
+fn processNativeScrollbarEvents(win: *win32_backend.Window) void {
+    while (win.native_scrollbar_events.pop()) |ev| {
+        handleNativeScrollbar(ev);
     }
 }
 
@@ -2389,6 +2397,11 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
                 )) |target| {
                     switch (target) {
                         .copy_message => |message_index| copyAiChatMessageToClipboard(chat, message_index),
+                        .toggle_tool_group => |message_index| {
+                            chat.toggleToolGroupCollapsed(message_index);
+                            AppWindow.g_force_rebuild = true;
+                            AppWindow.g_cells_valid = false;
+                        },
                         .toggle_tool => |message_index| {
                             chat.toggleToolMessageCollapsed(message_index);
                             AppWindow.g_force_rebuild = true;
@@ -2953,6 +2966,46 @@ fn appendAlternateScrollKeys(surface: *Surface, ev: win32_backend.MouseWheelEven
         if (!appendBytes(out, len, seq)) return false;
     }
     return true;
+}
+
+fn nativeScrollbarCommand(code: win32_backend.UINT) ?native_scrollbar.Command {
+    return switch (code) {
+        win32_backend.SB_LINEUP => .line_up,
+        win32_backend.SB_LINEDOWN => .line_down,
+        win32_backend.SB_PAGEUP => .page_up,
+        win32_backend.SB_PAGEDOWN => .page_down,
+        win32_backend.SB_THUMBPOSITION, win32_backend.SB_THUMBTRACK => .thumb,
+        win32_backend.SB_TOP => .top,
+        win32_backend.SB_BOTTOM => .bottom,
+        win32_backend.SB_ENDSCROLL => .end_scroll,
+        else => null,
+    };
+}
+
+fn handleNativeScrollbar(ev: win32_backend.NativeScrollbarEvent) void {
+    if (!AppWindow.g_native_scrollbar) return;
+    if (!AppWindow.isActiveTabTerminal()) return;
+
+    const command = nativeScrollbarCommand(ev.code) orelse return;
+    const surface = AppWindow.activeSurface() orelse return;
+    const sb = scrollbarForSurface(surface);
+    const state = native_scrollbar.State{
+        .total = sb.total,
+        .len = sb.len,
+        .offset = sb.offset,
+    };
+    const target = native_scrollbar.targetOffset(state, command, ev.pos) orelse return;
+    const delta = native_scrollbar.deltaToTarget(state, target);
+    if (delta == 0) return;
+
+    surface.render_state.mutex.lock();
+    surface.terminal.scrollViewport(.{ .delta = delta });
+    surface.render_state.mutex.unlock();
+
+    surface.scrollbar_opacity = 1.0;
+    surface.scrollbar_show_time = std.time.milliTimestamp();
+    AppWindow.g_force_rebuild = true;
+    AppWindow.g_cells_valid = false;
 }
 
 fn handleMouseWheel(ev: win32_backend.MouseWheelEvent) void {
