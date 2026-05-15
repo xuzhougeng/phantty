@@ -237,7 +237,7 @@ theme: ?[]const u8 = null,
 @"scrollback-limit": u32 = 10_000_000,
 
 /// Experimental Win32 native scrollbar for single-surface terminal windows.
-@"native-scrollbar": bool = false,
+@"native-scrollbar": bool = true,
 
 /// Enable agent tools for AI Chat profiles by default.
 @"ai-agent-enabled": bool = false,
@@ -987,7 +987,7 @@ pub fn printHelp() void {
         \\  --window-height <rows>       Initial height in cells (default: 0=auto, min: 4)
         \\  --window-width <cols>        Initial width in cells (default: 0=auto, min: 10)
         \\  --scrollback-limit <bytes>   Scrollback buffer size (default: 10000000)
-        \\  --native-scrollbar <bool>    Experimental Win32 native scrollbar (default: false)
+        \\  --native-scrollbar <bool>    Experimental Win32 native scrollbar (default: true)
         \\  --ai-agent-enabled <bool>    Enable AI Chat agent tools by default
         \\  --ai-agent-permission <mode> Agent tool permission: confirm | full
         \\  --ai-agent-command-timeout-ms <ms> Agent command timeout budget
@@ -1291,7 +1291,7 @@ const default_config_template =
     \\
     \\# Scrollback buffer size in bytes (default: 10MB)
     \\# scrollback-limit = 10000000
-    \\# native-scrollbar = false         # experimental single-surface Win32 scrollbar
+    \\# native-scrollbar = true          # experimental single-surface Win32 scrollbar
     \\
     \\# AI Chat agent tools (disabled by default)
     \\# ai-agent-enabled = false
@@ -1371,7 +1371,7 @@ test "config: native-scrollbar parses true/false" {
     const allocator = std.testing.allocator;
     var cfg: Config = .{};
 
-    try std.testing.expectEqual(false, cfg.@"native-scrollbar");
+    try std.testing.expectEqual(true, cfg.@"native-scrollbar");
 
     cfg.applyKeyValue(allocator, "native-scrollbar", "true", ".");
     try std.testing.expectEqual(true, cfg.@"native-scrollbar");

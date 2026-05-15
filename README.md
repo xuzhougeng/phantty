@@ -33,7 +33,7 @@ A Windows terminal written in Zig, powered by [libghostty-vt](https://github.com
 
 ## TODO
 
-- **Native Windows UI components** — test a Win32 native scrollbar for terminal surfaces first via `native-scrollbar = true`. If the native scrollbar integrates cleanly with scrollback, split layouts, DPI scaling, dark mode, and input focus, continue evaluating other native Windows components to reduce custom-drawn UI where platform controls behave better.
+- **Native Windows UI components** — Win32 native scrollbar is enabled by default for terminal surfaces; use `native-scrollbar = false` only to compare against the legacy virtual scrollbar. If the native scrollbar integrates cleanly with scrollback, split layouts, DPI scaling, dark mode, and input focus, continue evaluating other native Windows components to reduce custom-drawn UI where platform controls behave better.
 
 ## Building
 
