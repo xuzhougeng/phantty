@@ -1827,7 +1827,11 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
     }
 
     for (request.messages) |msg| {
-        try transcript.append(request.allocator, try cloneRequestMessage(request.allocator, msg));
+        var cloned = try cloneRequestMessage(request.allocator, msg);
+        var cloned_owned = true;
+        errdefer if (cloned_owned) cloned.deinit(request.allocator);
+        try transcript.append(request.allocator, cloned);
+        cloned_owned = false;
     }
 
     var total_usage: ApiUsage = .{};
@@ -1854,7 +1858,12 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
             appendProgressMessage(request.session, result.content) catch {};
         }
 
-        try transcript.append(request.allocator, try assistantToolCallMessage(request.allocator, result.content, result.reasoning, result.tool_calls.?));
+        var assistant_msg = try assistantToolCallMessage(request.allocator, result.content, result.reasoning, result.tool_calls.?);
+        var assistant_msg_owned = true;
+        errdefer if (assistant_msg_owned) assistant_msg.deinit(request.allocator);
+        try transcript.append(request.allocator, assistant_msg);
+        assistant_msg_owned = false;
+
         for (result.tool_calls.?) |call| {
             if (requestCancelled(request)) return error.Canceled;
             const progress = try std.fmt.allocPrint(request.allocator, "running {s} {s}", .{ call.name, call.arguments });
@@ -1864,11 +1873,12 @@ fn runAgentRequest(request: *ChatRequest) !ApiResult {
             const tool_result = try executeToolCall(request, call);
             defer request.allocator.free(tool_result);
             if (requestCancelled(request)) return error.Canceled;
-            try transcript.append(request.allocator, .{
-                .role = .tool,
-                .content = try request.allocator.dupe(u8, tool_result),
-                .tool_call_id = try request.allocator.dupe(u8, call.id),
-            });
+
+            var tool_msg = try requestMessageWithClonedFields(request.allocator, .tool, tool_result, null, call.id, null);
+            var tool_msg_owned = true;
+            errdefer if (tool_msg_owned) tool_msg.deinit(request.allocator);
+            try transcript.append(request.allocator, tool_msg);
+            tool_msg_owned = false;
         }
         result.deinit(request.allocator);
     }
