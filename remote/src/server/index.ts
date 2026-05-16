@@ -4,13 +4,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
-import { WebSocketServer } from "ws";
 
 import { WeixinBindingStore } from "./bridge/weixin/binding.js";
 import { WeixinClient } from "./bridge/weixin/client.js";
 import { WeixinPoller } from "./bridge/weixin/poller.js";
 import { handleWeixinRoute } from "./bridge/weixin/routes.js";
 import { getSession, listSessions } from "./session.js";
+import { createRelayWebSocketServer } from "./websocket.js";
 
 type SessionPayload = {
   username: string;
@@ -43,7 +43,7 @@ function requireEnv(name: string): string {
   return value;
 }
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = createRelayWebSocketServer();
 const weixinStore = new WeixinBindingStore(DATA_DIR);
 const weixinPoller = new WeixinPoller(
   weixinStore,
