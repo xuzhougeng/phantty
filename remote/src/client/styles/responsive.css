@@ -165,9 +165,9 @@
 
   .mobile-bar {
     display: grid;
-    grid-template-columns: 42px minmax(0, 1fr) 16px 58px 42px;
+    grid-template-columns: 42px minmax(0, 1fr) 16px 52px 58px 42px;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     min-height: 52px;
     padding: 6px max(12px, var(--safe-right)) 6px max(12px, var(--safe-left));
     padding-top: max(6px, var(--safe-top));
@@ -195,11 +195,11 @@
     justify-self: center;
   }
 
-  .mobile-input-mode-toggle {
+  .mobile-input-mode-toggle,
+  .mobile-zoom-toggle {
     -webkit-appearance: none;
     appearance: none;
     height: 42px;
-    min-width: 58px;
     padding: 0 8px;
     border: 1px solid var(--line);
     border-radius: var(--radius-sm);
@@ -210,7 +210,22 @@
     text-align: center;
   }
 
+  .mobile-input-mode-toggle {
+    min-width: 58px;
+  }
+
+  .mobile-zoom-toggle {
+    min-width: 52px;
+    padding: 0 6px;
+  }
+
   .mobile-input-mode-toggle[data-mode="view"] {
+    color: var(--accent-ink);
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .mobile-zoom-toggle:not([data-zoom="100"]) {
     color: var(--accent-ink);
     background: var(--accent);
     border-color: var(--accent);
@@ -220,6 +235,7 @@
     grid-template-columns: 42px minmax(0, 1fr) 16px;
   }
 
+  .console-shell[data-mobile-surface-kind="ai_chat"] #mobile-zoom-toggle,
   .console-shell[data-mobile-surface-kind="ai_chat"] #mobile-input-mode-toggle,
   .console-shell[data-mobile-surface-kind="ai_chat"] #kbd-toggle {
     display: none;

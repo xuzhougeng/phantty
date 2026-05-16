@@ -1,10 +1,12 @@
-import type { DesktopPanelMode, ThemeMode } from "./types";
+import { normalizeMobileVisualZoom } from "./mobile_visual_zoom";
+import type { DesktopPanelMode, MobileVisualZoom, ThemeMode } from "./types";
 
 const SESSION_KEY_STORAGE_KEY = "phantty.remote.sessionKey";
 const KBD_VISIBLE_STORAGE_KEY = "phantty.remote.kbdVisible";
 const THEME_STORAGE_KEY = "phantty.remote.theme";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "phantty.remote.sidebarCollapsed";
 const DESKTOP_PANEL_MODE_STORAGE_KEY = "phantty.remote.desktopPanelMode";
+const MOBILE_VISUAL_ZOOM_STORAGE_KEY = "phantty.remote.mobileVisualZoom";
 
 export function readSavedSessionKey(): string {
   try {
@@ -90,6 +92,22 @@ export function readSavedDesktopPanelMode(): DesktopPanelMode {
 export function saveDesktopPanelMode(mode: DesktopPanelMode): void {
   try {
     localStorage.setItem(DESKTOP_PANEL_MODE_STORAGE_KEY, mode);
+  } catch {
+    // Storage may be unavailable in restricted browser contexts.
+  }
+}
+
+export function readSavedMobileVisualZoom(): MobileVisualZoom {
+  try {
+    return normalizeMobileVisualZoom(localStorage.getItem(MOBILE_VISUAL_ZOOM_STORAGE_KEY));
+  } catch {
+    return 1;
+  }
+}
+
+export function saveMobileVisualZoom(zoom: MobileVisualZoom): void {
+  try {
+    localStorage.setItem(MOBILE_VISUAL_ZOOM_STORAGE_KEY, String(zoom));
   } catch {
     // Storage may be unavailable in restricted browser contexts.
   }

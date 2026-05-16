@@ -972,6 +972,9 @@
 .terminal-host .xterm {
   display: block;
   background-color: transparent;
+  transform: scale(var(--remote-terminal-visual-zoom, 1));
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .terminal-host .xterm-viewport {

@@ -1,4 +1,4 @@
-import type { DesktopPanelMode, MobileInputMode, StatusKind } from "../types";
+import type { DesktopPanelMode, MobileInputMode, MobileVisualZoom, StatusKind } from "../types";
 import { iconClose, iconKeyboard, iconMenu, iconPanelMode, themeToggleMarkup } from "../icons";
 import { bindThemeToggleButtons } from "../theme";
 import { activeSurfaceIdForInput, currentTab, state, pushNotice } from "../state";
@@ -8,6 +8,7 @@ import {
   readSavedSessionKey,
   saveKbdVisible,
   saveDesktopPanelMode,
+  saveMobileVisualZoom,
   saveSessionKey,
   saveSidebarCollapsed,
 } from "../storage";
@@ -19,6 +20,7 @@ import {
   focusAndFitSelectedSurface,
   refitAllSurfaces,
   renderRemotePanels,
+  syncSurfaceVisualZooms,
   syncTerminalNativeInputGuards,
   updateAiChatControls,
   updateSurfaceCursors,
@@ -31,6 +33,7 @@ import {
   renderMobileTextInputMarkup,
 } from "../mobile_text_input";
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup, syncVirtualKeyboardInputMode } from "../vkbd";
+import { mobileVisualZoomLabel, mobileVisualZoomPercent, nextMobileVisualZoom } from "../mobile_visual_zoom";
 import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
 import {
   bindActionText,
@@ -60,7 +63,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   const initialSessionInputValue = hasSavedSessionKey ? maskSessionKey(savedSessionKey) : savedSessionKey;
 
   app.innerHTML = `
-    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
+    <section class="console-shell" data-kbd-visible="${state.kbdVisible}" data-mobile-surface-kind="none" data-mobile-vkbd-visible="false" data-mobile-input-mode="${state.mobileInputMode}" data-mobile-visual-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" data-drawer-open="${state.drawerOpen}" data-sidebar-collapsed="${state.sidebarCollapsed}" data-desktop-panel-mode="${state.desktopPanelMode}" data-sidebar-page="${sidebarPage}">
       <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-main">
@@ -193,6 +196,9 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
           </button>
           <span class="mobile-bar-title" id="mobile-workspace-title">Phantty Remote</span>
           <span class="status-pip" id="mobile-status-pip" data-state="offline" title="Disconnected"></span>
+          <button type="button" class="mobile-zoom-toggle" id="mobile-zoom-toggle" data-zoom="${mobileVisualZoomPercent(state.mobileVisualZoom)}" aria-label="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}" title="${mobileVisualZoomToggleLabel(state.mobileVisualZoom)}">
+            ${mobileVisualZoomLabel(state.mobileVisualZoom)}
+          </button>
           <button type="button" class="mobile-input-mode-toggle" id="mobile-input-mode-toggle" data-mode="${state.mobileInputMode}" aria-label="${mobileInputModeToggleLabel(state.mobileInputMode)}" title="${mobileInputModeToggleLabel(state.mobileInputMode)}">
             ${mobileInputModeLabel(state.mobileInputMode)}
           </button>
@@ -278,6 +284,7 @@ export function renderConsole(app: HTMLElement, onLogout: () => void): void {
   bindWeixinPanel();
   updateMobileSurfaceMode();
   syncMobileInputModeUi();
+  syncMobileVisualZoomUi();
   updateInputUi();
   if (savedSessionKey) queueMicrotask(() => connect(savedSessionKey));
 }
@@ -417,7 +424,14 @@ function updateMobileSurfaceMode(): void {
     inputModeToggle.hidden = chatMode;
     inputModeToggle.setAttribute("aria-hidden", String(chatMode));
   }
+  const zoomToggle = document.querySelector<HTMLButtonElement>("#mobile-zoom-toggle");
+  if (zoomToggle) {
+    const chatMode = surfaceKind === "ai_chat";
+    zoomToggle.hidden = chatMode;
+    zoomToggle.setAttribute("aria-hidden", String(chatMode));
+  }
   syncMobileInputModeUi();
+  syncMobileVisualZoomUi();
 }
 
 function bindMobileChrome(): void {
@@ -442,6 +456,9 @@ function bindMobileChrome(): void {
   });
   document.querySelector<HTMLButtonElement>("#mobile-input-mode-toggle")?.addEventListener("click", () => {
     setMobileInputMode(nextMobileInputMode(state.mobileInputMode));
+  });
+  document.querySelector<HTMLButtonElement>("#mobile-zoom-toggle")?.addEventListener("click", () => {
+    setMobileVisualZoom(nextMobileVisualZoom(state.mobileVisualZoom));
   });
 }
 
@@ -476,6 +493,31 @@ function syncMobileInputModeUi(): void {
   syncVirtualKeyboardInputMode();
 }
 
+function setMobileVisualZoom(zoom: MobileVisualZoom): void {
+  if (state.mobileVisualZoom === zoom) return;
+  state.mobileVisualZoom = zoom;
+  saveMobileVisualZoom(zoom);
+  syncMobileVisualZoomUi();
+  syncSurfaceVisualZooms();
+  updateMobileSurfaceMode();
+}
+
+function syncMobileVisualZoomUi(): void {
+  const zoom = state.mobileVisualZoom;
+  const percent = mobileVisualZoomPercent(zoom);
+  const shell = document.querySelector<HTMLElement>(".console-shell");
+  if (shell) shell.dataset.mobileVisualZoom = String(percent);
+
+  const toggle = document.querySelector<HTMLButtonElement>("#mobile-zoom-toggle");
+  if (!toggle) return;
+
+  const label = mobileVisualZoomToggleLabel(zoom);
+  toggle.dataset.zoom = String(percent);
+  toggle.textContent = mobileVisualZoomLabel(zoom);
+  toggle.setAttribute("aria-label", label);
+  toggle.title = label;
+}
+
 function mobileInputModeLabel(mode: MobileInputMode): string {
   if (mode === "keys") return "Keys";
   if (mode === "text") return "Text";
@@ -484,6 +526,10 @@ function mobileInputModeLabel(mode: MobileInputMode): string {
 
 function mobileInputModeToggleLabel(mode: MobileInputMode): string {
   return `Switch to ${mobileInputModeLabel(nextMobileInputMode(mode)).toLowerCase()} mode`;
+}
+
+function mobileVisualZoomToggleLabel(zoom: MobileVisualZoom): string {
+  return `Switch terminal visual zoom to ${mobileVisualZoomLabel(nextMobileVisualZoom(zoom))}`;
 }
 
 function nextMobileInputMode(mode: MobileInputMode): MobileInputMode {

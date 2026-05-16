@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   readSavedDesktopPanelMode,
+  readSavedMobileVisualZoom,
   readSavedSidebarCollapsed,
   saveDesktopPanelMode,
+  saveMobileVisualZoom,
   saveSidebarCollapsed,
 } from "../../src/client/storage";
 
@@ -44,6 +46,26 @@ test("desktop panel mode ignores invalid stored values", () => {
   store.set("phantty.remote.desktopPanelMode", "wide");
 
   assert.equal(readSavedDesktopPanelMode(), "layout");
+});
+
+test("mobile visual zoom preference round-trips through storage", () => {
+  installLocalStorage();
+
+  assert.equal(readSavedMobileVisualZoom(), 1);
+
+  saveMobileVisualZoom(0.5);
+  assert.equal(readSavedMobileVisualZoom(), 0.5);
+
+  saveMobileVisualZoom(0.25);
+  assert.equal(readSavedMobileVisualZoom(), 0.25);
+});
+
+test("mobile visual zoom ignores invalid stored values", () => {
+  installLocalStorage();
+
+  store.set("phantty.remote.mobileVisualZoom", "0.9");
+
+  assert.equal(readSavedMobileVisualZoom(), 1);
 });
 
 function installLocalStorage(): void {

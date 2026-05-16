@@ -24,6 +24,7 @@ import { shouldFocusTerminalElement } from "./focus_policy";
 import { parseAiChatTranscript, type AiChatMessage } from "./ai_chat_transcript";
 import { aiChatStopControlState } from "./ai_chat_controls";
 import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from "./mobile_layout";
+import { mobileVisualZoomPercent, scaleVisualCanvasSize } from "./mobile_visual_zoom";
 import { setNativeTerminalInputBlocked, shouldBlockNativeTerminalInput } from "./terminal_input_guard";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
@@ -231,9 +232,11 @@ export function renderRemotePanels(): void {
     }
 
     ensureTerminalMount(view);
+    applySurfaceVisualZoom(view);
     if (!view.opened) {
       view.term.open(view.host);
       view.opened = true;
+      applySurfaceVisualZoom(view);
       syncTerminalNativeInputGuard(view);
       view.resizeObserver = new ResizeObserver(() => scheduleFit(view));
       view.resizeObserver.observe(view.host);
@@ -337,6 +340,15 @@ export function syncTerminalNativeInputGuards(): void {
   }
 }
 
+export function syncSurfaceVisualZooms(): void {
+  for (const view of state.surfaceViews.values()) {
+    applySurfaceVisualZoom(view);
+    view.needsDefaultCanvasPan = true;
+    view.lastCanvasViewport = null;
+    scheduleFit(view);
+  }
+}
+
 function focusSurfaceView(surfaceId: string): void {
   const view = ensureSurfaceView(surfaceId);
   if (view.aiInput) {
@@ -350,6 +362,12 @@ function ensureTerminalMount(view: SurfaceView): void {
   if (view.host.parentElement === view.mount && view.scrollbar.parentElement === view.mount) return;
   view.mount.className = "terminal-mount";
   view.mount.replaceChildren(view.host, view.scrollbar);
+}
+
+function applySurfaceVisualZoom(view: SurfaceView): void {
+  const zoom = isMobileRemoteShell() ? state.mobileVisualZoom : 1;
+  view.panel.dataset.visualZoom = String(mobileVisualZoomPercent(zoom));
+  view.host.style.setProperty("--remote-terminal-visual-zoom", String(zoom));
 }
 
 function renderAiChatPanel(view: SurfaceView, surface: LayoutSurface): void {
@@ -967,7 +985,7 @@ function canvasContentSize(view: SurfaceView): CanvasSize {
   const screen = view.host.querySelector<HTMLElement>(".xterm-screen");
   const xterm = view.host.querySelector<HTMLElement>(".xterm");
   const terminalHeight = terminalCanvasHeight(view, screen);
-  return {
+  const rawSize = {
     width: Math.max(
       view.host.clientWidth,
       view.host.offsetWidth,
@@ -979,6 +997,7 @@ function canvasContentSize(view: SurfaceView): CanvasSize {
     ),
     height: terminalHeight,
   };
+  return scaleVisualCanvasSize(rawSize, isMobileRemoteShell() ? state.mobileVisualZoom : 1);
 }
 
 function terminalCanvasHeight(view: SurfaceView, screen: HTMLElement | null): number {
