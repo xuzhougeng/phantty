@@ -227,7 +227,9 @@ local PowerShell/cmd tool calls do not flash a separate console window.
 
 ### Agent skills
 
-Agent chats can load local skills from `./skills/<skill-name>/SKILL.md`.
+Agent chats can load local skills from `skills/<skill-name>/SKILL.md` under
+`%APPDATA%\phantty`, the current working directory, or the directory containing
+`phantty.exe`.
 Use `$skill-name your request` to explicitly load a skill for the next request.
 The loaded skill is stored as a replayable tool result in the chat history, so
 existing conversations stay reproducible even if the skill file changes later.

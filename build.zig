@@ -146,6 +146,11 @@ pub fn build(b: *std.Build) void {
     exe.subsystem = if (optimize == .Debug) .Console else .Windows;
 
     b.installArtifact(exe);
+    b.installDirectory(.{
+        .source_dir = b.path("tests/eval/skills"),
+        .install_dir = .bin,
+        .install_subdir = "skills",
+    });
 
     // Unit tests (zig build test)
     const test_mod = b.createModule(.{

@@ -81,9 +81,11 @@ jobs:
         run: |
           $portableExe = "zig-out\dist\portable\phantty.exe"
           $portableVersion = "zig-out\dist\portable\version.txt"
+          $portableSkills = "zig-out\dist\portable\skills\pdf\SKILL.md"
           $portableWebView2Exe = "zig-out\dist\portable-webview2\phantty.exe"
           $portableWebView2Version = "zig-out\dist\portable-webview2\version.txt"
           $portableWebView2Loader = "zig-out\dist\portable-webview2\WebView2Loader.dll"
+          $portableWebView2Skills = "zig-out\dist\portable-webview2\skills\pdf\SKILL.md"
 
           if (!(Test-Path $portableExe)) {
             throw "Portable executable not found: $portableExe"
@@ -91,6 +93,10 @@ jobs:
 
           if (!(Test-Path $portableVersion)) {
             throw "Portable version file not found: $portableVersion"
+          }
+
+          if (!(Test-Path $portableSkills)) {
+            throw "Portable skills not found: $portableSkills"
           }
 
           if (!(Test-Path $portableWebView2Exe)) {
@@ -103,6 +109,10 @@ jobs:
 
           if (!(Test-Path $portableWebView2Loader)) {
             throw "Portable WebView2 loader not found: $portableWebView2Loader"
+          }
+
+          if (!(Test-Path $portableWebView2Skills)) {
+            throw "Portable WebView2 skills not found: $portableWebView2Skills"
           }
 
       - name: Create release assets

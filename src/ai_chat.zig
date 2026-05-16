@@ -383,16 +383,45 @@ fn slashCommandOutput(allocator: std.mem.Allocator, command: SlashCommand) ![]u8
 }
 
 fn listSkillsForDisplay(allocator: std.mem.Allocator) ![]u8 {
-    const list = try skill_registry.listSkills(allocator, std.fs.cwd(), "skills");
-    defer skill_registry.freeSkillList(allocator, list);
+    const roots = try defaultSkillRootPaths(allocator);
+    defer freeSkillRootPaths(allocator, roots);
+
+    return listSkillsForDisplayFromRoots(allocator, roots);
+}
+
+fn listSkillsForDisplayFromRoots(allocator: std.mem.Allocator, root_paths: []const []const u8) ![]u8 {
+    var merged: std.ArrayListUnmanaged(skill_registry.SkillMeta) = .empty;
+    defer merged.deinit(allocator);
+    defer freeOwnedSkillMetaList(allocator, merged.items);
+
+    for (root_paths) |root_path| {
+        var root = openSkillRoot(root_path) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => continue,
+            else => |e| return e,
+        };
+        defer root.deinit();
+
+        const list = try skill_registry.listSkills(allocator, root.dir, root.skills_rel);
+        defer allocator.free(list);
+        for (list) |*meta| {
+            if (skillMetaNameExists(merged.items, meta.name)) {
+                meta.deinit(allocator);
+                continue;
+            }
+            try merged.append(allocator, meta.*);
+            meta.* = undefined;
+        }
+    }
+
+    std.sort.insertion(skill_registry.SkillMeta, merged.items, {}, skillMetaNameLessThan);
 
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
-    if (list.len == 0) {
-        try out.appendSlice(allocator, "No skills found under ./skills.");
+    if (merged.items.len == 0) {
+        try out.appendSlice(allocator, "No skills found under configured skill roots.");
     } else {
         try out.appendSlice(allocator, "Available skills:\n");
-        for (list) |meta| {
+        for (merged.items) |meta| {
             try out.print(allocator, "- ${s}: {s}\n", .{ meta.name, meta.description });
         }
     }
@@ -400,7 +429,13 @@ fn listSkillsForDisplay(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn loadSkillPreloadContent(allocator: std.mem.Allocator, skill_name: []const u8) !?[]u8 {
-    var snapshot = skill_registry.loadSkillSnapshot(allocator, std.fs.cwd(), "skills", skill_name) catch |err| switch (err) {
+    const roots = try defaultSkillRootPaths(allocator);
+    defer freeSkillRootPaths(allocator, roots);
+    return loadSkillPreloadContentFromRoots(allocator, skill_name, roots);
+}
+
+fn loadSkillPreloadContentFromRoots(allocator: std.mem.Allocator, skill_name: []const u8, root_paths: []const []const u8) !?[]u8 {
+    var snapshot = loadSkillSnapshotFromRoots(allocator, skill_name, root_paths) catch |err| switch (err) {
         skill_registry.LookupError.SkillNotFound,
         skill_registry.LookupError.DuplicateSkillName,
         skill_registry.LookupError.InvalidSkillMarkdown,
@@ -410,6 +445,130 @@ fn loadSkillPreloadContent(allocator: std.mem.Allocator, skill_name: []const u8)
     };
     defer snapshot.deinit(allocator);
     return try allocator.dupe(u8, snapshot.content);
+}
+
+fn loadSkillSnapshotFromRoots(
+    allocator: std.mem.Allocator,
+    skill_name: []const u8,
+    root_paths: []const []const u8,
+) !skill_registry.Snapshot {
+    for (root_paths) |root_path| {
+        var root = openSkillRoot(root_path) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir => continue,
+            else => |e| return e,
+        };
+        defer root.deinit();
+
+        return skill_registry.loadSkillSnapshot(allocator, root.dir, root.skills_rel, skill_name) catch |err| switch (err) {
+            skill_registry.LookupError.SkillNotFound => continue,
+            else => |e| return e,
+        };
+    }
+    return skill_registry.LookupError.SkillNotFound;
+}
+
+const SkillRoot = struct {
+    dir: std.fs.Dir,
+    skills_rel: []const u8,
+    owns_dir: bool,
+
+    fn deinit(self: *SkillRoot) void {
+        if (self.owns_dir) self.dir.close();
+        self.* = undefined;
+    }
+};
+
+fn openSkillRoot(root_path: []const u8) !SkillRoot {
+    if (std.fs.path.dirname(root_path)) |parent| {
+        return .{
+            .dir = try openDirectoryPath(parent),
+            .skills_rel = std.fs.path.basename(root_path),
+            .owns_dir = true,
+        };
+    }
+    return .{
+        .dir = std.fs.cwd(),
+        .skills_rel = root_path,
+        .owns_dir = false,
+    };
+}
+
+fn openDirectoryPath(path: []const u8) !std.fs.Dir {
+    if (std.fs.path.isAbsolute(path)) {
+        return std.fs.openDirAbsolute(path, .{ .iterate = true });
+    }
+    return std.fs.cwd().openDir(path, .{ .iterate = true });
+}
+
+fn defaultSkillRootPaths(allocator: std.mem.Allocator) ![][]u8 {
+    var roots: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (roots.items) |root| allocator.free(root);
+        roots.deinit(allocator);
+    }
+
+    if (std.process.getEnvVarOwned(allocator, "APPDATA")) |appdata| {
+        defer allocator.free(appdata);
+        const appdata_skills = try std.fs.path.join(allocator, &.{ appdata, "phantty", "skills" });
+        try appendOwnedSkillRootPath(allocator, &roots, appdata_skills);
+    } else |_| {}
+
+    try appendSkillRootPath(allocator, &roots, "skills");
+
+    if (std.fs.selfExeDirPathAlloc(allocator)) |exe_dir| {
+        defer allocator.free(exe_dir);
+        const exe_skills = try std.fs.path.join(allocator, &.{ exe_dir, "skills" });
+        try appendOwnedSkillRootPath(allocator, &roots, exe_skills);
+    } else |_| {}
+
+    return roots.toOwnedSlice(allocator);
+}
+
+fn appendSkillRootPath(
+    allocator: std.mem.Allocator,
+    roots: *std.ArrayListUnmanaged([]u8),
+    root_path: []const u8,
+) !void {
+    const owned = try allocator.dupe(u8, root_path);
+    errdefer allocator.free(owned);
+    try appendOwnedSkillRootPath(allocator, roots, owned);
+}
+
+fn appendOwnedSkillRootPath(
+    allocator: std.mem.Allocator,
+    roots: *std.ArrayListUnmanaged([]u8),
+    owned_root_path: []u8,
+) !void {
+    for (roots.items) |existing| {
+        if (std.mem.eql(u8, existing, owned_root_path)) {
+            allocator.free(owned_root_path);
+            return;
+        }
+    }
+    errdefer allocator.free(owned_root_path);
+    try roots.append(allocator, owned_root_path);
+}
+
+fn freeSkillRootPaths(allocator: std.mem.Allocator, roots: [][]u8) void {
+    for (roots) |root| allocator.free(root);
+    allocator.free(roots);
+}
+
+fn freeOwnedSkillMetaList(allocator: std.mem.Allocator, list: []skill_registry.SkillMeta) void {
+    for (list) |*skill| {
+        skill.deinit(allocator);
+    }
+}
+
+fn skillMetaNameExists(list: []const skill_registry.SkillMeta, name: []const u8) bool {
+    for (list) |meta| {
+        if (std.mem.eql(u8, meta.name, name)) return true;
+    }
+    return false;
+}
+
+fn skillMetaNameLessThan(_: void, lhs: skill_registry.SkillMeta, rhs: skill_registry.SkillMeta) bool {
+    return std.mem.lessThan(u8, lhs.name, rhs.name);
 }
 
 pub fn agentPermission() AgentPermission {
@@ -2576,7 +2735,13 @@ fn jsonIndexArg(root: std.json.Value, name: []const u8) ?usize {
 }
 
 fn skillInfoTool(allocator: std.mem.Allocator, skill_name: []const u8) ![]u8 {
-    var snapshot = skill_registry.loadSkillSnapshot(allocator, std.fs.cwd(), "skills", skill_name) catch |err| switch (err) {
+    const roots = try defaultSkillRootPaths(allocator);
+    defer freeSkillRootPaths(allocator, roots);
+    return skillInfoToolFromRoots(allocator, skill_name, roots);
+}
+
+fn skillInfoToolFromRoots(allocator: std.mem.Allocator, skill_name: []const u8, root_paths: []const []const u8) ![]u8 {
+    var snapshot = loadSkillSnapshotFromRoots(allocator, skill_name, root_paths) catch |err| switch (err) {
         skill_registry.LookupError.SkillNotFound => return std.fmt.allocPrint(allocator, "Skill not found: {s}", .{skill_name}),
         skill_registry.LookupError.DuplicateSkillName => return std.fmt.allocPrint(allocator, "Duplicate skill name: {s}", .{skill_name}),
         skill_registry.LookupError.InvalidSkillMarkdown => return std.fmt.allocPrint(allocator, "Invalid SKILL.md for skill: {s}", .{skill_name}),
@@ -3619,6 +3784,51 @@ test "ai chat avoids slash command false positives" {
     try std.testing.expect(parseSlashCommand("/api") == null);
     try std.testing.expect(parseSlashCommand("/usr/bin") == null);
     try std.testing.expect(parseSlashCommand("/help me") == null);
+}
+
+test "ai chat lists skills from explicit root paths" {
+    const allocator = std.testing.allocator;
+    const root = ".zig-cache/skill-root-list-test";
+    std.fs.cwd().deleteTree(root) catch {};
+    defer std.fs.cwd().deleteTree(root) catch {};
+
+    try std.fs.cwd().makePath(root ++ "/exe/skills/pdf");
+    try std.fs.cwd().writeFile(.{
+        .sub_path = root ++ "/exe/skills/pdf/SKILL.md",
+        .data = "---\nname: pdf\ndescription: Work with PDF files.\n---\n# PDF\n",
+    });
+
+    const roots = [_][]const u8{
+        root ++ "/missing/skills",
+        root ++ "/exe/skills",
+    };
+    const output = try listSkillsForDisplayFromRoots(allocator, roots[0..]);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "- $pdf: Work with PDF files.") != null);
+}
+
+test "ai chat skill_info loads from explicit root paths" {
+    const allocator = std.testing.allocator;
+    const root = ".zig-cache/skill-root-load-test";
+    std.fs.cwd().deleteTree(root) catch {};
+    defer std.fs.cwd().deleteTree(root) catch {};
+
+    try std.fs.cwd().makePath(root ++ "/bin/skills/web");
+    try std.fs.cwd().writeFile(.{
+        .sub_path = root ++ "/bin/skills/web/SKILL.md",
+        .data = "---\nname: web\ndescription: Browse pages.\n---\n# Web Skill\n",
+    });
+
+    const roots = [_][]const u8{
+        root ++ "/cwd/skills",
+        root ++ "/bin/skills",
+    };
+    const output = try skillInfoToolFromRoots(allocator, "web", roots[0..]);
+    defer allocator.free(output);
+
+    try std.testing.expect(std.mem.indexOf(u8, output, "# Skill: web") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "# Web Skill") != null);
 }
 
 test "ai_chat: session serializes to history record" {
