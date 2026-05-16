@@ -18,6 +18,13 @@ test("AI chat stop control is enabled only while connected and running", () => {
   });
 });
 
+test("AI chat stop control stays available for older desktop layouts without runtime state", () => {
+  assert.deepEqual(aiChatStopControlState({ id: "ai", kind: "ai_chat" }, true), {
+    disabled: false,
+    label: "Stop",
+  });
+});
+
 test("AI chat stop control shows stopping state after stop request", () => {
   assert.deepEqual(
     aiChatStopControlState({ id: "ai", kind: "ai_chat", requestInflight: true, requestStopping: true }, true),

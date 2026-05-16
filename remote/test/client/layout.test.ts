@@ -36,3 +36,18 @@ test("normalizeLayout preserves AI chat pseudo-surface metadata", () => {
   assert.equal(layout.tabs[0]?.surfaces[0]?.requestInflight, true);
   assert.equal(layout.tabs[0]?.surfaces[0]?.requestStopping, false);
 });
+
+test("normalizeLayout keeps AI chat runtime state optional for older desktop clients", () => {
+  const layout = normalizeLayout({
+    type: "layout",
+    tabs: [
+      {
+        index: 0,
+        surfaces: [{ id: "aichat0000000000", kind: "ai_chat" }],
+      },
+    ],
+  });
+
+  assert.equal(layout.tabs[0]?.surfaces[0]?.requestInflight, undefined);
+  assert.equal(layout.tabs[0]?.surfaces[0]?.requestStopping, undefined);
+});
