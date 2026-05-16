@@ -15,6 +15,8 @@ export type LayoutSurface = {
   rows?: number;
   cursorX?: number;
   cursorY?: number;
+  requestInflight?: boolean;
+  requestStopping?: boolean;
   x?: number;
   y?: number;
   w?: number;
@@ -52,6 +54,7 @@ export type SurfaceView = {
   aiTranscript: HTMLDivElement | null;
   aiInput: HTMLTextAreaElement | null;
   aiSend: HTMLButtonElement | null;
+  aiStop: HTMLButtonElement | null;
   term: Terminal;
   fit: FitAddon;
   decoder: TextDecoder;

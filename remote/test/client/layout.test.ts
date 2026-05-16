@@ -19,6 +19,8 @@ test("normalizeLayout preserves AI chat pseudo-surface metadata", () => {
             readOnly: false,
             title: "DeepSeek",
             snapshot: "You:\r\nhi\r\n\r\nAI:\r\nhello",
+            requestInflight: true,
+            requestStopping: false,
             cols: 120,
             rows: 30,
           },
@@ -31,4 +33,6 @@ test("normalizeLayout preserves AI chat pseudo-surface metadata", () => {
   assert.equal(layout.tabs[0]?.surfaces[0]?.kind, "ai_chat");
   assert.equal(layout.tabs[0]?.surfaces[0]?.readOnly, false);
   assert.equal(layout.tabs[0]?.surfaces[0]?.snapshot, "You:\r\nhi\r\n\r\nAI:\r\nhello");
+  assert.equal(layout.tabs[0]?.surfaces[0]?.requestInflight, true);
+  assert.equal(layout.tabs[0]?.surfaces[0]?.requestStopping, false);
 });

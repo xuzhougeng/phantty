@@ -626,6 +626,11 @@ pub const Session = struct {
     approval_reason_buf: [256]u8 = undefined,
     approval_reason_len: usize = 0,
 
+    pub const RequestState = struct {
+        inflight: bool,
+        stopping: bool,
+    };
+
     pub fn reasoningEffort(self: *const Session) []const u8 {
         return self.reasoning_effort_buf[0..self.reasoning_effort_len];
     }
@@ -766,6 +771,15 @@ pub const Session = struct {
 
     pub fn status(self: *const Session) []const u8 {
         return self.status_buf[0..self.status_len];
+    }
+
+    pub fn requestState(self: *Session) RequestState {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return .{
+            .inflight = self.request_inflight,
+            .stopping = self.request_stopping,
+        };
     }
 
     pub fn setTitle(self: *Session, title_text: []const u8) void {
@@ -4808,6 +4822,16 @@ test "ai chat escape stops in-flight request" {
     try std.testing.expect(session.request_stopping);
     try std.testing.expect(session.stop_requested.load(.acquire));
     try std.testing.expectEqualStrings("Stopping...", session.status());
+}
+
+test "ai chat request state exposes in-flight stop status for remote layout" {
+    var session = Session{ .allocator = std.testing.allocator };
+    session.request_inflight = true;
+    session.request_stopping = true;
+
+    const state = session.requestState();
+    try std.testing.expect(state.inflight);
+    try std.testing.expect(state.stopping);
 }
 
 test "ai chat detects dangerous shell commands" {

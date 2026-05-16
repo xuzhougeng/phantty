@@ -42,6 +42,8 @@ function normalizeSurface(raw: unknown): LayoutSurface | null {
     rows: numberOr(surface.rows, 0),
     cursorX: numberOr(surface.cursorX, 0),
     cursorY: numberOr(surface.cursorY, 0),
+    requestInflight: surface.requestInflight === true,
+    requestStopping: surface.requestStopping === true,
     x: numberOr(surface.x, 0),
     y: numberOr(surface.y, 0),
     w: numberOr(surface.w, 1),

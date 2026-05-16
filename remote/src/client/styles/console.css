@@ -687,7 +687,7 @@
 
 .ai-chat-composer {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: end;
   padding: 12px;
@@ -729,6 +729,28 @@
   color: var(--accent-ink);
   font-weight: 900;
   cursor: pointer;
+}
+
+.ai-chat-stop {
+  height: 42px;
+  padding: 0 16px;
+  border: 1px solid color-mix(in srgb, #ff6b4a 70%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, #ff6b4a 18%, var(--surface-overlay-strong));
+  color: color-mix(in srgb, #ffb39f 82%, var(--text));
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.ai-chat-stop:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ai-chat-stop[data-active="true"] {
+  background: #ff6b4a;
+  color: #1d0904;
+  box-shadow: 0 0 24px color-mix(in srgb, #ff6b4a 42%, transparent);
 }
 
 .canvas-scrollbar {

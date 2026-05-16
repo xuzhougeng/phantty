@@ -22,6 +22,7 @@ import {
 } from "./mobile_canvas";
 import { shouldFocusTerminalElement } from "./focus_policy";
 import { parseAiChatTranscript, type AiChatMessage } from "./ai_chat_transcript";
+import { aiChatStopControlState } from "./ai_chat_controls";
 import { isMobileRemoteShell, shouldUseCanvasPan, shouldUseViewportFit } from "./mobile_layout";
 import { cursorMoveSequence, emptyState, shortSurfaceId, validPositiveInteger } from "./utils";
 import { activeSurfaceIdForInput, currentTab, resetSurfaceViews, state } from "./state";
@@ -117,6 +118,7 @@ export function ensureSurfaceView(surfaceId: string): SurfaceView {
     aiTranscript: null,
     aiInput: null,
     aiSend: null,
+    aiStop: null,
     term,
     fit,
     decoder: new TextDecoder(),
@@ -330,10 +332,11 @@ function renderAiChatPanel(view: SurfaceView, surface: LayoutSurface): void {
       if (view.aiTranscript) view.aiTranscript.scrollTop = view.aiTranscript.scrollHeight;
     });
   }
+  updateAiChatControl(view, surface);
 }
 
 function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElement {
-  if (view.aiContainer && view.aiTranscript && view.aiInput && view.aiSend) return view.aiContainer;
+  if (view.aiContainer && view.aiTranscript && view.aiInput && view.aiSend && view.aiStop) return view.aiContainer;
 
   const container = document.createElement("div");
   container.className = "ai-chat-remote";
@@ -354,6 +357,12 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
   send.className = "ai-chat-send";
   send.type = "submit";
   send.textContent = "Send";
+
+  const stop = document.createElement("button");
+  stop.className = "ai-chat-stop";
+  stop.type = "button";
+  stop.textContent = "Stop";
+  stop.disabled = true;
 
   const submit = (): void => {
     const text = input.value.trim();
@@ -379,8 +388,16 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
     submit();
   });
 
+  stop.addEventListener("click", () => {
+    stop.disabled = true;
+    stop.textContent = "Stopping";
+    stop.dataset.active = "false";
+    inputHandler(surfaceId, "\x1b");
+  });
+
   form.appendChild(input);
   form.appendChild(send);
+  form.appendChild(stop);
   container.appendChild(transcript);
   container.appendChild(form);
 
@@ -388,7 +405,26 @@ function ensureAiChatElements(view: SurfaceView, surfaceId: string): HTMLDivElem
   view.aiTranscript = transcript;
   view.aiInput = input;
   view.aiSend = send;
+  view.aiStop = stop;
   return container;
+}
+
+function updateAiChatControl(view: SurfaceView, surface: LayoutSurface): void {
+  if (!view.aiStop) return;
+  const connected = state.socket?.readyState === WebSocket.OPEN;
+  const stopState = aiChatStopControlState(surface, connected);
+  view.aiStop.disabled = stopState.disabled;
+  view.aiStop.textContent = stopState.label;
+  view.aiStop.dataset.active = String(surface.requestInflight === true && !stopState.disabled);
+}
+
+export function updateAiChatControls(): void {
+  const surfaces = state.layoutState?.tabs.flatMap((tab) => tab.surfaces) ?? [];
+  for (const surface of surfaces) {
+    if (surface.kind !== "ai_chat") continue;
+    const view = state.surfaceViews.get(surface.id);
+    if (view) updateAiChatControl(view, surface);
+  }
 }
 
 function renderAiChatTranscript(root: HTMLDivElement, snapshot: string): void {

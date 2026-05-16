@@ -18,6 +18,7 @@ import {
   focusAndFitSelectedSurface,
   refitAllSurfaces,
   renderRemotePanels,
+  updateAiChatControls,
   updateSurfaceCursors,
 } from "../surfaces";
 import { applyVisualViewportSizing, isMobileRemoteShell } from "../mobile_layout";
@@ -308,6 +309,7 @@ export function updateInputUi(): void {
   }
 
   updateSurfaceCursors();
+  updateAiChatControls();
 }
 
 function updateMobileSurfaceMode(): void {

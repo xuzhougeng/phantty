@@ -1552,12 +1552,18 @@ fn appendRemoteAiChatTabJson(
     try out.appendSlice(allocator, "\",\"focused\":true");
     try appendAgentDetectionJson(allocator, out, null);
     try out.appendSlice(allocator, ",\"kind\":\"ai_chat\",\"readOnly\":false,\"cols\":120,\"rows\":30,\"cursorX\":0,\"cursorY\":0,\"snapshot\":\"");
+    var request_state: ai_chat.Session.RequestState = .{ .inflight = false, .stopping = false };
     if (tab_state.ai_chat_session) |session| {
+        request_state = session.requestState();
         const snapshot = session.allocRemoteSnapshot(allocator) catch null;
         defer if (snapshot) |text| allocator.free(text);
         if (snapshot) |text| try remote.appendJsonString(out, allocator, text);
     }
-    try out.appendSlice(allocator, "\",\"x\":0,\"y\":0,\"w\":1,\"h\":1}]}");
+    try out.appendSlice(allocator, "\",\"requestInflight\":");
+    try out.appendSlice(allocator, if (request_state.inflight) "true" else "false");
+    try out.appendSlice(allocator, ",\"requestStopping\":");
+    try out.appendSlice(allocator, if (request_state.stopping) "true" else "false");
+    try out.appendSlice(allocator, ",\"x\":0,\"y\":0,\"w\":1,\"h\":1}]}");
 }
 
 fn handleRemoteAiInputRequest(request: *RemoteAiInputRequest) void {

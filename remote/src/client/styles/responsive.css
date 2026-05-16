@@ -402,7 +402,8 @@
     font-weight: 700;
   }
 
-  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-send {
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-send,
+  .console-shell[data-mobile-surface-kind="ai_chat"] .ai-chat-stop {
     width: 72px;
     height: 48px;
     border-radius: 14px;
