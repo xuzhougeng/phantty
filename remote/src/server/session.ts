@@ -7,6 +7,8 @@ export type RelayMessage = {
   encoding?: string;
   surfaceId?: string;
   message?: string;
+  requestId?: string;
+  status?: string;
   phanttyConnected?: boolean;
   activeTab?: number;
   tabs?: Array<{
@@ -24,11 +26,14 @@ export type RelayMessage = {
 };
 
 export type RemoteSurfaceRef = { id: string; title: string };
+export type AiAgentOpenStatus = "opened" | "no-profile" | "failed";
+export type AiAgentOpenResult = AiAgentOpenStatus | "offline" | "timeout";
 type LayoutTab = NonNullable<RelayMessage["tabs"]>[number];
 type LayoutSurface = LayoutTab["surfaces"][number];
 
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const SOCKET_OPEN = 1;
+const AI_AGENT_OPEN_STATUSES = new Set<AiAgentOpenStatus>(["opened", "no-profile", "failed"]);
 
 const sessions = new Map<string, RemoteSession>();
 const heartbeatState = new WeakMap<WebSocket, { alive: boolean }>();
@@ -56,6 +61,7 @@ export class RemoteSession {
   browsers = new Set<WebSocket>();
   lastLayout: RelayMessage | null = null;
   private layoutListeners = new Set<() => void>();
+  private pendingAiAgentOpenRequests = new Map<string, (status: AiAgentOpenStatus) => void>();
 
   constructor(key: string) {
     this.key = key;
@@ -129,6 +135,18 @@ export class RemoteSession {
     });
   }
 
+  async requestAiAgentOpen(requestId: string, timeoutMs = 2000): Promise<AiAgentOpenResult> {
+    if (!isSocketOpen(this.phantty)) return "offline";
+
+    const wait = this.registerAiAgentOpenWait(requestId, timeoutMs);
+    if (!safeSend(this.phantty, { type: "open-ai-agent", requestId })) {
+      wait.cancel();
+      return "offline";
+    }
+
+    return await wait.promise;
+  }
+
   sendNotice(message: string): void {
     this.broadcast({ type: "notice", message });
   }
@@ -141,6 +159,41 @@ export class RemoteSession {
     const tabs = this.lastLayout?.tabs ?? [];
     if (tabs.length === 0) return null;
     return tabs.find((tab) => tab.index === this.lastLayout?.activeTab) ?? tabs[0] ?? null;
+  }
+
+  private registerAiAgentOpenWait(
+    requestId: string,
+    timeoutMs: number,
+  ): { promise: Promise<AiAgentOpenResult>; cancel: () => void } {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let resolvePromise: (status: AiAgentOpenResult) => void = () => {};
+
+    const settle = (status: AiAgentOpenResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      this.pendingAiAgentOpenRequests.delete(requestId);
+      resolvePromise(status);
+    };
+
+    const promise = new Promise<AiAgentOpenResult>((resolve) => {
+      resolvePromise = resolve;
+    });
+
+    this.pendingAiAgentOpenRequests.set(requestId, (status) => settle(status));
+    timer = setTimeout(() => settle("timeout"), Math.max(0, timeoutMs));
+
+    return {
+      promise,
+      cancel: () => settle("timeout"),
+    };
+  }
+
+  private handleAiAgentOpenResult(message: RelayMessage): void {
+    if (typeof message.requestId !== "string" || !isAiAgentOpenStatus(message.status)) return;
+    const settle = this.pendingAiAgentOpenRequests.get(message.requestId);
+    settle?.(message.status);
   }
 
   attachPhantty(socket: WebSocket): void {
@@ -171,6 +224,10 @@ export class RemoteSession {
         return;
       }
       if (message.type === "pong") return;
+      if (message.type === "open-ai-agent-result") {
+        this.handleAiAgentOpenResult(message);
+        return;
+      }
       if (message.type === "output" && typeof message.data === "string") {
         this.broadcast({ type: "output", data: message.data });
       } else if (message.type === "output-bytes" && typeof message.data === "string") {
@@ -293,6 +350,10 @@ function pongMessage(message: RelayMessage): RelayMessage {
 
 function isWritableTerminalSurface(surface: LayoutSurface): boolean {
   return surface.kind !== "ai_chat" && surface.readOnly !== true;
+}
+
+function isAiAgentOpenStatus(value: unknown): value is AiAgentOpenStatus {
+  return typeof value === "string" && AI_AGENT_OPEN_STATUSES.has(value as AiAgentOpenStatus);
 }
 
 export function safeJson(data: string): RelayMessage | null {
