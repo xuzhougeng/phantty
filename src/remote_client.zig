@@ -124,6 +124,12 @@ pub const Options = struct {
 };
 
 pub const SurfaceWriteFn = *const fn (ctx: *anyopaque, data: []const u8) void;
+pub const AiAgentOpenStatus = enum {
+    opened,
+    no_profile,
+    failed,
+};
+pub const AiAgentOpenFn = *const fn (ctx: *anyopaque, request_id: []const u8) void;
 
 const SurfaceSink = struct {
     id: [16]u8,
@@ -192,6 +198,8 @@ pub const Client = struct {
     condition: std.Thread.Condition = .{},
     queue: std.ArrayListUnmanaged([]u8) = .empty,
     surface_sinks: std.ArrayListUnmanaged(SurfaceSink) = .empty,
+    ai_agent_open_ctx: ?*anyopaque = null,
+    ai_agent_open_fn: ?AiAgentOpenFn = null,
     last_layout: ?[]u8 = null,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     state: std.atomic.Value(State) = std.atomic.Value(State).init(.disconnected),
@@ -269,6 +277,13 @@ pub const Client = struct {
         self.enqueueOwnedMessage(message);
     }
 
+    pub fn sendAiAgentOpenResult(self: *Client, request_id: []const u8, status: AiAgentOpenStatus) void {
+        if (request_id.len == 0 or self.stop_requested.load(.acquire)) return;
+
+        const message = buildAiAgentOpenResultMessage(self.allocator, request_id, status) catch return;
+        self.enqueueOwnedMessage(message);
+    }
+
     pub fn sendLayout(self: *Client, layout_json: []const u8) void {
         if (layout_json.len == 0 or self.stop_requested.load(.acquire)) return;
 
@@ -312,6 +327,18 @@ pub const Client = struct {
             .ctx = ctx,
             .write_fn = write_fn,
         }) catch {};
+    }
+
+    pub fn registerAiAgentOpener(
+        self: *Client,
+        ctx: *anyopaque,
+        open_fn: AiAgentOpenFn,
+    ) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        self.ai_agent_open_ctx = ctx;
+        self.ai_agent_open_fn = open_fn;
     }
 
     pub fn unregisterSurface(self: *Client, surface_id: [16]u8) void {
@@ -383,6 +410,19 @@ pub const Client = struct {
             if (std.mem.eql(u8, sink.id[0..], surface_id)) {
                 sink.write_fn(sink.ctx, data);
                 return;
+            }
+        }
+    }
+
+    fn dispatchAiAgentOpen(self: *Client, request_id: []const u8) void {
+        self.mutex.lock();
+        const ctx = self.ai_agent_open_ctx;
+        const open_fn = self.ai_agent_open_fn;
+        self.mutex.unlock();
+
+        if (ctx) |callback_ctx| {
+            if (open_fn) |callback| {
+                callback(callback_ctx, request_id);
             }
         }
     }
@@ -721,14 +761,45 @@ fn buildOutputMessage(allocator: std.mem.Allocator, surface_id: []const u8, data
     return out.toOwnedSlice(allocator);
 }
 
-fn handleIncomingMessage(client: *Client, message: []const u8) void {
-    if (!isJsonMessageType(message, "input-bytes")) return;
-    const surface_id = extractJsonString(message, "surfaceId") orelse return;
-    const hex_data = extractJsonString(message, "data") orelse return;
+fn buildAiAgentOpenResultMessage(
+    allocator: std.mem.Allocator,
+    request_id: []const u8,
+    status: AiAgentOpenStatus,
+) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
 
-    const decoded = decodeHexAlloc(client.allocator, hex_data) catch return;
-    defer client.allocator.free(decoded);
-    client.dispatchInput(surface_id, decoded);
+    try out.appendSlice(allocator, "{\"type\":\"open-ai-agent-result\",\"requestId\":\"");
+    try appendJsonString(&out, allocator, request_id);
+    try out.appendSlice(allocator, "\",\"status\":\"");
+    try out.appendSlice(allocator, aiAgentOpenStatusJson(status));
+    try out.appendSlice(allocator, "\"}");
+    return out.toOwnedSlice(allocator);
+}
+
+fn aiAgentOpenStatusJson(status: AiAgentOpenStatus) []const u8 {
+    return switch (status) {
+        .opened => "opened",
+        .no_profile => "no-profile",
+        .failed => "failed",
+    };
+}
+
+fn handleIncomingMessage(client: *Client, message: []const u8) void {
+    if (isJsonMessageType(message, "input-bytes")) {
+        const surface_id = extractJsonString(message, "surfaceId") orelse return;
+        const hex_data = extractJsonString(message, "data") orelse return;
+
+        const decoded = decodeHexAlloc(client.allocator, hex_data) catch return;
+        defer client.allocator.free(decoded);
+        client.dispatchInput(surface_id, decoded);
+        return;
+    }
+
+    if (isJsonMessageType(message, "open-ai-agent")) {
+        const request_id = extractJsonString(message, "requestId") orelse return;
+        client.dispatchAiAgentOpen(request_id);
+    }
 }
 
 const IncomingMessageAssembler = struct {
@@ -952,4 +1023,56 @@ test "incoming websocket fragments are reassembled before handling JSON" {
 
     const expected = "{\"type\":\"input-bytes\",\"surfaceId\":\"aichat0000000000\",\"encoding\":\"hex\",\"data\":\"68656c6c6f0d\"}";
     try std.testing.expectEqualStrings(expected, second.?);
+}
+
+const TestAiAgentOpenCtx = struct {
+    called: bool = false,
+    request_id_buf: [128]u8 = undefined,
+    request_id_len: usize = 0,
+
+    fn onOpen(ctx: *anyopaque, request_id: []const u8) void {
+        const self: *TestAiAgentOpenCtx = @ptrCast(@alignCast(ctx));
+        self.called = true;
+        self.request_id_len = @min(request_id.len, self.request_id_buf.len);
+        @memcpy(self.request_id_buf[0..self.request_id_len], request_id[0..self.request_id_len]);
+    }
+};
+
+fn initTestClient(allocator: std.mem.Allocator) !Client {
+    return .{
+        .allocator = allocator,
+        .endpoint = .{
+            .secure = false,
+            .host = try allocator.dupe(u8, "127.0.0.1"),
+            .port = 80,
+            .object_name = try allocator.dupe(u8, "/ws/phantty?session=test"),
+        },
+        .device_name = null,
+        .session_key = try allocator.dupe(u8, "test"),
+    };
+}
+
+test "open ai agent message dispatches request id" {
+    const allocator = std.testing.allocator;
+    var client = try initTestClient(allocator);
+    defer client.deinit();
+
+    var ctx = TestAiAgentOpenCtx{};
+    client.registerAiAgentOpener(&ctx, TestAiAgentOpenCtx.onOpen);
+
+    handleIncomingMessage(&client, "{\"type\":\"open-ai-agent\",\"requestId\":\"remote-ai-1\"}");
+
+    try std.testing.expect(ctx.called);
+    try std.testing.expectEqualStrings("remote-ai-1", ctx.request_id_buf[0..ctx.request_id_len]);
+}
+
+test "open ai agent result message escapes request id" {
+    const allocator = std.testing.allocator;
+    const message = try buildAiAgentOpenResultMessage(allocator, "remote-\"one", .no_profile);
+    defer allocator.free(message);
+
+    try std.testing.expectEqualStrings(
+        "{\"type\":\"open-ai-agent-result\",\"requestId\":\"remote-\\\"one\",\"status\":\"no-profile\"}",
+        message,
+    );
 }
