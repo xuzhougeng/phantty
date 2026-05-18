@@ -61,7 +61,7 @@ export class RemoteSession {
   browsers = new Set<WebSocket>();
   lastLayout: RelayMessage | null = null;
   private layoutListeners = new Set<() => void>();
-  private pendingAiAgentOpenRequests = new Map<string, (status: AiAgentOpenStatus) => void>();
+  private pendingAiAgentOpenRequests = new Map<string, (status: AiAgentOpenResult) => void>();
 
   constructor(key: string) {
     this.key = key;
@@ -196,7 +196,14 @@ export class RemoteSession {
     settle?.(message.status);
   }
 
+  private resolvePendingAiAgentOpenRequests(status: AiAgentOpenResult): void {
+    for (const settle of [...this.pendingAiAgentOpenRequests.values()]) {
+      settle(status);
+    }
+  }
+
   attachPhantty(socket: WebSocket): void {
+    if (this.phantty) this.resolvePendingAiAgentOpenRequests("offline");
     try {
       this.phantty?.close(1012, "replaced by a new Phantty connection");
     } catch {
@@ -210,6 +217,7 @@ export class RemoteSession {
     socket.on("error", (err) => {
       if (this.phantty !== socket) return;
       console.warn(`[remote] Phantty websocket error: ${socketErrorMessage(err)}`);
+      this.resolvePendingAiAgentOpenRequests("offline");
       this.phantty = null;
       this.broadcast({ type: "notice", message: "Phantty disconnected" });
       this.broadcastPeerStatus();
@@ -245,6 +253,7 @@ export class RemoteSession {
 
     socket.on("close", () => {
       if (this.phantty !== socket) return;
+      this.resolvePendingAiAgentOpenRequests("offline");
       this.phantty = null;
       this.broadcast({ type: "notice", message: "Phantty disconnected" });
       this.broadcastPeerStatus();
