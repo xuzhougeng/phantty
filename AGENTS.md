@@ -197,6 +197,7 @@ packaging/windows/           # Windows installer and packaging scripts
 assets/                      # Application icon and source art
 shaders/                     # GLSL shader files
 tools/                       # Terminal helper scripts such as imgcat/pdfcat
+plugins/                     # Installed plugin root; future skills/MCP assets live here
 pkg/                         # Vendored build dependencies (freetype, zlib, libpng, opengl, etc.)
 vendor/                      # Vendored source code
 ```

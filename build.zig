@@ -147,9 +147,9 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
     b.installDirectory(.{
-        .source_dir = b.path("tests/eval/skills"),
+        .source_dir = b.path("plugins"),
         .install_dir = .bin,
-        .install_subdir = "skills",
+        .install_subdir = "plugins",
     });
 
     // Unit tests (zig build test)

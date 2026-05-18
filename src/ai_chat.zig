@@ -13,7 +13,7 @@ const skill_registry = @import("skill_registry.zig");
 pub const DEFAULT_NAME = "DeepSeek";
 pub const DEFAULT_BASE_URL = "https://api.deepseek.com";
 pub const DEFAULT_MODEL = "deepseek-v4-pro";
-pub const DEFAULT_SYSTEM_PROMPT = "You are a helpful assistant.";
+pub const DEFAULT_SYSTEM_PROMPT = std.mem.trimRight(u8, @embedFile("prompt.md"), "\r\n");
 pub const DEFAULT_THINKING = "enabled";
 pub const DEFAULT_REASONING_EFFORT = "high";
 pub const DEFAULT_STREAM = "false";
@@ -25,6 +25,7 @@ const DEFAULT_AGENT_TIMEOUT_MS: u32 = 60_000;
 const DEFAULT_AGENT_OUTPUT_LIMIT: u32 = 16 * 1024;
 const REMOTE_SNAPSHOT_MAX_BYTES: usize = 24 * 1024;
 const INPUT_PROMPT_MAX_BYTES: usize = 64 * 1024;
+const SYSTEM_PROMPT_MAX_BYTES: usize = 16 * 1024;
 
 pub const Role = enum {
     user,
@@ -602,7 +603,7 @@ pub const Session = struct {
     api_key_len: usize = 0,
     model_buf: [128]u8 = undefined,
     model_len: usize = 0,
-    system_prompt_buf: [512]u8 = undefined,
+    system_prompt_buf: [SYSTEM_PROMPT_MAX_BYTES]u8 = undefined,
     system_prompt_len: usize = 0,
     thinking_enabled: bool = true,
     reasoning_effort_buf: [16]u8 = undefined,
@@ -4260,6 +4261,47 @@ test "ai chat endpoint normalization" {
     const endpoint = try chatEndpoint(allocator, "https://api.deepseek.com/");
     defer allocator.free(endpoint);
     try std.testing.expectEqualStrings("https://api.deepseek.com/chat/completions", endpoint);
+}
+
+test "ai chat default system prompt is short windows uv guidance" {
+    try std.testing.expect(DEFAULT_SYSTEM_PROMPT.len < 1600);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "uv") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Python") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Windows") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "PowerShell") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "powershell_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_list") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_select") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "ssh_session_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "wsl_session_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "terminal_repl_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Codex") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "Claude Code") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "shell commands") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "uv --version") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "install.ps1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "curl") == null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "wget") == null);
+    try std.testing.expect(std.mem.indexOf(u8, DEFAULT_SYSTEM_PROMPT, "macOS") == null);
+}
+
+test "ai chat empty profile system prompt uses full embedded default" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "Test",
+        DEFAULT_BASE_URL,
+        "key",
+        DEFAULT_MODEL,
+        "",
+        DEFAULT_THINKING,
+        DEFAULT_REASONING_EFFORT,
+        DEFAULT_STREAM,
+        DEFAULT_AGENT,
+    );
+    defer session.deinit();
+
+    try std.testing.expectEqualStrings(DEFAULT_SYSTEM_PROMPT, session.systemPrompt());
 }
 
 test "ai chat request json includes deepseek thinking mode" {

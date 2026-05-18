@@ -212,8 +212,14 @@ The built-in defaults are:
 
 - Base URL: `https://api.deepseek.com`
 - Model: `deepseek-v4-pro`
-- System prompt: `You are a helpful assistant.`
+- System prompt: embedded from `src/prompt.md`
 - Request mode: DeepSeek thinking enabled, `reasoning_effort = high`, non-streaming
+
+The default agent prompt assumes Windows PowerShell for local commands, routes
+open SSH/WSL terminals through Phantty's terminal tools, avoids pasting shell
+commands into Codex/Claude Code REPLs, and keeps Python environment management
+on `uv`. For existing AI profiles, clear the System field to use the current
+embedded default prompt on the next launch.
 
 If an AI profile does not include an API key and its base URL points at
 DeepSeek, Phantty also checks `DEEPSEEK_API_KEY` in the process environment.
