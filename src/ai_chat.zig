@@ -983,15 +983,33 @@ pub const Session = struct {
 
         try appendLimitedSection(allocator, &out, "Model", self.model(), REMOTE_SNAPSHOT_MAX_BYTES);
         try appendLimitedSection(allocator, &out, "Status", self.status(), REMOTE_SNAPSHOT_MAX_BYTES);
+
+        var sections: std.ArrayListUnmanaged(RemoteSnapshotSection) = .empty;
+        defer sections.deinit(allocator);
+        var tool_summaries: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (tool_summaries.items) |summary| allocator.free(summary);
+            tool_summaries.deinit(allocator);
+        }
         for (self.messages.items) |msg| {
-            try appendLimitedSection(allocator, &out, msg.role.label(), msg.content, REMOTE_SNAPSHOT_MAX_BYTES);
+            if (msg.role == .tool) {
+                const summary = try allocRemoteToolSummary(allocator, msg);
+                var summary_owned = true;
+                errdefer if (summary_owned) allocator.free(summary);
+                try sections.append(allocator, .{ .label = msg.role.label(), .text = summary });
+                try tool_summaries.append(allocator, summary);
+                summary_owned = false;
+            } else {
+                try sections.append(allocator, .{ .label = msg.role.label(), .text = msg.content });
+            }
             if (msg.reasoning) |reasoning| {
-                if (reasoning.len > 0) try appendLimitedSection(allocator, &out, "Reasoning", reasoning, REMOTE_SNAPSHOT_MAX_BYTES);
+                if (reasoning.len > 0) try sections.append(allocator, .{ .label = "Reasoning", .text = reasoning });
             }
             if (msg.usage_footer) |footer| {
-                if (footer.len > 0) try appendLimitedSection(allocator, &out, "Usage", footer, REMOTE_SNAPSHOT_MAX_BYTES);
+                if (footer.len > 0) try sections.append(allocator, .{ .label = "Usage", .text = footer });
             }
         }
+        try appendRecentLimitedSections(allocator, &out, sections.items, REMOTE_SNAPSHOT_MAX_BYTES);
         if (out.items.len == 0) try out.appendSlice(allocator, "No messages yet.");
         return out.toOwnedSlice(allocator);
     }
@@ -1918,6 +1936,59 @@ fn appendLimitedSection(
     if (take < text.len and out.items.len + 18 <= max_bytes) {
         try out.appendSlice(allocator, "\r\n...[truncated]");
     }
+}
+
+const RemoteSnapshotSection = struct {
+    label: []const u8,
+    text: []const u8,
+};
+
+fn appendRecentLimitedSections(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(u8),
+    sections: []const RemoteSnapshotSection,
+    max_bytes: usize,
+) !void {
+    if (sections.len == 0 or out.items.len >= max_bytes) return;
+
+    var start = sections.len;
+    var used = out.items.len;
+    while (start > 0) {
+        const section = sections[start - 1];
+        const header_len = remoteSnapshotSectionHeaderLen(used, section.label);
+        if (used + header_len >= max_bytes) break;
+        const full_len = header_len + section.text.len;
+        if (full_len <= max_bytes - used) {
+            used += full_len;
+            start -= 1;
+            continue;
+        }
+
+        if (start == sections.len) start -= 1;
+        break;
+    }
+
+    for (sections[start..]) |section| {
+        try appendLimitedSection(allocator, out, section.label, section.text, max_bytes);
+    }
+}
+
+fn remoteSnapshotSectionHeaderLen(current_len: usize, label: []const u8) usize {
+    return (if (current_len > 0) "\r\n\r\n".len else 0) + label.len + ":\r\n".len;
+}
+
+fn allocRemoteToolSummary(allocator: std.mem.Allocator, msg: Message) ![]u8 {
+    if (msg.tool_name) |name| {
+        if (name.len > 0) {
+            return std.fmt.allocPrint(allocator, "{s} completed. Output omitted in remote chat.", .{name});
+        }
+    }
+
+    const trimmed = std.mem.trim(u8, msg.content, " \t\r\n");
+    if (trimmed.len == 0 or trimmed.len > 160) {
+        return allocator.dupe(u8, "Tool activity. Output omitted in remote chat.");
+    }
+    return allocator.dupe(u8, trimmed);
 }
 
 fn requestThreadMain(request: *ChatRequest) void {
@@ -4928,6 +4999,47 @@ test "ai chat remote snapshot omits local draft input" {
 
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "local draft only") == null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "Draft") == null);
+}
+
+test "ai chat remote snapshot keeps latest messages after large tool output" {
+    const allocator = std.testing.allocator;
+    const session = try Session.init(
+        allocator,
+        "DeepSeek",
+        DEFAULT_BASE_URL,
+        "key",
+        DEFAULT_MODEL,
+        DEFAULT_SYSTEM_PROMPT,
+        DEFAULT_THINKING,
+        DEFAULT_REASONING_EFFORT,
+        DEFAULT_STREAM,
+        DEFAULT_AGENT,
+    );
+    defer session.deinit();
+
+    const large_tool_output = try allocator.alloc(u8, REMOTE_SNAPSHOT_MAX_BYTES + 1024);
+    @memset(large_tool_output, 'x');
+    try session.messages.append(allocator, .{
+        .role = .user,
+        .content = try allocator.dupe(u8, "latest user message"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .tool,
+        .content = large_tool_output,
+        .tool_name = try allocator.dupe(u8, "powershell_exec"),
+    });
+    try session.messages.append(allocator, .{
+        .role = .assistant,
+        .content = try allocator.dupe(u8, "latest assistant reply"),
+    });
+
+    const snapshot = try session.allocRemoteSnapshot(allocator);
+    defer allocator.free(snapshot);
+
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "latest user message") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "latest assistant reply") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "powershell_exec") != null);
+    try std.testing.expect(std.mem.indexOf(u8, snapshot, "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx") == null);
 }
 
 test "ai chat clipboard text exports transcript when input is empty" {

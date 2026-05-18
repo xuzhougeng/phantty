@@ -35,6 +35,7 @@ import {
 import { bindVirtualKeyboard, renderVirtualKeyboardMarkup, syncVirtualKeyboardInputMode } from "../vkbd";
 import { mobileVisualZoomLabel, mobileVisualZoomPercent, nextMobileVisualZoom } from "../mobile_visual_zoom";
 import { selectedMobileSurfaceKind, shouldShowMobileVirtualKeyboard } from "../mobile_surface_mode";
+import { remoteTabSelectionSidebarAction } from "../sidebar_behavior";
 import {
   bindActionText,
   bridgeStatusText,
@@ -351,8 +352,18 @@ export function renderRemoteTabs(): void {
       state.selectedSurfaceId =
         activeTab?.focusedSurfaceId ?? activeTab?.surfaces[0]?.id ?? state.selectedSurfaceId;
       renderRemoteWorkspace();
+      applyRemoteTabSelectionSidebarAction();
     });
   });
+}
+
+function applyRemoteTabSelectionSidebarAction(): void {
+  const action = remoteTabSelectionSidebarAction(isMobileRemoteShell());
+  if (action === "close-drawer") {
+    setDrawerOpen(false);
+    return;
+  }
+  setSidebarCollapsed(true);
 }
 
 export function renderRemoteWorkspace(): void {

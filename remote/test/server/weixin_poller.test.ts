@@ -462,6 +462,131 @@ test("WeixinPoller sends the final AI reply when it completes after all progress
   assert.equal(events.at(-1), "send:final answer after checkpoints");
 });
 
+test("WeixinPoller sends the final AI reply when completion status is done after tool calls", async () => {
+  const events: string[] = [];
+  let transcript = "Model:\r\nDeepSeek\r\n\r\nStatus:\r\nReady\r\n\r\nAI:\r\nready";
+  let layoutListener: (() => void) | null = null;
+  const scheduler = fakeManualScheduler();
+  const poller = new WeixinPoller(
+    fakeStore({
+      loadSettings: async () => ({ enabled: true, target_session: "alpha", reply_timeout_ms: 30000 }),
+    }),
+    () => [{
+      key: "alpha",
+      session: {
+        isPhanttyConnected: () => true,
+        findAiChatSurface: () => ({ id: "ai", title: "AI", kind: "ai_chat" }),
+        latestAiChatTranscript: () => transcript,
+        onLayout: (listener: () => void) => {
+          layoutListener = listener;
+          return () => {
+            layoutListener = null;
+          };
+        },
+        sendInput: (_surfaceId: string, text: string) => {
+          events.push(`input:${text}`);
+          transcript = `${transcript}\r\n\r\nYou:\r\n${text.trim()}`;
+          return true;
+        },
+      },
+    }] as never,
+    { warn: () => {} },
+    {
+      aiReplyCheckpointsMs: [10000],
+      createClient: () => ({
+        getUpdates: async () => ({
+          ret: 0,
+          get_updates_buf: "next-cursor",
+          longpolling_timeout_ms: 1000,
+          msgs: [{
+            from_user_id: "user@im.wechat",
+            to_user_id: "bot@im.bot",
+            context_token: "ctx",
+            item_list: [{ type: 1, text_item: { text: "run a tool" } }],
+          }],
+        }),
+        sendTextMessage: async (_to, text) => {
+          events.push(`send:${text}`);
+        },
+      }),
+      scheduler,
+    },
+  );
+
+  await poller.runOnceForTest();
+  transcript = `${transcript}\r\n\r\nStatus:\r\nRunning tools...\r\n\r\nTool:\r\npowershell_exec completed. Output omitted in remote chat.`;
+  scheduler.fire(0);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(events.at(-1), "send:还在处理中，工具调用仍在执行。");
+
+  transcript = `${transcript}\r\n\r\nStatus:\r\nDone in 3.5s\r\n\r\nAI:\r\nfinal answer after tool`;
+  layoutListener?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(events.at(-1), "send:final answer after tool");
+});
+
+test("WeixinPoller sends the final AI reply when the current transcript was compacted", async () => {
+  const events: string[] = [];
+  const oldMessages = Array.from({ length: 12 }, (_, index) => (
+    `You:\r\nold question ${index}\r\n\r\nAI:\r\nold answer ${index}`
+  )).join("\r\n\r\n");
+  let transcript = `Model:\r\nDeepSeek\r\n\r\nStatus:\r\nReady\r\n\r\n${oldMessages}`;
+  let layoutListener: (() => void) | null = null;
+  const scheduler = fakeManualScheduler();
+  const poller = new WeixinPoller(
+    fakeStore({
+      loadSettings: async () => ({ enabled: true, target_session: "alpha", reply_timeout_ms: 30000 }),
+    }),
+    () => [{
+      key: "alpha",
+      session: {
+        isPhanttyConnected: () => true,
+        findAiChatSurface: () => ({ id: "ai", title: "AI", kind: "ai_chat" }),
+        latestAiChatTranscript: () => transcript,
+        onLayout: (listener: () => void) => {
+          layoutListener = listener;
+          return () => {
+            layoutListener = null;
+          };
+        },
+        sendInput: (_surfaceId: string, text: string) => {
+          events.push(`input:${text}`);
+          transcript = `Model:\r\nDeepSeek\r\n\r\nStatus:\r\nDone\r\n\r\nYou:\r\n${text.trim()}\r\n\r\nTool:\r\npowershell_exec completed. Output omitted in remote chat.\r\n\r\nAI:\r\ncompacted final answer`;
+          return true;
+        },
+      },
+    }] as never,
+    { warn: () => {} },
+    {
+      aiReplyCheckpointsMs: [10000],
+      createClient: () => ({
+        getUpdates: async () => ({
+          ret: 0,
+          get_updates_buf: "next-cursor",
+          longpolling_timeout_ms: 1000,
+          msgs: [{
+            from_user_id: "user@im.wechat",
+            to_user_id: "bot@im.bot",
+            context_token: "ctx",
+            item_list: [{ type: 1, text_item: { text: "new compacted task" } }],
+          }],
+        }),
+        sendTextMessage: async (_to, text) => {
+          events.push(`send:${text}`);
+        },
+      }),
+      scheduler,
+    },
+  );
+
+  await poller.runOnceForTest();
+  layoutListener?.();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(events.at(-1), "send:compacted final answer");
+});
+
 test("WeixinPoller start is idempotent while getUpdates is in flight", async () => {
   const events: string[] = [];
   let releaseUpdates!: () => void;

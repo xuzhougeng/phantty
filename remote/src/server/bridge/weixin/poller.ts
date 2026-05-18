@@ -300,17 +300,49 @@ function aiReplyProgress(baselineTranscript: string, currentTranscript: string):
   const baselineMessages = aiMessages(parseAiSections(baselineTranscript));
   const currentSections = parseAiSections(currentTranscript);
   const currentMessages = aiMessages(currentSections);
-  const newMessages = currentMessages.slice(baselineMessages.length);
+  const newMessages = messagesAfterBaseline(baselineMessages, currentMessages);
   const status = latestStatus(currentSections).toLowerCase();
   const lastAssistant = [...newMessages].reverse().find((message) => message.role === "assistant" && message.content.trim());
 
-  if (lastAssistant && status === "ready") {
+  if (lastAssistant && !isAiActiveStatus(status)) {
     return { done: true, text: lastAssistant.content.trim() };
   }
   if (status.includes("running tools") || newMessages.some((message) => message.role === "tool")) {
     return { done: false, text: "还在处理中，工具调用仍在执行。" };
   }
   return { done: false, text: "还在处理中，等待 AI 回复。" };
+}
+
+function messagesAfterBaseline(baselineMessages: AiSection[], currentMessages: AiSection[]): AiSection[] {
+  if (baselineMessages.length === 0) return currentMessages;
+  if (currentMessages.length === 0) return [];
+
+  const maxOverlap = Math.min(baselineMessages.length, currentMessages.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    const baselineStart = baselineMessages.length - overlap;
+    let matched = true;
+    for (let i = 0; i < overlap; i += 1) {
+      if (!sameAiMessage(baselineMessages[baselineStart + i], currentMessages[i])) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return currentMessages.slice(overlap);
+  }
+  return currentMessages;
+}
+
+function sameAiMessage(a: AiSection, b: AiSection): boolean {
+  return a.role === b.role && a.content === b.content;
+}
+
+function isAiActiveStatus(status: string): boolean {
+  return (
+    status.includes("running tools") ||
+    status.includes("thinking") ||
+    status.includes("streaming") ||
+    status.includes("stopping")
+  );
 }
 
 function aiMessages(sections: AiSection[]): AiSection[] {
