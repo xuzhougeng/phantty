@@ -18,6 +18,7 @@ comptime {
     _ = @import("config.zig");
     _ = @import("file_backend.zig");
     _ = @import("file_explorer.zig");
+    _ = @import("input.zig");
     _ = @import("input_shortcuts.zig");
     _ = @import("link_open.zig");
     _ = @import("markdown_preview.zig");

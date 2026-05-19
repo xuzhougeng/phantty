@@ -265,7 +265,9 @@ fn readClipboardUnicodeText(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u
     while (data[len] != 0) : (len += 1) {}
     if (len == 0) return null;
 
-    return std.unicode.utf16LeToUtf8Alloc(allocator, data[0..len]) catch null;
+    const raw = std.unicode.utf16LeToUtf8Alloc(allocator, data[0..len]) catch return null;
+    defer allocator.free(raw);
+    return normalizeClipboardText(allocator, raw) catch null;
 }
 
 fn readClipboardAnsiText(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
@@ -277,7 +279,35 @@ fn readClipboardAnsiText(allocator: std.mem.Allocator, hmem: *anyopaque) ?[]u8 {
     while (data[len] != 0) : (len += 1) {}
     if (len == 0) return null;
 
-    return allocator.dupe(u8, data[0..len]) catch null;
+    return normalizeClipboardText(allocator, data[0..len]) catch null;
+}
+
+fn normalizeClipboardText(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, text.len);
+
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == '\r') {
+            try out.append(allocator, '\n');
+            i += 1;
+            if (i < text.len and text[i] == '\n') i += 1;
+            continue;
+        }
+
+        try out.append(allocator, text[i]);
+        i += 1;
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+test "clipboard text normalizes Windows newlines before paste encoding" {
+    const text = try normalizeClipboardText(std.testing.allocator, "a\r\nb\rc\nd");
+    defer std.testing.allocator.free(text);
+
+    try std.testing.expectEqualStrings("a\nb\nc\nd", text);
 }
 
 fn dibColorTableBytes(header: BitmapInfoHeader) usize {
