@@ -2454,6 +2454,10 @@ fn handleMouseButton(ev: win32_backend.MouseButtonEvent) void {
         const fb = win.getFramebufferSize();
         const xpos: f64 = @floatFromInt(ev.x);
         const ypos: f64 = @floatFromInt(ev.y);
+        if (overlays.updatePromptHitTest(xpos, ypos, @floatFromInt(fb.height))) {
+            overlays.openLatestRelease();
+            return;
+        }
         if (overlays.remoteKeyCopyHitTest(xpos, ypos, @floatFromInt(fb.height))) {
             _ = copyRemoteSessionKeyToClipboard();
             return;

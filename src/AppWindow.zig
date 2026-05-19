@@ -1061,6 +1061,7 @@ fn onWin32Resize(width: i32, height: i32) void {
     overlays.renderDebugOverlay(@floatFromInt(fb_width));
     overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
+    overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
     overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
 
     if (g_window) |w| w.swapBuffers();
@@ -1074,6 +1075,11 @@ fn resizeWindowToGrid() void {
     const win_w: i32 = @intFromFloat(content_w + leftPanelsWidth() + rightPanelsWidth() + padding * 2);
     const win_h: i32 = @intFromFloat(content_h + padding + (padding + tb));
     if (g_window) |w| w.setSize(win_w, win_h);
+}
+
+fn pollUpdateCheck(app: *App) void {
+    const result = app.consumeUpdateResult();
+    if (result.state != .idle) overlays.showUpdateCheckResult(result);
 }
 
 /// Reload config from disk and apply theme/font/cursor/etc. (used after UI writes config).
@@ -2840,6 +2846,7 @@ fn runMainLoop(self: *AppWindow) !void {
 
         gl_init.g_draw_call_count = 0;
         overlays.updateFps();
+        pollUpdateCheck(self.app);
 
         // Sync atlas textures to GPU if modified
         if (font.g_atlas != null) font.syncAtlasTexture(&font.g_atlas, &font.g_atlas_texture, &font.g_atlas_modified);
@@ -3019,6 +3026,7 @@ fn runMainLoop(self: *AppWindow) !void {
         overlays.renderDebugOverlay(@floatFromInt(fb_width));
         overlays.renderCloseShortcutConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderCopyToast(@floatFromInt(fb_width), @floatFromInt(fb_height));
+        overlays.renderUpdatePrompt(@floatFromInt(fb_width), @floatFromInt(fb_height));
         overlays.renderWindowCloseConfirm(@floatFromInt(fb_width), @floatFromInt(fb_height));
         renderImePreedit(win, fb_width, fb_height);
 

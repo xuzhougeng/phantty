@@ -21,6 +21,8 @@ const app_metadata = @import("../app_metadata.zig");
 const scrollbar_model = @import("../scrollbar_model.zig");
 const command_center_state = @import("../command_center_state.zig");
 const agent_history = @import("../agent_history.zig");
+const system_browser = @import("../system_browser.zig");
+const update_check = @import("../update_check.zig");
 
 const c = @cImport({
     @cInclude("glad/gl.h");
@@ -118,6 +120,16 @@ const COPY_TOAST_DURATION_MS: i64 = 1500;
 threadlocal var g_copy_toast_until_ms: i64 = 0;
 threadlocal var g_copy_toast_buf: [64]u8 = undefined;
 threadlocal var g_copy_toast_len: usize = 0;
+
+const UPDATE_PROMPT_DURATION_MS: i64 = 10000;
+const UPDATE_STATUS_DURATION_MS: i64 = 2500;
+threadlocal var g_update_prompt_until_ms: i64 = 0;
+threadlocal var g_update_prompt_buf: [128]u8 = undefined;
+threadlocal var g_update_prompt_len: usize = 0;
+threadlocal var g_update_prompt_url_buf: [256]u8 = undefined;
+threadlocal var g_update_prompt_url_len: usize = 0;
+threadlocal var g_update_prompt_clickable: bool = false;
+threadlocal var g_update_prompt_rect: ?DebugLineRect = null;
 
 const CLOSE_SHORTCUT_CONFIRM_TEXT = "Press Ctrl+Shift+W again to close Phantty";
 threadlocal var g_close_shortcut_confirm_until_ms: i64 = 0;
@@ -435,6 +447,11 @@ fn executeCommand(action: CommandAction) void {
             _ = AppWindow.input.copyRemoteSessionKeyToClipboard();
         },
         .show_version => showVersionToast(),
+        .check_for_updates => {
+            showUpdateCheckingToast();
+            if (AppWindow.g_app) |app| app.requestManualUpdateCheck();
+        },
+        .open_latest_release => openLatestRelease(),
     }
 }
 
@@ -3901,6 +3918,34 @@ fn showVersionToast() void {
     g_copy_toast_until_ms = std.time.milliTimestamp() + COPY_TOAST_DURATION_MS;
 }
 
+pub fn showUpdateCheckingToast() void {
+    showUpdatePrompt(.{ .state = .checking }, false);
+}
+
+pub fn showUpdateCheckResult(result: update_check.CheckResult) void {
+    if (result.state == .idle) return;
+    showUpdatePrompt(result, result.state == .update_available and result.release_url.len > 0);
+}
+
+fn showUpdatePrompt(result: update_check.CheckResult, clickable: bool) void {
+    var status_buf: [96]u8 = undefined;
+    const status = update_check.formatStatusMessage(&status_buf, result) catch return;
+    const msg = if (clickable)
+        std.fmt.bufPrint(&g_update_prompt_buf, "{s}  click to open", .{status}) catch return
+    else
+        std.fmt.bufPrint(&g_update_prompt_buf, "{s}", .{status}) catch return;
+
+    g_update_prompt_len = msg.len;
+    g_update_prompt_url_len = 0;
+    if (clickable) {
+        const url_len = @min(g_update_prompt_url_buf.len, result.release_url.len);
+        @memcpy(g_update_prompt_url_buf[0..url_len], result.release_url[0..url_len]);
+        g_update_prompt_url_len = url_len;
+    }
+    g_update_prompt_clickable = clickable;
+    g_update_prompt_until_ms = std.time.milliTimestamp() + if (clickable) UPDATE_PROMPT_DURATION_MS else UPDATE_STATUS_DURATION_MS;
+}
+
 pub fn showCloseShortcutConfirm(duration_ms: i64) void {
     g_close_shortcut_confirm_until_ms = std.time.milliTimestamp() + duration_ms;
 }
@@ -4020,6 +4065,67 @@ pub fn renderCopyToast(window_width: f32, window_height: f32) void {
         titlebar.renderTitlebarChar(@intCast(ch), x, y, text_color);
         x += titlebar.titlebarGlyphAdvance(@intCast(ch));
     }
+}
+
+pub fn renderUpdatePrompt(window_width: f32, window_height: f32) void {
+    _ = window_height;
+    g_update_prompt_rect = null;
+
+    const now = std.time.milliTimestamp();
+    if (now >= g_update_prompt_until_ms) return;
+    if (g_update_prompt_len == 0) return;
+
+    const text = g_update_prompt_buf[0..g_update_prompt_len];
+    const pad_h: f32 = 14;
+    const pad_v: f32 = 6;
+    const line_h = font.g_titlebar_cell_height + pad_v * 2;
+
+    var text_width: f32 = 0;
+    for (text) |ch| {
+        text_width += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
+
+    const bg_w = text_width + pad_h * 2;
+    const bg_x = @max(12, (window_width - bg_w) / 2);
+    const bg_y: f32 = 92;
+
+    const bg_color: [3]f32 = if (g_update_prompt_clickable) .{ 0.18, 0.14, 0.06 } else .{ 0.08, 0.13, 0.16 };
+    const text_color: [3]f32 = if (g_update_prompt_clickable) .{ 1.0, 0.82, 0.38 } else .{ 0.55, 0.85, 0.95 };
+    gl_init.renderQuad(bg_x, bg_y, bg_w, line_h, bg_color);
+    if (g_update_prompt_clickable) {
+        gl_init.renderQuad(bg_x, bg_y + line_h - 2, bg_w, 2, .{ 0.86, 0.48, 0.20 });
+        g_update_prompt_rect = .{ .x = bg_x, .y = bg_y, .w = bg_w, .h = line_h };
+    }
+
+    var x = bg_x + pad_h;
+    const y = bg_y + pad_v;
+    for (text) |ch| {
+        titlebar.renderTitlebarChar(@intCast(ch), x, y, text_color);
+        x += titlebar.titlebarGlyphAdvance(@intCast(ch));
+    }
+}
+
+pub fn updatePromptHitTest(xpos: f64, ypos: f64, window_height: f32) bool {
+    if (!g_update_prompt_clickable) return false;
+    if (std.time.milliTimestamp() >= g_update_prompt_until_ms) return false;
+    const rect = g_update_prompt_rect orelse return false;
+    const x: f32 = @floatCast(xpos);
+    const y_from_bottom = window_height - @as(f32, @floatCast(ypos));
+    return x >= rect.x and x <= rect.x + rect.w and
+        y_from_bottom >= rect.y and y_from_bottom <= rect.y + rect.h;
+}
+
+pub fn openLatestRelease() void {
+    const allocator = AppWindow.g_allocator orelse return;
+    var url_buf: [256]u8 = undefined;
+    const url = if (g_update_prompt_url_len > 0)
+        g_update_prompt_url_buf[0..g_update_prompt_url_len]
+    else if (AppWindow.g_app) |app|
+        app.copyLatestReleaseUrl(&url_buf) orelse update_check.latest_release_page_url
+    else
+        update_check.latest_release_page_url;
+    const hwnd = if (AppWindow.g_window) |w| w.hwnd else null;
+    _ = system_browser.openUrl(allocator, hwnd, url);
 }
 
 pub fn remoteKeyOverlayDismiss(key: []const u8) void {

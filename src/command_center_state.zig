@@ -23,6 +23,8 @@ pub const CommandAction = enum {
     toggle_maximize,
     copy_remote_key,
     show_version,
+    check_for_updates,
+    open_latest_release,
 };
 
 pub const CommandEntry = struct {
@@ -54,6 +56,8 @@ pub const command_entries = [_]CommandEntry{
     .{ .title = "Toggle Maximize", .detail = "Maximize or restore the window", .shortcut = "Alt+Enter", .action = .toggle_maximize },
     .{ .title = "Copy Remote Key", .detail = "Copy the active Phantty remote session key", .shortcut = "click Remote key", .action = .copy_remote_key },
     .{ .title = "Version", .detail = "Show Phantty version", .shortcut = app_metadata.version, .action = .show_version },
+    .{ .title = "Check for Updates", .detail = "Check GitHub Releases for a newer Phantty version", .shortcut = "", .action = .check_for_updates },
+    .{ .title = "Open Latest Release", .detail = "Open the latest Phantty GitHub Release", .shortcut = "", .action = .open_latest_release },
 };
 
 pub const CommandPaletteMode = enum {
@@ -223,6 +227,11 @@ test "command center includes New Agent action" {
 
 test "command center includes Select Agent History action" {
     try std.testing.expectEqual(CommandAction.select_agent_history, findCommandAction("Select Agent History"));
+}
+
+test "command center includes update check actions" {
+    try std.testing.expectEqual(CommandAction.check_for_updates, findCommandAction("Check for Updates"));
+    try std.testing.expectEqual(CommandAction.open_latest_release, findCommandAction("Open Latest Release"));
 }
 
 test "command center New Agent launch path forces agent mode when profiles exist" {
